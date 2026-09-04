@@ -1,0 +1,2520 @@
+<!DOCTYPE html>
+<html lang="cs">
+<head>
+  <meta charset="utf-8">
+  <meta name="viewport"
+        content="width=device-width, initial-scale=1, maximum-scale=1, user-scalable=no, viewport-fit=cover">
+  <title>Piškvorky — Hry v prohlížeči</title>
+  <!-- Pojistka pro případ, že se sdílený styl nenačte (jiný server,
+       špatný MIME typ, offline). Stránka pak není holý bílý dokument. -->
+  <style>
+    :root {
+      --bg:   #0f1115;
+      --text: #e6e9ef;
+      --font: system-ui, -apple-system, "Segoe UI", Roboto, "Helvetica Neue", Arial, sans-serif;
+    }
+    html { color-scheme: dark; background: #0f1115; }
+    body {
+      margin: 0;
+      background: var(--bg);
+      color: var(--text);
+      font-family: var(--font);
+    }
+  </style>
+  <link rel="stylesheet" href="../shared/style.css">
+  <style>
+    /* Barvy, které jsou jen tady. Do sdílené palety nepatří — dva hráči
+       se nikde jinde ve sbírce nevyskytují. */
+    :root {
+      /* Symboly hráčů. Ani jeden nesmí být zelený: zelená je v celé
+         sbírce barva výběru a rozhodnutí (kurzor, aktivní přepínač),
+         a kdyby ji nosil jeden z hráčů, splynulo by mu pole s kurzorem.
+         Modrá a jantarová se od sebe liší i odstínem, i jasem — poznají
+         se tedy i na displeji, který barvy posouvá, a při barvosleposti
+         červená/zelená (nejčastější) zůstávají obě čitelné. */
+      --hrac-x: #60a5fa;
+      --hrac-o: #fbbf24;
+
+      /* Meze velikosti jednoho pole. Skutečnou hodnotu mezi nimi počítá
+         JS z rozměru okna, ale prahy patří sem: jediné, co je rozlišuje,
+         je způsob ovládání, a na to se ptá média dotaz. JS si je odsud
+         přečte, takže nastavené jsou jen na jednom místě.
+
+         Strop je vyšší než u min (56 px), protože nejmenší deska má tři
+         pole na stranu. Při 56 px by celá hra měřila 172 px a na monitoru
+         by vypadala jako poštovní známka; při 72 px je z ní čtverec, na
+         který se dá dívat. Výš už symboly začnou být neohrabaně velké. */
+      --bunka-min: 28px;
+      --bunka-max: 72px;
+    }
+
+    /* Prst potřebuje větší terč než kurzor myši — 44 px je spodní hranice
+       doporučovaná pro dotykové cíle. Deska se kvůli tomu na telefonu do
+       okna nemusí vejít; od zmenšování polí je tu důležitější, aby se
+       dala trefit, a přetečení řeší rolování v .deska-obal. */
+    @media (pointer: coarse) {
+      :root {
+        --bunka-min: 44px;
+      }
+    }
+
+    /* Na herní stránce nechceme přiblížení dvojklikem ani tažení
+       stránky při klepání do mřížky. */
+    html, body {
+      overscroll-behavior: none;
+      -webkit-text-size-adjust: 100%;
+    }
+
+    /* Herní stránka je užší než rozcestník a drží se uprostřed. */
+    .wrap {
+      max-width: 900px;
+      margin-inline: auto;
+    }
+
+    main {
+      display: flex;
+      flex-direction: column;
+      align-items: center;
+      touch-action: manipulation;     /* zabije double-tap zoom */
+      user-select: none;
+      -webkit-user-select: none;
+      -webkit-touch-callout: none;
+    }
+
+    /* Sloupec hry — šířku určuje deska, takže se HUD i ovládání
+       zarovnají na její levý okraj. Jakmile deska přeroste sloupec
+       stránky, zůstane všechno ostatní na šířce <main> a ven jde jenom
+       deska; viz .deska-obal.
+
+       max-width je tu podstatné: bez něj by fit-content narostl na šířku
+       desky, a ta bývá širší než okno. Přetekla by celá stránka i
+       s hlavičkou a tlačítky. */
+    .hra {
+      display: flex;
+      flex-direction: column;
+      width: fit-content;
+      max-width: 100%;
+    }
+
+    /* HUD nad deskou. Mřížka s pevnými sloupci, ne volný text
+       s mezerami: každý údaj má vlastní sloupec, takže přibývající
+       cifra neposune sousedy do stran. */
+    .hud {
+      display: grid;
+      grid-template-columns: repeat(3, max-content);
+      gap: 0.3rem 1.5rem;
+      margin-bottom: 0.75rem;
+      font-family: var(--font-mono);
+      font-variant-numeric: tabular-nums;   /* pojistka, kdyby --font-mono
+                                               spadlo na náhradní písmo */
+      font-size: 0.9rem;
+      color: var(--text-dim);
+    }
+
+    .hud__cislo {
+      display: inline-block;
+      text-align: right;
+      color: var(--text);
+      font-weight: 600;
+    }
+
+    /* Šířka podle nejdelší hodnoty, jaká může padnout: tahů je na
+       největší desce 225, řada nejvýš 6. Bez pevné šířky by se s každou
+       přibývající cifrou posunulo všechno napravo od počítadla. */
+    .hud__cislo--tahu { min-width: 3ch; }
+
+    /* Kdo je na tahu. Symbol nese barvu hráče, ne jen písmeno — u hry
+       pro dva u jednoho zařízení je to ten nejdůležitější údaj na
+       stránce a má se poznat koutkem oka. Pevná šířka drží počítadlo
+       vpravo na místě i po výhře, kdy se sem píše pomlčka. */
+    .hud__hrac {
+      display: inline-block;
+      min-width: 1.5ch;
+      font-weight: 700;
+      color: var(--text);
+    }
+
+    .hud__hrac--x { color: var(--hrac-x); }
+    .hud__hrac--o { color: var(--hrac-o); }
+
+    /* Na úzkém displeji by tři sloupce přetekly. */
+    @media (max-width: 480px) {
+      .hud {
+        grid-template-columns: repeat(2, max-content);
+      }
+    }
+
+    /* Deska a její rám.
+
+       align-self je tu podstatné hned dvakrát. Obal je flex položka
+       v .hra, takže by se bez něj roztáhl na šířku nejširšího sourozence
+       a vedle mřížky by v rámu zbyl pruh pozadí. A hlavně: se
+       zarovnáním na střed smí obal ze sloupce vystoupit — přeteče na
+       obě strany stejně, takže deska zůstane vycentrovaná v okně,
+       i když je širší než max-width společného .wrap.
+
+       Přesnou šířku obalu dopočítá JS: je to šířka mřížky, nejvýš však
+       šířka okna bez okraje. Proto ji nastavuje jako width, ne jen jako
+       max-width — fit-content by se zastavil na šířce sloupce a zbytek
+       desky by se zbytečně roloval. */
+    .deska-obal {
+      align-self: center;
+      display: flex;
+      border: 1px solid var(--border);
+
+      /* Záložní strop, než JS napoprvé změří okno. */
+      max-width: 100%;
+      border-radius: var(--radius-sm);
+      background: var(--board);
+
+      /* Když se deska při zvolené velikosti pole do okna nevejde,
+         neroluje se stránka, ale tenhle obal — a to v obou směrech. */
+      overflow: auto;
+
+      /* Dojetí na kraj desky nemá strhnout stránku pod ní ani spustit
+         gesto „přetáhnout pro obnovení“. */
+      overscroll-behavior: contain;
+      touch-action: pan-x pan-y;
+    }
+
+    /* Mřížka polí. Počet sloupců a stranu pole nastavuje JS podle
+       velikosti okna — v CSS by to byla jen mrtvá čísla. */
+    .deska {
+      display: grid;
+      grid-auto-rows: var(--cell);
+      gap: var(--mezera);
+      font-family: var(--font-mono);
+      font-weight: 700;
+      line-height: 1;
+
+      /* Deska je flex položka v rolovacím obalu. Bez tohohle by ji flex
+         při nedostatku místa smrskl a pole by se rozjela mimo své
+         sloupce — místo aby obal začal rolovat. */
+      flex: 0 0 auto;
+    }
+
+    /* Jedno pole. Čtverec drží grid-auto-rows z JS, takže tady stačí
+       vypnout vše, co si <button> nese s sebou. */
+    .bunka {
+      display: flex;
+      align-items: center;
+      justify-content: center;
+      padding: 0;
+      border: 0;
+      border-radius: 3px;
+      background: var(--bg-elev);
+      color: var(--text);
+      font: inherit;
+      cursor: pointer;
+      transition: background 0.1s ease, opacity 0.15s ease;
+
+      /* Světlá hrana nahoře dělá z pole vystouplý knoflík — deska pak
+         čte jako mřížka tlačítek, ne jako tabulka. */
+      box-shadow: inset 0 1px 0 rgba(255, 255, 255, 0.06);
+    }
+
+    .bunka--x { color: var(--hrac-x); }
+    .bunka--o { color: var(--hrac-o); }
+
+    /* Obsazené pole na hover reagovat nesmí — už se s ním nedá nic
+       dělat a bliknutí by mátlo. Stejně tak nic nereaguje, dokud počítá
+       AI: klik by se v tu chvíli zahodil a zvýrazněné pole by sliboval
+       tah, který nepřijde. */
+    @media (hover: hover) {
+      .deska:not(.deska--konec):not(.deska--mysli) .bunka:not(.bunka--x):not(.bunka--o):hover {
+        background: var(--bg-elev-hover);
+      }
+    }
+
+    /* Pole vybrané klávesnicí. Je vidět od začátku, i než se hráč
+       klávesnice dotkne — jinak by nebylo poznat, kam šipky míří.
+
+       Obrys musí ležet uvnitř pole: mezery mezi poli jsou dva pixely,
+       takže by odsazený rámeček přetekl přes sousedy. */
+    .bunka--kurzor {
+      outline: 2px solid var(--accent);
+      outline-offset: -2px;
+    }
+
+    /* ---------- náhled tahu ----------
+
+       Prázdné pole pod kurzorem (a pod myší) ukáže bledý symbol toho,
+       kdo je na tahu. U hry pro dva u jednoho zařízení je to nejrychlejší
+       odpověď na otázku „čí je to teď“ — přímo tam, kam se hráč dívá,
+       takže nemusí očima na HUD a zpátky. Zároveň je z toho vidět, že
+       kliknutí něco položí, ještě než se klikne.
+
+       Symbol říká deska přes data-na-tahu, ne jednotlivá pole: mění se
+       každým tahem a přepisovat kvůli němu dvě stovky polí by bylo
+       zbytečné. Ghost se kreslí jen na volných polích, jen do konce hry
+       a jen když je na tahu člověk — během počítání AI by ukazoval cizí
+       symbol na místě, kam hráč stejně nesmí položit. */
+    .bunka::after {
+      opacity: 0.35;
+    }
+
+    .deska[data-na-tahu="1"] .bunka::after { color: var(--hrac-x); }
+    .deska[data-na-tahu="2"] .bunka::after { color: var(--hrac-o); }
+
+    .deska:not(.deska--konec):not(.deska--mysli)[data-na-tahu="1"] .bunka--kurzor:not(.bunka--x):not(.bunka--o)::after {
+      content: 'X';
+    }
+
+    .deska:not(.deska--konec):not(.deska--mysli)[data-na-tahu="2"] .bunka--kurzor:not(.bunka--x):not(.bunka--o)::after {
+      content: 'O';
+    }
+
+    /* Na dotykovém displeji hover neexistuje a prohlížeč ho po klepnutí
+       zamrzle drží na posledním poli — náhled by tam pak visel i po
+       položení symbolu. Proto jen tam, kde se opravdu najíždí. */
+    @media (hover: hover) {
+      .deska:not(.deska--konec):not(.deska--mysli)[data-na-tahu="1"] .bunka:not(.bunka--x):not(.bunka--o):hover::after {
+        content: 'X';
+      }
+
+      .deska:not(.deska--konec):not(.deska--mysli)[data-na-tahu="2"] .bunka:not(.bunka--x):not(.bunka--o):hover::after {
+        content: 'O';
+      }
+    }
+
+    /* Po konci hry se nedá klikat nikam, ať kurzor nelže. Během počítání
+       AI se taky klikat nedá, ale z jiného důvodu — proto jiný kurzor. */
+    .deska--konec .bunka {
+      cursor: default;
+    }
+
+    .deska--mysli .bunka {
+      cursor: progress;
+    }
+
+    /* A po konci hry zhasne i výběr. Šipky tehdy patří zpátky stránce,
+       takže výběr stejně nikam neukazuje — a hlavně: vítězný tah je vždy
+       ten poslední, tedy přesně to pole, na kterém výběr stojí. Zelený
+       obrys leží ve stejném dvoupixelovém proužku jako rámeček vítězné
+       řady a přebil by ho; jedno pole řady by pak svítilo jinou barvou
+       než zbytek. */
+    .deska--konec .bunka--kurzor {
+      outline: none;
+    }
+
+    /* Vítězná řada. Rámeček bere barvu z currentColor, tedy ze symbolu
+       hráče — nemusí se tedy nikde říkat, kdo vyhrál, obtáhne se to
+       samo jeho barvou.
+
+       Zbytek desky se ztlumí, aby řada vystoupila. Jen při výhře:
+       u remízy by ztmavlo úplně všechno a nebylo by to k ničemu. */
+    .bunka--vyhra {
+      background: var(--bg-elev-hover);
+      box-shadow: inset 0 0 0 2px currentColor;
+    }
+
+    .deska--vyhra .bunka:not(.bunka--vyhra) {
+      opacity: 0.45;
+    }
+
+    /* Hláška pod deskou. Pevná výška, i když je text prázdný: bez ní by
+       se s každou změnou stavu posunulo všechno pod deskou a při dalším
+       přepočtu by se změnila i velikost polí. */
+    .stav {
+      min-height: 3rem;
+      margin: 0.75rem 0 0;
+      color: var(--text-dim);
+      font-size: 0.9rem;
+    }
+
+    .stav--konec {
+      color: var(--text);
+      font-weight: 600;
+    }
+
+    /* AI počítá. Tečka vedle textu pomalu pulsuje — bez pohybu by se
+       nedalo poznat, jestli se něco děje, nebo jestli hra zamrzla.
+       Sdílený styl vypíná animace při prefers-reduced-motion, takže se
+       tečka tam prostě jen rozsvítí. */
+    .stav--mysli {
+      color: var(--accent);
+    }
+
+    .stav__tecka {
+      display: inline-block;
+      width: 0.5em;
+      height: 0.5em;
+      margin-right: 0.4em;
+      border-radius: 50%;
+      background: currentColor;
+      animation: tep 1s ease-in-out infinite;
+    }
+
+    @keyframes tep {
+      0%, 100% { opacity: 0.25; }
+      50%      { opacity: 1; }
+    }
+
+    /* Tlačítka pod deskou. Zarovnaná doleva na okraj desky; bez
+       align-self by se ve sloupci roztáhla na její plnou šířku. */
+    .tlacitka {
+      display: flex;
+      flex-wrap: wrap;
+      gap: 0.5rem;
+      align-self: flex-start;
+    }
+
+    /* ---------- nastavení pod deskou ----------
+       Je vidět pořád, i rozehrané — změna volby rozdá novou desku. */
+    .nastaveni {
+      margin-top: 1.25rem;
+    }
+
+    .nastaveni__popis {
+      display: block;
+      margin-bottom: 0.25rem;
+      color: var(--text-dim);
+      font-size: 0.68rem;
+      font-weight: 600;
+      text-transform: uppercase;
+      letter-spacing: 0.08em;
+    }
+
+    .prepinace {
+      display: flex;
+      flex-wrap: wrap;
+      gap: 0.3rem;
+    }
+
+    .prepinac {
+      flex: 1 1 0;
+      min-width: 5.5rem;
+      display: flex;
+      flex-direction: column;
+      align-items: center;
+      gap: 0.05rem;
+      padding: 0.35rem 0.25rem;
+      border: 1px solid var(--border);
+      border-radius: var(--radius-sm);
+      background: var(--bg-elev);
+      color: var(--text-dim);
+      font: inherit;
+      line-height: 1.25;
+      cursor: pointer;
+      transition: background 0.15s ease, border-color 0.15s ease, color 0.15s ease;
+    }
+
+    .prepinac:hover {
+      background: var(--bg-elev-hover);
+      border-color: var(--border-hover);
+      color: var(--text);
+    }
+
+    /* Aktivní volba — jiná barva, rám i výplň, ne jen odstín textu. */
+    .prepinac[aria-checked="true"] {
+      background: var(--accent-soft);
+      border-color: var(--accent);
+      color: var(--accent);
+    }
+
+    .prepinac__nazev {
+      font-size: 0.78rem;
+      font-weight: 600;
+    }
+
+    .prepinac__detail {
+      font-family: var(--font-mono);
+      font-size: 0.66rem;
+      opacity: 0.8;
+    }
+
+    /* ---------- vlastní rozměr ---------- */
+    .pole-rada {
+      display: flex;
+      flex-wrap: wrap;
+      align-items: flex-end;
+      gap: 0.5rem 1rem;
+    }
+
+    .pole {
+      display: flex;
+      flex-direction: column;
+      gap: 0.2rem;
+    }
+
+    .pole__popis {
+      color: var(--text-dim);
+      font-size: 0.72rem;
+    }
+
+    .pole__vstup {
+      padding: 0.4rem 0.55rem;
+      border: 1px solid var(--border);
+      border-radius: var(--radius-sm);
+      background: var(--bg-elev);
+      color: var(--text);
+      font: inherit;
+      font-family: var(--font-mono);
+      font-size: 0.9rem;
+    }
+
+    .pole__vstup:hover {
+      border-color: var(--border-hover);
+    }
+
+    .pole__vstup--cislo {
+      width: 5rem;
+    }
+
+    /* Poznámka o povolených délkách řady. Vlastní řádek pod poli, ať se
+       s nimi nepere o šířku na telefonu. Text píše JS, protože závisí na
+       zvolené velikosti desky. */
+    .pole__pozn {
+      flex-basis: 100%;
+      margin: 0.15rem 0 0;
+      color: var(--text-dim);
+      font-size: 0.8rem;
+    }
+
+    /* Legenda ovládání pod deskou. */
+    .ovladani {
+      display: grid;
+      grid-template-columns: max-content 1fr;
+      gap: 0.35rem 0.9rem;
+      align-items: center;
+      margin: 1.25rem 0 0;
+      font-size: 0.85rem;
+    }
+
+    .ovladani dt {
+      justify-self: start;
+      display: flex;
+      gap: 0.15rem;
+      align-items: center;
+      flex-wrap: wrap;
+    }
+
+    .ovladani dd {
+      justify-self: start;
+      margin: 0;
+      color: var(--text-dim);
+    }
+
+    .ovladani kbd {
+      padding: 0.1rem 0.35rem;
+      border: 1px solid var(--border-hover);
+      border-radius: 4px;
+      background: var(--bg-elev);
+      font-family: var(--font-mono);
+      font-size: 0.9em;
+      line-height: 1.4;
+      color: var(--text);
+    }
+  </style>
+</head>
+<body>
+  <div class="wrap">
+
+    <a class="back-link" href="../">← Zpět na rozcestník</a>
+
+    <header class="site-header">
+      <h1>Piškvorky</h1>
+      <p>Proti počítači, nebo ve dvou u jednoho zařízení. Střídavě
+         pokládejte symboly; vyhrává ten, kdo první srovná souvislou řadu —
+         vodorovně, svisle nebo šikmo. Velikost desky, délku řady i sílu
+         soupeře si nastavte pod deskou.</p>
+    </header>
+
+    <main>
+      <div class="hra">
+        <!-- Kdo je na tahu, hlásí i odečítač obrazovky: je to jediná
+             informace, kterou hráč mezi tahy potřebuje, a na desce samé
+             se nedá nahmatat. Živá oblast je celý <span>, ať se přečte
+             „Na tahu: O“, ne holé „O“. -->
+        <div class="hud">
+          <span aria-live="polite">Na tahu: <strong class="hud__hrac" id="hud-hrac">X</strong></span>
+          <span>Tahů: <strong class="hud__cislo hud__cislo--tahu" id="hud-tahu">0</strong></span>
+          <span>Řada: <strong class="hud__cislo" id="hud-rada">3</strong></span>
+        </div>
+
+        <!-- Pole staví JS podle zvolené velikosti. role="group" a ne
+             "grid": mřížka podle ARIA chce řádky a buňky, a to by tu byla
+             vrstva navíc jen kvůli názvu role. Pohyb šipkami po desce
+             řeší JS sám. -->
+        <div class="deska-obal">
+          <div class="deska" id="deska" role="group" aria-label="Hrací deska"></div>
+        </div>
+
+        <p class="stav" id="stav" aria-live="polite"></p>
+
+        <div class="tlacitka">
+          <button class="btn btn--primary" id="btn-nova" type="button">Nová hra</button>
+          <button class="btn" id="btn-zpet" type="button">Krok zpět</button>
+        </div>
+
+        <!-- Přepínače staví JS ze seznamů, ať jsou popisy voleb jen na
+             jednom místě. -->
+        <div class="nastaveni">
+          <span class="nastaveni__popis" id="popis-souper">Soupeř</span>
+          <div class="prepinace" role="radiogroup" aria-labelledby="popis-souper" id="volba-souper"></div>
+        </div>
+
+        <!-- Kdo začíná. Ve hře dvou lidí se skrývá: X začíná podle
+             pravidel a oba hráči jsou u stejného stolu, takže není co
+             volit. -->
+        <div class="nastaveni" id="blok-zacina">
+          <span class="nastaveni__popis" id="popis-zacina">Začíná</span>
+          <div class="prepinace" role="radiogroup" aria-labelledby="popis-zacina" id="volba-zacina"></div>
+        </div>
+
+        <div class="nastaveni">
+          <span class="nastaveni__popis" id="popis-deska">Deska</span>
+          <div class="prepinace" role="radiogroup" aria-labelledby="popis-deska" id="volba-deska"></div>
+        </div>
+
+        <div class="nastaveni">
+          <span class="nastaveni__popis" id="popis-vlastni">Vlastní rozměr</span>
+          <div class="pole-rada">
+            <label class="pole">
+              <span class="pole__popis">Velikost desky</span>
+              <input class="pole__vstup pole__vstup--cislo" id="vstup-velikost"
+                     type="number" min="3" max="15" step="1" inputmode="numeric">
+            </label>
+            <label class="pole">
+              <span class="pole__popis">Symbolů v řadě</span>
+              <select class="pole__vstup" id="vstup-rada"></select>
+            </label>
+            <p class="pole__pozn" id="pozn-rada"></p>
+          </div>
+        </div>
+
+        <dl class="ovladani">
+          <dt><kbd>klik</kbd></dt>
+          <dd>položí symbol hráče, který je na tahu</dd>
+          <dt><kbd>←</kbd><kbd>↑</kbd><kbd>↓</kbd><kbd>→</kbd></dt>
+          <dd>posunou výběr po desce</dd>
+          <dt><kbd>mezerník</kbd> <kbd>Enter</kbd></dt>
+          <dd>položí symbol na vybrané pole</dd>
+          <dt><kbd>Z</kbd></dt>
+          <dd>vezme tah zpět; proti AI rovnou dvojici tahů, opakovaně i víc</dd>
+          <dt><kbd>N</kbd></dt>
+          <dd>nová hra</dd>
+        </dl>
+      </div>
+    </main>
+
+  </div>
+
+<script>
+(function () {
+  'use strict';
+
+  /* Meze velikosti pole jsou v CSS (--bunka-min, --bunka-max), protože
+     je rozlišuje média dotaz (pointer: coarse). Tyhle hodnoty se použijí
+     jen tehdy, když se proměnná nedá přečíst. */
+  var CELL_MIN_ZALOHA = 28;
+  var CELL_MAX_ZALOHA = 72;
+
+  var MEZERA     = 2;      // px mezi poli — skrz ně prosvítá deska
+  var REZERVA    = 24;     // ať se deska nelepí na spodek okna
+  var OKRAJ_OKNA = 16;     // a ani na boky, kam smí vystoupit ze sloupce
+
+  /* Kolik výšky okna dostane deska. Je to jednak podlaha rozpočtu —
+     nafoukne desku i tam, kde by podle měření nezbylo nic — jednak strop
+     rolovacího obalu, takže obojí drží stejné číslo. Kdyby se lišila,
+     deska by se buď rolovala uvnitř obalu, ačkoliv byla spočítaná tak,
+     aby se vešla, nebo by naopak nechala kus okna ležet ladem. */
+  var PODIL_VYSKY    = 0.75;
+  var OBAL_MIN_VYSKA = 200;
+
+  var PODIL_PISMA = 0.62;  // výška symbolu vůči straně pole
+
+  /* ---------------------------------------------------------------
+     Meze nastavení.
+
+     Krátká řada na velké desce není hra, ale formalita: kdo začíná, má
+     tolik volných směrů, že se prakticky nedá zastavit (tři v řadě na
+     desce 9×9 vyhraje první hráč skoro vždy). Proto je délka řady svázaná
+     s velikostí desky — čím větší deska, tím delší řada je nejméně
+     potřeba.
+
+     Vzorec je hrubý, ale drží poměr, na kterém stojí známé varianty:
+     3 na desce 3, 4 na desce 5 až 6, 5 na desce 9 až 12. Nad šest se
+     nejde: delší řada už se na desce hledá hůř, než se staví.
+
+     Ze stropu K_MAX plyne i největší povolená deska. Pro velikost 16 by
+     vzorec chtěl sedm v řadě, a to už povolené není — kdyby se velikost
+     nezastavila na 15, zbyla by nabídka délek prázdná. */
+  var K_MIN = 3;
+  var K_MAX = 6;
+
+  var VELIKOST_MIN = 3;
+  var VELIKOST_MAX = 15;   // = největší velikost, pro kterou vyjde kMin <= K_MAX
+
+  function kMin(velikost) {
+    return Math.max(K_MIN, Math.ceil(velikost / 3) + 1);
+  }
+
+  /* Delší řada, než je strana desky, by se nikam nevešla — vodorovně ani
+     svisle. Na malých deskách proto strop stahuje velikost, ne K_MAX. */
+  function kMax(velikost) {
+    return Math.min(K_MAX, velikost);
+  }
+
+  function kPlatne(velikost, k) {
+    return k >= kMin(velikost) && k <= kMax(velikost);
+  }
+
+  /* ---------------------------------------------------------------
+     Předvolby desky.
+
+     Seznam je jediným zdrojem popisků i platných hodnot při načítání
+     z úložiště. id se nesmí měnit, je to klíč v localStorage.
+
+     Poslední předvolba (15×15 na 5) vzorec výše porušuje — ten by tady
+     chtěl šest v řadě. Je to schválně: přesně tohle je gomoku, hraje se
+     tak sto let a stojí za to ho nabídnout pod vlastním jménem. Vzorec
+     hlídá kombinace, které si hráč složí sám; známou variantu z nabídky
+     vyhazovat nebudeme.
+
+     Položka 'vlastni' rozměry nemá — ty si drží proměnná vlastni níž
+     a přepínač je jen applikuje. Kdyby je nesla i tahle položka, byly by
+     v paměti dvakrát a jedna kopie by se dřív nebo později rozešla. */
+  var PREDVOLBY = [
+    { id: 'p3',      nazev: '3×3',     velikost:  3, k: 3 },
+    { id: 'p5',      nazev: '5×5',     velikost:  5, k: 4 },
+    { id: 'p9',      nazev: '9×9',     velikost:  9, k: 5 },
+    { id: 'p15',     nazev: '15×15',   velikost: 15, k: 5 },
+    { id: 'vlastni', nazev: 'Vlastní' }
+  ];
+
+  var VYCHOZI_VOLBA = 'p3';
+
+  // výchozí obsah polí pro vlastní rozměr; kPlatne(7, 4) je pravda
+  var VYCHOZI_VLASTNI = { velikost: 7, k: 4 };
+
+  /* ---------------------------------------------------------------
+     Soupeř.
+
+     hloubka  — kolik půltahů dopředu se prohledává
+     nahoda   — pravděpodobnost, že se místo nejlepšího tahu zahraje
+                náhodný kandidát
+     doKonce  — na malé desce (do 16 polí) se místo omezené hloubky
+                dohledá až do konce partie
+
+     doKonce má jen silná úroveň. Slabá a střední mají hloubku zadanou
+     napevno a měly by ji mít i na tříkrát třech — kdyby i ony hrály
+     malou desku do konce, byly by na ní obě dokonalé a rozdíl mezi
+     všemi třemi úrovněmi by na 3×3 zmizel. Právě tam přitom začátečník
+     hraje nejčastěji.
+
+     Ani slabá úroveň ale nikdy nepřehlédne řadu délky kVyhre-1 — svoji
+     ani soupeřovu, viz vyhravajiciTah v Ai.tah. Náhoda se rozhoduje až
+     mezi tahy, o které nejde: přehlédnutá výhra nebo neubráněná pětka
+     je z pohledu hráče rozbitá hra, ne mírnější obtížnost. */
+  var SOUPERI = [
+    { id: 'dva',     nazev: 'Dva hráči', detail: 'u zařízení' },
+    { id: 'slaba',   nazev: 'AI slabá',  detail: 'občas chybuje', hloubka: 1, nahoda: 0.30 },
+    { id: 'stredni', nazev: 'AI střední', detail: 'poctivá',      hloubka: 2, nahoda: 0 },
+    { id: 'silna',   nazev: 'AI silná',  detail: 'na 3×3 neprohraje', hloubka: 4, nahoda: 0, doKonce: true }
+  ];
+
+  var VYCHOZI_SOUPER = 'dva';
+
+  /* Kdo začíná. X táhne první podle pravidel hry, takže se tady ve
+     skutečnosti volí, kdo hraje za X — na to se ale nikdo neptá takhle,
+     ptá se „začínám já, nebo on“. */
+  var ZACATKY = [
+    { id: 'ty', nazev: 'Ty', detail: 'hraješ X' },
+    { id: 'ai', nazev: 'AI', detail: 'hraješ O' }
+  ];
+
+  var VYCHOZI_ZACATEK = 'ty';
+
+  var KLIC_VOLBA   = 'piskvorky:volba';
+  var KLIC_VLASTNI = 'piskvorky:vlastni';   // "velikost:řada", třeba "7:4"
+  var KLIC_SOUPER  = 'piskvorky:souper';
+  var KLIC_ZACINA  = 'piskvorky:zacina';
+
+  /* Symboly hráčů. Index odpovídá hodnotě v desce, takže se na ně dá
+     sáhnout přímo číslem hráče. Písmena, ne obrázkové znaky (✕, ○):
+     ta v některých písmech chybí nebo mají jinou optickou velikost než
+     zbytek, a v mřížce by pak jeden hráč vypadal drobnější než druhý. */
+  var ZNAKY = ['', 'X', 'O'];
+  var NAZVY = ['prázdné', 'křížek', 'kolečko'];
+
+  /* Prodleva před spuštěním výpočtu AI. Není to zdržování naoko: výpočet
+     běží na hlavním vlákně a než začne, musí prohlížeč stihnout vykreslit
+     hlášku „AI přemýšlí“ a symbol, který hráč právě položil. Bez odkladu
+     by se obojí objevilo až spolu s hotovým tahem AI, tedy nikdy.
+
+     Schválně ne requestAnimationFrame ani requestIdleCallback: obojí se
+     v neaktivní záložce zastaví nebo odloží o vteřiny, takže by hra
+     v přepnuté kartě přestala odpovídat. setTimeout běží dál. */
+  var PROSTOJ_AI = 140;
+
+  /* ---------------------------------------------------------------
+     Řada na desce.
+
+     Jediná definice toho, co je řada, pro celou hru — čte odsud
+     vyhodnocení tahu, zvýraznění vítězné řady i celá AI. Kdyby si to
+     kterákoliv z nich počítala po svém, rozešly by se při prvním zásahu
+     do pravidel a hra by lhala buď hráči, nebo sama sobě.
+
+     Směry jsou čtyři, ne osm: každá přímka se prochází na obě strany
+     naráz, takže by druhá polovina osmi směrů počítala totéž pozpátku.
+
+     Deska se sem předává jako parametr, ne přes globální game: AI počítá
+     nad vlastní pracovní kopií a se stavem hry na obrazovce nesmí mít
+     nic společného.
+     --------------------------------------------------------------- */
+  var SMERY = [
+    [1,  0],   // vodorovně
+    [0,  1],   // svisle
+    [1,  1],   // diagonála ↘
+    [1, -1]    // diagonála ↗
+  ];
+
+  /* Kolik polí ve směru (dx, dy) od (x, y) nese symbol hrac. Výchozí
+     pole se nepočítá — vrací se délka „přívěsku“, ne celého úseku. */
+  function pocetSmerem(pole, cols, rows, x, y, dx, dy, hrac) {
+    var n = 0;
+    var cx = x + dx;
+    var cy = y + dy;
+
+    while (cx >= 0 && cy >= 0 && cx < cols && cy < rows &&
+           pole[cy * cols + cx] === hrac) {
+      n++;
+      cx += dx;
+      cy += dy;
+    }
+
+    return n;
+  }
+
+  /* Vyhrál právě položený tah na poli i? Prochází se jen čtyři přímky
+     vedoucí tímhle polem, ne celá deska: řada, která vznikla, tímhle
+     polem musí projít — jinak by existovala už před tahem a hra by
+     tehdy skončila. Kontrola tak stojí nanejvýš pár desítek porovnání
+     bez ohledu na to, jak je deska velká. */
+  function jeVyhraPo(pole, cols, rows, k, i) {
+    var x = i % cols;
+    var y = (i / cols) | 0;
+    var hrac = pole[i];
+
+    for (var d = 0; d < SMERY.length; d++) {
+      var dx = SMERY[d][0];
+      var dy = SMERY[d][1];
+
+      if (1 + pocetSmerem(pole, cols, rows, x, y, dx, dy, hrac)
+            + pocetSmerem(pole, cols, rows, x, y, -dx, -dy, hrac) >= k) {
+        return true;
+      }
+    }
+
+    return false;
+  }
+
+  /* Totéž, ale se souřadnicemi — pro zvýraznění. Vrací celý souvislý
+     úsek, ne prvních k polí: řada bývá po dotažení delší (tah doprostřed
+     dvou kratších úseků) a zvýraznit se má ta, kterou hráč na desce
+     vidí. Body vycházejí rovnou v pořadí podél směru, protože se skládají
+     od jednoho konce úseku ke druhému. */
+  function radaPresPole(pole, cols, rows, k, i) {
+    var x = i % cols;
+    var y = (i / cols) | 0;
+    var hrac = pole[i];
+
+    for (var d = 0; d < SMERY.length; d++) {
+      var dx = SMERY[d][0];
+      var dy = SMERY[d][1];
+      var vzad  = pocetSmerem(pole, cols, rows, x, y, -dx, -dy, hrac);
+      var vpred = pocetSmerem(pole, cols, rows, x, y,  dx,  dy, hrac);
+
+      if (vzad + 1 + vpred < k) continue;
+
+      var body = [];
+      for (var n = -vzad; n <= vpred; n++) {
+        body.push({ x: x + n * dx, y: y + n * dy });
+      }
+      return body;
+    }
+
+    return null;
+  }
+
+  /* ===============================================================
+     AI
+
+     Minimax s alfa-beta ořezáváním. Na malé desce se dohledá do konce
+     partie a hraje se dokonale; na velké se hloubka omezí a listy se
+     ohodnotí heuristicky.
+
+     Celý modul pracuje nad vlastní kopií desky a o zbytku hry neví nic —
+     dostane pozici a vrátí index pole. Díky tomu se dá pustit i mimo
+     rozehranou hru, což využívá test na konci souboru.
+     =============================================================== */
+  var Ai = (function () {
+
+    /* Hodnota vyhrané partie. Musí být řádově nad čímkoliv, co může
+       vrátit heuristika — jinak by se dala pozice s několika otevřenými
+       řadami „vyvážit“ proti skutečné prohře. */
+    var VYHRA = 1e9;
+
+    /* Ohodnocení jednoho souvislého úseku podle délky. Roste strmě:
+       o úsecích rozhoduje především délka, otevřenost je až druhé
+       kritérium. */
+    var ZAKLAD = [0, 1, 20, 400, 8000, 160000];
+
+    /* Úsek délky kVyhre-1 otevřený z obou stran je nezastavitelný —
+       soupeř může zavřít jen jeden konec a druhým se řada dotáhne.
+       Musí tedy mít hodnotu skoro jako výhra, jinak by se AI nechala
+       zlákat vlastním útokem místo aby ho zavčas ucpala.
+
+       Polootevřený je jen hrozba na jeden tah: dá se zablokovat, ale
+       nesmí se přehlédnout — proto pořád víc než cokoliv kratšího. */
+    var OTEVRENA_K1     = 300000;
+    var POLOOTEVRENA_K1 = 15000;
+
+    /* Soupeřovy úseky se odečítají s vyšší vahou než přičítají vlastní.
+       Bez toho AI ráda staví vlastní řadu o tah déle, než by měla, a na
+       soupeřovu odpoví až ve chvíli, kdy je pozdě: obě řady jsou pro ni
+       stejně cenné, jenže soupeř je na tahu dřív. Přebytek stačí malý,
+       o řád víc už by z AI udělalo čirého blokaře, který sám nikdy nic
+       nepostaví. */
+    var VAHA_OBRANY = 1.2;
+
+    /* Do jaké vzdálenosti od položeného kamene se hledají kandidáti.
+       Dvojka je nejmenší rozumná: tah do vzdálenosti 2 ještě může
+       navázat na existující úsek (přes jednu mezeru), dál od kamenů se
+       v piškvorkách nehraje. Na 15×15 to sráží větvení z 225 na desítky
+       a teprve tím je hledání proveditelné. */
+    var OKOLI = 2;
+
+    /* Kolik nejlepších kandidátů se v uzlu prohledá. Bez tohohle stropu
+       roste strom na velké desce i po zúžení tak, že hloubka 4 trvá
+       vteřiny. Řazení kandidátů podle heuristiky (viz serad) je proto
+       podmínka správnosti, ne jen rychlosti: co se do stropu nevejde,
+       AI vůbec neuvidí. Nejde tím ale přehlédnout přímá hrozba — výhra
+       i blok se řeší zvlášť ještě před hledáním. */
+    var SIRKA_KOREN  = 20;
+    var SIRKA_UVNITR = 12;
+
+    /* Do kolika prázdných polí se dohledává do konce partie. Šestnáct
+       je celá deska 4×4, takže obě malé desky (3×3 i 4×4) se hrají
+       dokonale od prvního tahu. Vejde se to jen díky tomu, že na malé
+       desce partie končí dřív, než se strom rozroste: alfa-beta naráží
+       na vyhrané a prohrané pozice hned v prvních patrech a zbytek
+       neprochází. Změřeno na 4×4 s řadou 4, tedy nejdelší možnou
+       partii — viz test níž. */
+    var PLNE_MAX_PRAZDNYCH = 16;
+
+    // do téhle velikosti se nezužují kandidáti a smí se hrát do konce
+    var MALA_DESKA = 16;
+
+    function vDesce(s, x, y) {
+      return x >= 0 && y >= 0 && x < s.cols && y < s.rows;
+    }
+
+    /* ---------------------------------------------------------------
+       Blízkost kamenů.
+
+       Pro každé pole se drží, kolik položených kamenů leží v jeho okolí
+       do vzdálenosti OKOLI. Kandidáti jsou pak prostě prázdná pole
+       s nenulovým počtem — bez procházení okolí při každém hledání.
+
+       Počty se udržují při pokládání a braní zpět, tedy 25 sčítání na
+       tah. Kdyby se okolí prohledávalo až při generování kandidátů,
+       stálo by to 25 čtení na každé prázdné pole v každém uzlu stromu.
+       --------------------------------------------------------------- */
+    function upravBlizkost(s, i, o) {
+      var x = i % s.cols;
+      var y = (i / s.cols) | 0;
+
+      for (var dy = -OKOLI; dy <= OKOLI; dy++) {
+        var cy = y + dy;
+        if (cy < 0 || cy >= s.rows) continue;
+
+        for (var dx = -OKOLI; dx <= OKOLI; dx++) {
+          var cx = x + dx;
+          if (cx < 0 || cx >= s.cols) continue;
+
+          s.blizko[cy * s.cols + cx] += o;
+        }
+      }
+    }
+
+    function poloz(s, i, hrac) {
+      s.pole[i] = hrac;
+      upravBlizkost(s, i, 1);
+    }
+
+    function vrat(s, i) {
+      s.pole[i] = 0;
+      upravBlizkost(s, i, -1);
+    }
+
+    /* ---------------------------------------------------------------
+       Konec úseku.
+
+       (x, y) je první pole ZA úsekem ve směru (dx, dy). Vrací dvě věci
+       najednou zabalené do čísla: jestli je to pole volné (úsek se tudy
+       dá natáhnout hned) a kolik polí tím směrem není soupeřových, tedy
+       kolik místa tam úsek vůbec má.
+
+       Zabalené proto, že se tohle volá dvakrát pro každý úsek na desce
+       při každém ohodnocení listu. Vracet objekt by znamenalo tisíce
+       zahozených objektů na jeden tah AI.
+       --------------------------------------------------------------- */
+    function konecUseku(s, x, y, dx, dy, souper) {
+      var otevreno = 0;
+      var misto = 0;
+      var cx = x;
+      var cy = y;
+
+      for (var n = 0; n < s.k; n++) {
+        if (!vDesce(s, cx, cy)) break;
+
+        var v = s.pole[cy * s.cols + cx];
+        if (v === souper) break;
+
+        if (n === 0 && v === 0) otevreno = 1;
+        misto++;
+        cx += dx;
+        cy += dy;
+      }
+
+      return misto * 2 + otevreno;
+    }
+
+    /* Hodnota jednoho úseku. prostor je délka úseku plus volné místo na
+       obou koncích — když se do něj kVyhre nevejde, je úsek slepý a je
+       jedno, jak je dlouhý. */
+    function hodnotaUseku(delka, konce, prostor, k) {
+      if (delka >= k) return VYHRA;      // pojistka, terminál se pozná dřív
+      if (prostor < k) return 0;         // řada se sem už nevejde
+      if (konce === 0) return 0;         // zavřený z obou stran, neroste
+
+      if (delka === k - 1) {
+        return konce === 2 ? OTEVRENA_K1 : POLOOTEVRENA_K1;
+      }
+
+      var z = ZAKLAD[Math.min(delka, ZAKLAD.length - 1)];
+      return konce === 2 ? z * 6 : z;
+    }
+
+    /* ---------------------------------------------------------------
+       Ohodnocení pozice z pohledu s.ja.
+
+       Každý souvislý úsek stejných symbolů se započítá právě jednou:
+       bere se jen od svého začátku, tedy od pole, před kterým ve směru
+       chůze leží něco jiného. Bez té podmínky by se pětice započítala
+       pětkrát.
+       --------------------------------------------------------------- */
+    function ohodnot(s) {
+      var skore = 0;
+
+      for (var d = 0; d < SMERY.length; d++) {
+        var dx = SMERY[d][0];
+        var dy = SMERY[d][1];
+
+        for (var y = 0; y < s.rows; y++) {
+          for (var x = 0; x < s.cols; x++) {
+            var hrac = s.pole[y * s.cols + x];
+            if (hrac === 0) continue;
+
+            var px = x - dx;
+            var py = y - dy;
+            if (vDesce(s, px, py) && s.pole[py * s.cols + px] === hrac) continue;
+
+            var delka = 1 + pocetSmerem(s.pole, s.cols, s.rows, x, y, dx, dy, hrac);
+            var souper = hrac === 1 ? 2 : 1;
+
+            var za   = konecUseku(s, x + delka * dx, y + delka * dy, dx, dy, souper);
+            var pred = konecUseku(s, px, py, -dx, -dy, souper);
+
+            var h = hodnotaUseku(delka, (za & 1) + (pred & 1),
+                                 delka + (za >> 1) + (pred >> 1), s.k);
+
+            skore += hrac === s.ja ? h : -h * VAHA_OBRANY;
+          }
+        }
+      }
+
+      return skore;
+    }
+
+    /* Jak cenné je pro hráče hrac položit na pole i — jen z úseků, které
+       tím polem procházejí. Používá se na řazení kandidátů, kde by celé
+       ohodnocení desky bylo zbytečně drahé. */
+    function skoreTahu(s, i, hrac) {
+      var x = i % s.cols;
+      var y = (i / s.cols) | 0;
+      var souper = hrac === 1 ? 2 : 1;
+      var puvodni = s.pole[i];
+      var skore = 0;
+
+      s.pole[i] = hrac;
+
+      for (var d = 0; d < SMERY.length; d++) {
+        var dx = SMERY[d][0];
+        var dy = SMERY[d][1];
+        var vzad  = pocetSmerem(s.pole, s.cols, s.rows, x, y, -dx, -dy, hrac);
+        var vpred = pocetSmerem(s.pole, s.cols, s.rows, x, y,  dx,  dy, hrac);
+        var delka = 1 + vzad + vpred;
+
+        var za   = konecUseku(s, x + (vpred + 1) * dx, y + (vpred + 1) * dy,
+                              dx, dy, souper);
+        var pred = konecUseku(s, x - (vzad + 1) * dx, y - (vzad + 1) * dy,
+                              -dx, -dy, souper);
+
+        skore += hodnotaUseku(delka, (za & 1) + (pred & 1),
+                              delka + (za >> 1) + (pred >> 1), s.k);
+      }
+
+      s.pole[i] = puvodni;
+      return skore;
+    }
+
+    /* Prázdná pole, která stojí za úvahu. Na velké desce jen ta blízko
+       už položených kamenů — jinde se v piškvorkách nehraje a větvení by
+       bylo neúnosné.
+
+       Kdyby zúžení nevrátilo nic (deska plná kamenů jen v jednom rohu
+       a zbytek daleko), sáhne se pro všechna prázdná pole. Prakticky
+       nenastane, ale prázdný seznam by se venku tvářil jako remíza. */
+    function kandidati(s) {
+      var ven = [];
+      var i;
+
+      for (i = 0; i < s.pole.length; i++) {
+        if (s.pole[i] !== 0) continue;
+        if (s.zuzovat && s.blizko[i] === 0) continue;
+        ven.push(i);
+      }
+
+      if (!ven.length && s.zuzovat) {
+        for (i = 0; i < s.pole.length; i++) {
+          if (s.pole[i] === 0) ven.push(i);
+        }
+      }
+
+      return ven;
+    }
+
+    /* Řazení kandidátů před prohledáváním. Alfa-beta ořezává tím líp,
+       čím dřív narazí na dobrý tah — se špatným pořadím se z ořezávání
+       nestane skoro nic a strom se prohledá celý.
+
+       Sčítá se cena tahu pro toho, kdo je na tahu, i pro jeho soupeře:
+       pole, kam by soupeř rád položil, je stejně důležité jako pole
+       vlastní. Střed desky je poslední rozhodčí při shodě — na okraji
+       má úsek méně směrů, kam růst. */
+    function serad(s, kand, naTahu) {
+      var souper = naTahu === 1 ? 2 : 1;
+      var klice = [];
+      var n;
+
+      for (n = 0; n < kand.length; n++) {
+        var i = kand[n];
+        klice.push({
+          i: i,
+          v: skoreTahu(s, i, naTahu) + skoreTahu(s, i, souper) + s.stred[i]
+        });
+      }
+
+      klice.sort(function (a, b) { return b.v - a.v; });
+
+      for (n = 0; n < klice.length; n++) kand[n] = klice[n].i;
+    }
+
+    /* ---------------------------------------------------------------
+       Minimax s alfa-beta.
+
+       Skóre je vždycky z pohledu s.ja, takže maximalizuje AI a soupeř
+       minimalizuje. Terminál se pozná hned po položení kamene — levněji
+       než prohledáváním celé desky na začátku uzlu.
+
+       K výhře se přičítá zbývající hloubka: ze dvou vynucených výher je
+       lepší ta bližší a z dvou proher ta vzdálenější. Bez toho by AI
+       s vyhranou pozicí jen přešlapovala, protože všechny výhry by měly
+       stejnou cenu.
+       --------------------------------------------------------------- */
+    function minimax(s, hloubka, alfa, beta, naTahu) {
+      if (hloubka <= 0) return ohodnot(s);
+
+      var kand = kandidati(s);
+      if (!kand.length) return 0;          // není kam položit, remíza
+
+      serad(s, kand, naTahu);
+
+      var sirka = s.plne ? kand.length : Math.min(kand.length, SIRKA_UVNITR);
+      var maximalizuje = naTahu === s.ja;
+      var nej = maximalizuje ? -Infinity : Infinity;
+      var dalsi = naTahu === 1 ? 2 : 1;
+
+      for (var n = 0; n < sirka; n++) {
+        var i = kand[n];
+        var skore;
+
+        poloz(s, i, naTahu);
+
+        if (jeVyhraPo(s.pole, s.cols, s.rows, s.k, i)) {
+          skore = maximalizuje ? VYHRA + hloubka : -(VYHRA + hloubka);
+        } else {
+          skore = minimax(s, hloubka - 1, alfa, beta, dalsi);
+        }
+
+        vrat(s, i);
+
+        if (maximalizuje) {
+          if (skore > nej) nej = skore;
+          if (nej > alfa) alfa = nej;
+        } else {
+          if (skore < nej) nej = skore;
+          if (nej < beta) beta = nej;
+        }
+
+        if (beta <= alfa) break;           // druhá strana sem stejně nepustí
+      }
+
+      return nej;
+    }
+
+    /* Kořen hledání. Liší se od uzlu jen tím, že si pamatuje, který tah
+       k nejlepšímu skóre vedl. */
+    function korenoveHledani(s, kand, hloubka) {
+      serad(s, kand, s.ja);
+
+      var sirka = s.plne ? kand.length : Math.min(kand.length, SIRKA_KOREN);
+      var nejlepsi = kand[0];
+      var nej = -Infinity;
+      var alfa = -Infinity;
+      var dalsi = s.ja === 1 ? 2 : 1;
+
+      for (var n = 0; n < sirka; n++) {
+        var i = kand[n];
+        var skore;
+
+        poloz(s, i, s.ja);
+
+        if (jeVyhraPo(s.pole, s.cols, s.rows, s.k, i)) {
+          skore = VYHRA + hloubka;
+        } else {
+          skore = minimax(s, hloubka - 1, alfa, Infinity, dalsi);
+        }
+
+        vrat(s, i);
+
+        if (skore > nej) {
+          nej = skore;
+          nejlepsi = i;
+        }
+        if (nej > alfa) alfa = nej;
+      }
+
+      return nejlepsi;
+    }
+
+    /* Pole, na kterém hrac okamžitě vyhraje, nebo -1. Přesně tohle je
+       „dotáhni vlastní řadu délky kVyhre-1“ a po záměně hráčů i
+       „zablokuj soupeřovu“ — v obou případech se hledá políčko, po
+       kterém na desce leží kVyhre stejných symbolů.
+
+       Hledá se mezi kandidáty, tedy i na velké desce jen v okolí kamenů.
+       Řada délky kVyhre-1 z definice sousedí s vlastními kameny, takže
+       pole, které ji dotáhne, leží v okolí vždycky. */
+    function vyhravajiciTah(s, kand, hrac) {
+      for (var n = 0; n < kand.length; n++) {
+        var i = kand[n];
+        s.pole[i] = hrac;
+        var vyhra = jeVyhraPo(s.pole, s.cols, s.rows, s.k, i);
+        s.pole[i] = 0;
+
+        if (vyhra) return i;
+      }
+
+      return -1;
+    }
+
+    function pripravStav(deska, cols, rows, k, ja, souper) {
+      var pocet = cols * rows;
+      var prazdnych = 0;
+      var i;
+
+      var s = {
+        pole: deska.slice(),
+        cols: cols,
+        rows: rows,
+        k: k,
+        ja: ja,
+        blizko: [],
+        stred: [],
+        zuzovat: pocet > MALA_DESKA,
+        plne: false
+      };
+
+      for (i = 0; i < pocet; i++) {
+        s.blizko.push(0);
+        if (s.pole[i] === 0) prazdnych++;
+      }
+
+      for (i = 0; i < pocet; i++) {
+        if (s.pole[i] !== 0) upravBlizkost(s, i, 1);
+      }
+
+      /* Bonus za střed. Jen na rozhodnutí shody mezi jinak stejně
+         dobrými tahy, takže musí být řádově pod nejmenší hodnotou úseku
+         (ZAKLAD[1] = 1 krát otevřenost) — proto zlomky. */
+      var sx = (cols - 1) / 2;
+      var sy = (rows - 1) / 2;
+      for (i = 0; i < pocet; i++) {
+        var vzdalenost = Math.abs(i % cols - sx) + Math.abs(((i / cols) | 0) - sy);
+        s.stred.push(0.5 - vzdalenost / (cols + rows));
+      }
+
+      s.plne = !!souper.doKonce && pocet <= MALA_DESKA &&
+               prazdnych <= PLNE_MAX_PRAZDNYCH;
+      s.prazdnych = prazdnych;
+
+      return s;
+    }
+
+    /* Tah AI. Vrací index pole, nebo -1, když není kam položit.
+
+       Pořadí kroků není libovolné: vlastní výhra má přednost před
+       blokem (dotáhnout řadu je lepší než zdržovat soupeře, když už je
+       stejně po hře) a obojí má přednost před hledáním i před náhodou. */
+    function tah(deska, cols, rows, k, ja, souper) {
+      var s = pripravStav(deska, cols, rows, k, ja, souper);
+      var on = ja === 1 ? 2 : 1;
+      var i;
+
+      // na prázdné desce není co počítat, střed je vždycky nejlepší
+      if (s.prazdnych === cols * rows) {
+        return (((rows / 2) | 0) * cols) + ((cols / 2) | 0);
+      }
+
+      var kand = kandidati(s);
+      if (!kand.length) return -1;
+
+      i = vyhravajiciTah(s, kand, ja);
+      if (i >= 0) return i;
+
+      i = vyhravajiciTah(s, kand, on);
+      if (i >= 0) return i;
+
+      /* Slabá úroveň občas střelí od boku. Až tady, tedy až mezi tahy,
+         o které nejde — hrubá chyba v přímé hrozbě není mírnější
+         obtížnost, ale rozbitá hra. */
+      if (souper.nahoda > 0 && Math.random() < souper.nahoda) {
+        return kand[(Math.random() * kand.length) | 0];
+      }
+
+      var hloubka = s.plne ? s.prazdnych : souper.hloubka;
+      return korenoveHledani(s, kand, hloubka);
+    }
+
+    return { tah: tah, ohodnot: ohodnot };
+  })();
+
+  /* ---------------------------------------------------------------
+     Odkazy do DOMu.
+     --------------------------------------------------------------- */
+  var elDeska  = document.getElementById('deska');
+  var elObal   = elDeska.parentNode;
+  var elHra    = document.querySelector('.hra');
+
+  var elHrac   = document.getElementById('hud-hrac');
+  var elTahu   = document.getElementById('hud-tahu');
+  var elRada   = document.getElementById('hud-rada');
+  var elStav   = document.getElementById('stav');
+  var elNova   = document.getElementById('btn-nova');
+  var elZpet   = document.getElementById('btn-zpet');
+
+  var elVolba       = document.getElementById('volba-deska');
+  var elVolbaSouper = document.getElementById('volba-souper');
+  var elVolbaZacina = document.getElementById('volba-zacina');
+  var elBlokZacina  = document.getElementById('blok-zacina');
+
+  var elVelikost = document.getElementById('vstup-velikost');
+  var elVstupK   = document.getElementById('vstup-rada');
+  var elPoznK    = document.getElementById('pozn-rada');
+
+  // leží stisk uvnitř některé skupiny přepínačů?
+  function vPrepinacich(el) {
+    return !!el && (elVolba.contains(el) || elVolbaSouper.contains(el) ||
+                    elVolbaZacina.contains(el));
+  }
+
+  /* ---------------------------------------------------------------
+     Úložiště.
+
+     Volání je v try/catch: v privátním okně a při zakázaném úložišti
+     localStorage vyhazuje výjimku už při čtení. Hra pak běží dál, jen
+     si volbu nepamatuje.
+     --------------------------------------------------------------- */
+  function najdiPodleId(seznam, id) {
+    for (var i = 0; i < seznam.length; i++) {
+      if (seznam[i].id === id) return seznam[i];
+    }
+    return null;
+  }
+
+  /* Přečte id ze seznamu, nebo vrátí výchozí. Ručně přepsaný záznam
+     v úložišti tak nemůže nastavit volbu, kterou nabídka nenabízí. */
+  function nactiId(klic, seznam, vychozi) {
+    try {
+      var ulozene = najdiPodleId(seznam, localStorage.getItem(klic));
+      if (ulozene) return ulozene.id;
+    } catch (e) {
+      /* nepřístupné úložiště — jedeme na výchozím */
+    }
+    return vychozi;
+  }
+
+  function uloz(klic, hodnota) {
+    try {
+      localStorage.setItem(klic, hodnota);
+    } catch (e) {
+      /* nevadí, volba vydrží jen do konce sezení */
+    }
+  }
+
+  /* Vlastní rozměr. Uložená dvojice se čte se stejnou kontrolou, jakou
+     musí projít ta zadaná v polích. */
+  function nactiVlastni() {
+    try {
+      var casti = String(localStorage.getItem(KLIC_VLASTNI)).split(':');
+      var v = parseInt(casti[0], 10);
+      var k = parseInt(casti[1], 10);
+
+      if (isFinite(v) && isFinite(k) &&
+          v >= VELIKOST_MIN && v <= VELIKOST_MAX && kPlatne(v, k)) {
+        return { velikost: v, k: k };
+      }
+    } catch (e) {
+      /* nepřístupné úložiště — jedeme na výchozím */
+    }
+    return { velikost: VYCHOZI_VLASTNI.velikost, k: VYCHOZI_VLASTNI.k };
+  }
+
+  function ulozVlastni() {
+    uloz(KLIC_VLASTNI, vlastni.velikost + ':' + vlastni.k);
+  }
+
+  var volbaId  = nactiId(KLIC_VOLBA,  PREDVOLBY, VYCHOZI_VOLBA);
+  var souperId = nactiId(KLIC_SOUPER, SOUPERI,   VYCHOZI_SOUPER);
+  var zacinaId = nactiId(KLIC_ZACINA, ZACATKY,   VYCHOZI_ZACATEK);
+  var vlastni  = nactiVlastni();
+
+  function souper() {
+    return najdiPodleId(SOUPERI, souperId);
+  }
+
+  function jeAi() {
+    return souperId !== 'dva';
+  }
+
+  /* Číslo hráče, za kterého hraje člověk. X (hráč 1) táhne první, takže
+     „začíná AI“ znamená, že za X hraje ona a na člověka zbude O. */
+  function hracClovek() {
+    return zacinaId === 'ai' ? 2 : 1;
+  }
+
+  function hracAi() {
+    return hracClovek() === 1 ? 2 : 1;
+  }
+
+  /* Rozměry, se kterými se má hrát. Jediné místo, kde se z volby stává
+     dvojice čísel — deska se pak staví odsud, ať přišla z předvolby,
+     nebo z polí. */
+  function nastaveni() {
+    if (volbaId === 'vlastni') {
+      return { velikost: vlastni.velikost, k: vlastni.k };
+    }
+
+    var p = najdiPodleId(PREDVOLBY, volbaId) ||
+            najdiPodleId(PREDVOLBY, VYCHOZI_VOLBA);
+    return { velikost: p.velikost, k: p.k };
+  }
+
+  /* ---------------------------------------------------------------
+     Stav hry — jediný zdroj pravdy. Nic jiného si stav nedrží, DOM
+     už jen zobrazuje, co je tady.
+     --------------------------------------------------------------- */
+  var game = {
+    cols: 0,
+    rows: 0,
+
+    // kolik stejných symbolů v řadě vyhrává
+    kVyhre: 0,
+
+    /* Deska jde po řádcích, index je y * cols + x. Hodnota je 0 pro
+       prázdné pole, 1 pro X a 2 pro O — tedy přímo číslo hráče, takže
+       se dá porovnávat s naTahu bez překladu. */
+    deska: [],
+
+    // 1 nebo 2; po konci hry zůstává na tom, kdo táhl naposled
+    naTahu: 1,
+
+    // 'running' | 'won' | 'draw'
+    state: 'running',
+
+    /* Souřadnice vítězné řady, {x, y} v pořadí podél směru. Prázdné
+       pole, dokud nikdo nevyhrál. Slouží jen ke zvýraznění — o tom, že
+       je dohráno, rozhoduje state. */
+    vitaznaRada: [],
+
+    /* Indexy položených polí v pořadí, jak padly. Nese dvě věci naráz:
+       krok zpět (bere se z konce) a počet tahů, tedy i remízu — když je
+       historie dlouhá jako deska, není kam položit.
+
+       Kdo tah udělal, se nepamatuje: hráči se pravidelně střídají a
+       hodnota v desce to stejně říká. */
+    historie: [],
+
+    /* Vybrané pole, po kterém chodí šipky. Patří do stavu hry, ne do
+       DOMu: díky tomu existuje od inicializace, ne teprve od chvíle,
+       kdy se něčeho dotkne myš. */
+    kurzor: { x: 0, y: 0 }
+  };
+
+  // tlačítka desky ve stejném pořadí jako game.deska
+  var bunky = [];
+
+  /* Velikost pole v CSS pixelech — patří k zobrazení, ne ke stavu hry.
+     Skutečnou hodnotu spočítá prizpusob() ještě před prvním vykreslením. */
+  var cell = CELL_MAX_ZALOHA;
+
+  /* Počítá zrovna AI? Není to stav hry, ale stav obrazovky: hra je
+     v tu chvíli pořád 'running', jen se čeká na tah. */
+  var mysliAi = false;
+  var casovacAi = null;
+
+  /* Číslo běhu. Nová hra i krok zpět ho zvednou, takže se odložený
+     výpočet AI pozná podle toho, že jeho číslo už neplatí, a svůj tah
+     zahodí. Bez toho by tah spočítaný nad starou deskou dopadl na
+     novou. */
+  var generace = 0;
+
+  function index(x, y) {
+    return y * game.cols + x;
+  }
+
+  function souradnice(i) {
+    return { x: i % game.cols, y: Math.floor(i / game.cols) };
+  }
+
+  function indexKurzoru() {
+    return index(game.kurzor.x, game.kurzor.y);
+  }
+
+  /* Posun kurzoru i s překreslením obrysu. Souřadnice se ořezávají na
+     desku — na kraji se kurzor zastaví. Přeskok na protější stranu by
+     mátl: řada se přes okraj nepočítá, tak ať tam nevede ani pohyb. */
+  function posunKurzor(x, y) {
+    x = Math.max(0, Math.min(game.cols - 1, x));
+    y = Math.max(0, Math.min(game.rows - 1, y));
+
+    if (x === game.kurzor.x && y === game.kurzor.y) return;
+
+    bunky[indexKurzoru()].classList.remove('bunka--kurzor');
+    game.kurzor.x = x;
+    game.kurzor.y = y;
+    bunky[indexKurzoru()].classList.add('bunka--kurzor');
+  }
+
+  function kurzorNaPole(i) {
+    var s = souradnice(i);
+    posunKurzor(s.x, s.y);
+  }
+
+  /* ---------------------------------------------------------------
+     Průběh hry.
+     --------------------------------------------------------------- */
+
+  /* Vyhrál ten, kdo právě dotáhl řadu — tedy ten, kdo je pořád na tahu.
+     Hráči se totiž po vítězném tahu už nestřídají, viz polozNa. */
+  function vitez() {
+    return game.naTahu;
+  }
+
+  function polozNa(i) {
+    if (game.state !== 'running') return;
+    if (game.deska[i] !== 0) return;      // obsazené pole se nepřepisuje
+
+    game.deska[i] = game.naTahu;
+    game.historie.push(i);
+    vykresliBunku(i);
+
+    var rada = radaPresPole(game.deska, game.cols, game.rows, game.kVyhre, i);
+    if (rada) {
+      konec('won', rada);
+      return;
+    }
+
+    // remíza: položit se dá jen na prázdné pole a žádné nezbylo
+    if (game.historie.length === game.deska.length) {
+      konec('draw', null);
+      return;
+    }
+
+    game.naTahu = game.naTahu === 1 ? 2 : 1;
+    vykresliUI();
+    naplanujAi();
+  }
+
+  /* Tah člověka. Odděleně od polozNa proto, že AI pokládá bez téhle
+     kontroly — a hlavně aby klik během počítání AI nepoložil symbol,
+     který zrovna patří jí. */
+  function lidskyTah(i) {
+    if (mysliAi) return;
+    if (jeAi() && game.naTahu !== hracClovek()) return;
+
+    polozNa(i);
+  }
+
+  function konec(stav, rada) {
+    game.state = stav;
+    game.vitaznaRada = rada || [];
+
+    elDeska.classList.add('deska--konec');
+    elDeska.classList.toggle('deska--vyhra', stav === 'won');
+
+    for (var n = 0; n < game.vitaznaRada.length; n++) {
+      var p = game.vitaznaRada[n];
+      bunky[index(p.x, p.y)].classList.add('bunka--vyhra');
+    }
+
+    vykresliUI();
+  }
+
+  /* Vezme z desky poslední tah. Sama o sobě to není celá akce kroku
+     zpět — proti AI se vrací rovnou dvojice, viz krokZpet. */
+  function vratTah() {
+    var i = game.historie.pop();
+
+    /* Na tahu je zase ten, kdo tenhle tah udělal. Čte se z desky ještě
+       před vyprázdněním pole — pořadí hráčů se z ničeho jiného
+       rekonstruovat nedá, kdyby se někdy hrálo jinak než ob jednoho. */
+    game.naTahu = game.deska[i];
+    game.deska[i] = 0;
+
+    if (game.state !== 'running') {
+      for (var n = 0; n < game.vitaznaRada.length; n++) {
+        var p = game.vitaznaRada[n];
+        bunky[index(p.x, p.y)].classList.remove('bunka--vyhra');
+      }
+
+      game.vitaznaRada = [];
+      game.state = 'running';
+      elDeska.classList.remove('deska--konec', 'deska--vyhra');
+    }
+
+    vykresliBunku(i);
+    return i;
+  }
+
+  /* Je co vracet?
+
+     Proti AI se vrací dvojice tahů, takže poslední osamocený tah AI
+     (ten, kterým zahájila) vracet nejde — deska by se vrátila do
+     stejné pozice, ze které by AI zahrála znovu totéž. */
+  function lzeZpet() {
+    if (!game.historie.length) return false;
+
+    if (jeAi() && game.historie.length === 1 &&
+        game.deska[game.historie[0]] !== hracClovek()) {
+      return false;
+    }
+
+    return true;
+  }
+
+  /* Krok zpět.
+
+     Vrací jeden tah ve hře dvou lidí a dvojici tahů proti AI — vlastní
+     i její odpověď. Vracet jen jeden by proti AI nedávalo smysl: hráč
+     by tím jen předal tah zpátky soupeři, který by odpověděl znovu, jen
+     jinam.
+
+     Víc kroků se dělá opakovaným voláním — tlačítko i klávesa jdou
+     zmáčknout kolikrát je potřeba, až po prázdnou desku.
+
+     Vrátit jde i tah, kterým hra skončila — deska se tím zase rozehraje.
+     Právě proto je krok zpět dostupný i po výhře a remíze. */
+  function krokZpet() {
+    if (!lzeZpet()) return;
+
+    zrusAi();
+    vratTah();
+
+    // dokud není na tahu člověk, vracíme dál (nanejvýš jednou)
+    if (jeAi() && game.historie.length && game.naTahu !== hracClovek()) {
+      vratTah();
+    }
+
+    /* Kurzor jde na naposled uvolněné pole. Hráč se k němu skoro jistě
+       vrací — buď sem chtěl položit něco jiného, nebo si prohlíží, co
+       tah způsobil. */
+    kurzorNaPole(game.historie.length ? game.historie[game.historie.length - 1] : indexKurzoru());
+
+    vykresliUI();
+
+    /* Pojistka: kdyby po vrácení přece jen zbyla AI na tahu (zahájila
+       a historie je prázdná), ať se hra nezastaví a odpoví. */
+    naplanujAi();
+  }
+
+  /* ---------------------------------------------------------------
+     Tah AI.
+
+     Výpočet běží na hlavním vlákně, takže musí být odložený — jinak by
+     prohlížeč nestihl vykreslit ani symbol, který hráč právě položil,
+     ani hlášku, že se počítá.
+     --------------------------------------------------------------- */
+  function zrusAi() {
+    generace++;                 // odložený výpočet tím ztratí platnost
+
+    if (casovacAi !== null) {
+      clearTimeout(casovacAi);
+      casovacAi = null;
+    }
+
+    mysliAi = false;
+    elDeska.classList.remove('deska--mysli');
+  }
+
+  function naplanujAi() {
+    if (!jeAi() || game.state !== 'running') return;
+    if (game.naTahu === hracClovek()) return;
+
+    zrusAi();
+    var moje = generace;
+
+    mysliAi = true;
+    elDeska.classList.add('deska--mysli');
+    vykresliUI();
+
+    casovacAi = setTimeout(function () {
+      casovacAi = null;
+      if (moje !== generace) return;      // mezitím nová hra nebo krok zpět
+
+      var i = Ai.tah(game.deska, game.cols, game.rows, game.kVyhre,
+                     hracAi(), souper());
+
+      mysliAi = false;
+      elDeska.classList.remove('deska--mysli');
+
+      if (i >= 0) {
+        kurzorNaPole(i);                  // ať je vidět, kam AI zahrála
+        polozNa(i);
+      } else {
+        vykresliUI();
+      }
+    }, PROSTOJ_AI);
+  }
+
+  /* ---------------------------------------------------------------
+     Vykreslování. Do DOMu saháme jen tam, kde se stav opravdu změnil.
+     --------------------------------------------------------------- */
+
+  /* Popis pole pro odečítač obrazovky. Souřadnice jsou v něm i po
+     obsazení — jinak by se hráč po desce naslepo neorientoval. */
+  function popisBunky(i) {
+    var s = souradnice(i);
+    return (s.y + 1) + '. řádek, ' + (s.x + 1) + '. sloupec, ' +
+           NAZVY[game.deska[i]];
+  }
+
+  function vykresliBunku(i) {
+    var b = bunky[i];
+    var v = game.deska[i];
+
+    b.classList.toggle('bunka--x', v === 1);
+    b.classList.toggle('bunka--o', v === 2);
+    b.textContent = ZNAKY[v];
+    b.setAttribute('aria-label', popisBunky(i));
+  }
+
+  /* Hláška pod deskou. Za běhu hry je prázdná — kdo je na tahu, hlásí
+     HUD nad deskou a stálý text pod ní by jen odváděl pozornost. Místo
+     po ní zůstává (min-height v CSS), takže se nic neposouvá.
+
+     Proti AI se výsledek říká jménem, ne symbolem: „Vyhrála AI“ je
+     odpověď na to, co hráče zajímá, kdežto „Vyhrál O“ nutí vzpomínat,
+     za koho vlastně hrál. */
+  function hlaska() {
+    if (game.state === 'won') {
+      var kdo = vitez();
+
+      if (!jeAi()) {
+        return 'Vyhrál ' + ZNAKY[kdo] + '! Vítězná řada je zvýrazněná.';
+      }
+      return kdo === hracClovek()
+        ? 'Vyhrál jsi! Vítězná řada je zvýrazněná.'
+        : 'Vyhrála AI. Vítězná řada je zvýrazněná.';
+    }
+
+    if (game.state === 'draw') {
+      return 'Remíza. Deska je plná a řadu nikdo nesrovnal.';
+    }
+
+    return '';
+  }
+
+  function vykresliUI() {
+    /* Po konci hry pomlčka: na tahu už nikdo není a nechat tam svítit
+       symbol posledního hráče by vypadalo, jako by se čekalo na jeho
+       tah. Kdo vyhrál, řekne hláška pod deskou. */
+    var konecHry = game.state !== 'running';
+
+    elHrac.textContent = konecHry ? '—' : ZNAKY[game.naTahu];
+    elHrac.classList.toggle('hud__hrac--x', !konecHry && game.naTahu === 1);
+    elHrac.classList.toggle('hud__hrac--o', !konecHry && game.naTahu === 2);
+
+    elTahu.textContent = game.historie.length;
+    elRada.textContent = game.kVyhre;
+
+    /* Náhled tahu se kreslí ze stylu podle tohohle atributu — barva
+       i symbol se tak mění jedním zápisem místo dvou stovek. */
+    elDeska.setAttribute('data-na-tahu', game.naTahu);
+
+    /* Hláška o počítání je element, ne holý text: pulsující tečka vedle
+       ní říká, že se něco děje, i když výpočet trvá déle. */
+    elStav.textContent = '';
+    elStav.classList.toggle('stav--konec', konecHry);
+    elStav.classList.toggle('stav--mysli', mysliAi);
+
+    if (mysliAi) {
+      var tecka = document.createElement('span');
+      tecka.className = 'stav__tecka';
+      elStav.appendChild(tecka);
+      elStav.appendChild(document.createTextNode('AI přemýšlí…'));
+    } else {
+      elStav.textContent = hlaska();
+    }
+
+    elZpet.disabled = !lzeZpet();
+  }
+
+  /* ---------------------------------------------------------------
+     Stavba desky.
+
+     Pole jsou <button>, ne <div> s posluchačem: klik, popis pro
+     odečítač obrazovky i kurzor myši pak fungují samy od sebe. Obsazené
+     pole schválně nezakazujeme přes disabled — zakázané tlačítko se
+     jinak hlásí odečítači jako nedostupné, i když je na něm to
+     podstatné (čí symbol tu leží). Klik na ně místo toho ignoruje
+     polozNa.
+
+     Tabulátorem se do desky nechodí: na desce 15×15 je to 225 zastávek
+     mezi odkazem nad deskou a tlačítky pod ní. Z klávesnice se hraje
+     kurzorem, a ten na fokusu nestojí — viz posluchač na window níž.
+     --------------------------------------------------------------- */
+  function postavDesku() {
+    var frag = document.createDocumentFragment();
+    bunky = [];
+
+    for (var i = 0; i < game.deska.length; i++) {
+      var b = document.createElement('button');
+      b.type = 'button';
+      b.className = 'bunka';
+      b.tabIndex = -1;
+      b.setAttribute('data-i', i);
+      b.setAttribute('aria-label', popisBunky(i));
+
+      frag.appendChild(b);
+      bunky.push(b);
+    }
+
+    elDeska.textContent = '';             // po předchozí hře
+    elDeska.appendChild(frag);
+    elDeska.classList.remove('deska--konec', 'deska--vyhra');
+
+    // kurzor je vidět hned, ještě než se hráč klávesnice vůbec dotkne
+    bunky[indexKurzoru()].classList.add('bunka--kurzor');
+  }
+
+  /* Klik řešíme jedním posluchačem na desce, ne dvěma sty vlastními.
+     closest() proto, že cíl události může být i text uvnitř tlačítka. */
+  elDeska.addEventListener('click', function (e) {
+    var b = e.target.closest('.bunka');
+    if (!b) return;
+
+    /* Kliknuté tlačítko si v prohlížeči nechává fokus a mezerník by
+       pak mačkal jeho. Položilo by se pole pod myší místo pod kurzorem
+       — a to i po konci hry, kdy mezerník patří rolování. */
+    b.blur();
+
+    var i = parseInt(b.getAttribute('data-i'), 10);
+
+    /* Kurzor jde za myší i za prstem. Bez toho by po kliknutí první
+       šipka skočila tam, kde kurzor zůstal stát, a ovládání by se
+       nedalo střídat. */
+    kurzorNaPole(i);
+    lidskyTah(i);
+  });
+
+  /* ---------------------------------------------------------------
+     Klávesnice.
+
+     Posluchač visí na window, ne na desce ani na polích. Posluchač na
+     desce se ozve teprve tehdy, když v ní něco drží fokus, takže by
+     šipky ožily až po prvním kliknutí myší — na to se hra ovládaná
+     výhradně klávesnicí nedá rozehrát.
+
+     Vybrané pole drží game.kurzor, ne fokus. Fokus je jeden na celý
+     dokument a přetahuje se o něj s tlačítky a poli pod deskou; kurzor
+     je stav hry a zůstává, kde ho hráč nechal.
+     --------------------------------------------------------------- */
+  var SIPKY = {
+    ArrowLeft:  { x: -1, y:  0 },
+    ArrowRight: { x:  1, y:  0 },
+    ArrowUp:    { x:  0, y: -1 },
+    ArrowDown:  { x:  0, y:  1 }
+  };
+
+  window.addEventListener('keydown', function (e) {
+    /* Cíl skutečného stisku je vždycky prvek — když nic nedrží fokus,
+       je jím <body>. Na čemkoliv jiném (událost poslaná ručně na
+       window, na document) by contains() spadl na TypeError a vzal
+       s sebou celou obsluhu, tak si prvek napřed ověříme. */
+    var cil = e.target instanceof Element ? e.target : null;
+    var tag = cil ? cil.tagName : '';
+
+    /* Co patří ovládacím prvkům, hře nepředáváme. V polích vlastního
+       rozměru se píšou čísla — tam by N i Z byly znaky, ne příkazy —
+       a v přepínačích si šipky s mezerníkem řídí skupina sama. */
+    if (tag === 'INPUT' || tag === 'SELECT') return;
+    if (vPrepinacich(cil)) return;
+    if ((cil === elNova || cil === elZpet) &&
+        (e.key === ' ' || e.key === 'Enter')) return;
+
+    if (e.altKey) return;
+
+    // velká písmena sem chodí se shiftem, tak si klávesu srovnáme
+    var k = e.key.toLowerCase();
+
+    /* Krok zpět bere i Ctrl+Z (na Macu Cmd+Z): je to univerzální zkratka
+       pro vrácení a hráč ji zkusí dřív než samotné Z. Prohlížeč nemá nad
+       stránkou co vracet, takže mu ji můžeme sebrat.
+
+       Ještě před stavovou zámkou níž — vrátit se musí dát i z dohrané
+       desky, právě tím se hra zase rozehraje. */
+    if (k === 'z') {
+      e.preventDefault();
+      krokZpet();
+      return;
+    }
+
+    // zbytek zkratek je bez modifikátorů; Ctrl+N patří prohlížeči
+    if (e.ctrlKey || e.metaKey) return;
+
+    if (k === 'n') {
+      e.preventDefault();
+      novaHra();
+      return;
+    }
+
+    /* Zbytek si bereme jen do rozehrané hry. Po výhře i remíze už na
+       desce není co dělat, a tehdy patří šipky zpátky stránce — jinak
+       by se dohraná deska nedala odrolovat klávesnicí. */
+    if (game.state !== 'running') return;
+
+    var smer = SIPKY[e.key];
+
+    if (smer) {
+      e.preventDefault();          // šipky jsou naše, stránka se nehne
+      posunKurzor(game.kurzor.x + smer.x, game.kurzor.y + smer.y);
+      return;
+    }
+
+    if (e.key === 'Home') {
+      e.preventDefault();
+      posunKurzor(0, game.kurzor.y);
+      return;
+    }
+
+    if (e.key === 'End') {
+      e.preventDefault();
+      posunKurzor(game.cols - 1, game.kurzor.y);
+      return;
+    }
+
+    /* Mezerník a Enter dělají totéž — hráč nemá důvod hádat, která
+       klávesa je „ta správná“. */
+    if (e.key === ' ' || e.key === 'Enter') {
+      e.preventDefault();          // mezerníkem se jinak roluje stránka
+      lidskyTah(indexKurzoru());
+    }
+  });
+
+  /* ---------------------------------------------------------------
+     Rozměry.
+
+     Strana pole je celé číslo CSS pixelů, aby mřížka padla na pixely
+     a mezery mezi poli byly všude stejně široké.
+
+     Pole se nikdy nezmenší pod --bunka-min. Když se deska v té velikosti
+     do okna nevejde, nezdrobní se — jen se začne rolovat uvnitř
+     .deska-obal. Na dotyku je to ten podstatnější kompromis: mřížka
+     zmenšená tak, aby se vešla celá, se nedá trefit prstem.
+     --------------------------------------------------------------- */
+
+  /* Meze čteme z CSS při každém přepočtu, ne jednou při načtení: mění
+     je média dotaz, takže se přepnutím na dotykový vstup i otočením
+     displeje můžou změnit za běhu. */
+  function mezeBunky() {
+    var s = getComputedStyle(document.documentElement);
+    var min = Math.ceil(parseFloat(s.getPropertyValue('--bunka-min')));
+    var max = Math.floor(parseFloat(s.getPropertyValue('--bunka-max')));
+
+    if (!isFinite(min) || min < 1) min = CELL_MIN_ZALOHA;
+    if (!isFinite(max) || max < min) max = Math.max(min, CELL_MAX_ZALOHA);
+
+    return { min: min, max: max };
+  }
+
+  function rozmerDesky(cell) {
+    return {
+      w: cell * game.cols + MEZERA * (game.cols - 1),
+      h: cell * game.rows + MEZERA * (game.rows - 1)
+    };
+  }
+
+  // obrácená úloha: největší pole, při kterém se deska vejde do w × h
+  function cellProMisto(w, h) {
+    return Math.min((w - MEZERA * (game.cols - 1)) / game.cols,
+                    (h - MEZERA * (game.rows - 1)) / game.rows);
+  }
+
+  function prizpusob() {
+    var meze = mezeBunky();
+
+    /* Rám kolem desky se měří ze stylu, ne jako offsetWidth - clientWidth:
+       ten rozdíl v sobě nese i šířku posuvníku, a ta se objevuje a mizí
+       podle toho, jak velká pole zrovna vyjdou. Výpočet by se tím zacyklil
+       — posuvník ubere místo, pole se zmenší, posuvník zmizí, a zase. */
+    var st = getComputedStyle(elObal);
+    var ramVodorovne = parseFloat(st.borderLeftWidth) + parseFloat(st.borderRightWidth);
+    var ramSvisle    = parseFloat(st.borderTopWidth) + parseFloat(st.borderBottomWidth);
+
+    /* Kolik místa dostane deska do šířky.
+
+       Ne sloupec stránky, ale celé okno bez okraje. Sloupec je užší
+       (wrap má max-width) a je tak úzký schválně — kvůli délce řádku
+       textu. Deska ale žádné řádky nemá, takže smí ze sloupce vystoupit:
+       obal má align-self: center, přeteče na obě strany stejně a zůstane
+       v okně vycentrovaný. Nadpis, HUD, nastavení ani legenda se nikam
+       nestěhují, ty dál drží šířku <main>. */
+    var doOkna = document.documentElement.clientWidth - 2 * OKRAJ_OKNA;
+
+    /* Výškový rozpočet: okno bez toho, co je nad deskou, a bez toho, co
+       je pod ní. Hlavička se měří od začátku dokumentu, ne od okraje
+       okna — s getBoundingClientRect().top by se po odscrollování
+       rozpočet nafoukl a deska by rostla sama od sebe.
+
+       Pod PODIL_VYSKY okna rozpočet neklesne. Samotné měření je totiž
+       přísné: pod deskou jsou tlačítka, nastavení i legenda a ty na
+       spoustě oken seberou skoro celou výšku, takže by na desku zbyla
+       třetina okna a pole by vyšla na minimum i na velkém monitoru. */
+    var hlavicka = elObal.getBoundingClientRect().top -
+                   document.documentElement.getBoundingClientRect().top;
+    var podDeskou = elHra.getBoundingClientRect().bottom -
+                    elObal.getBoundingClientRect().bottom;
+    var mereno   = window.innerHeight - hlavicka - podDeskou - REZERVA;
+    var rozpocet = Math.max(mereno, window.innerHeight * PODIL_VYSKY);
+
+    /* Dolů na celé pixely: na zlomku pixelu by mřížka nesedla na
+       obrazovku a hrany polí by se rozmazaly. */
+    cell = Math.floor(cellProMisto(doOkna - ramVodorovne, rozpocet - ramSvisle));
+
+    if (cell < meze.min) cell = meze.min;
+    if (cell > meze.max) cell = meze.max;
+
+    /* Obal je přesně tak široký jako mřížka — jinak by v rámu zbyl pruh
+       pozadí — nejvýš však na šířku okna. Šířka, ne jen strop: fit-content
+       by se zastavil na šířce sloupce a deska by se rolovala i tam, kde
+       je vedle sloupce místa dost.
+
+       Když se deska nevejde ani do okna — na telefonu, kde má pole spodní
+       mez 44 px — ustřihne ji tenhle strop a obal ji roluje. Právě proto
+       se pole nezmenšuje pod mez: po zmenšené mřížce se dá jezdit, po
+       netrefitelné ne. */
+    var sirkaObalu = Math.min(Math.ceil(rozmerDesky(cell).w + ramVodorovne), doOkna);
+
+    elObal.style.width    = sirkaObalu + 'px';
+    elObal.style.maxWidth = sirkaObalu + 'px';
+
+    elDeska.style.gridTemplateColumns = 'repeat(' + game.cols + ', ' + cell + 'px)';
+    elDeska.style.setProperty('--cell', cell + 'px');
+    elDeska.style.setProperty('--mezera', MEZERA + 'px');
+
+    /* Písmo roste s polem, jinak by symbol na 44px poli byl ztracený. */
+    elDeska.style.fontSize = Math.round(cell * PODIL_PISMA) + 'px';
+
+    /* Strop výšky obalu. Bez něj by se svisle rolovala celá stránka
+       a hlavička s HUDem by hráči odjela z dohledu.
+
+       Je to tentýž rozpočet, ze kterého se počítala velikost pole —
+       menší číslo tady by desku rolovalo, přestože byla spočítaná tak,
+       aby se vešla. Počítá se do border-boxu, ten je v projektu
+       globální. */
+    elObal.style.maxHeight = Math.max(Math.round(rozpocet), OBAL_MIN_VYSKA) + 'px';
+  }
+
+  /* Resize i otočení telefonu. Debounce, protože při tažení okna
+     přijdou desítky událostí a po orientationchange bývá innerHeight
+     ještě chvíli stará.
+
+     Rozehrané hry se to nedotkne: deska je čtvercová a na tvaru okna
+     nezávisí, takže se jen přeměří velikost polí. */
+  var casovacResize = null;
+
+  function naZmenuOkna() {
+    if (casovacResize) clearTimeout(casovacResize);
+    casovacResize = setTimeout(function () {
+      casovacResize = null;
+      prizpusob();
+    }, 120);
+  }
+
+  window.addEventListener('resize', naZmenuOkna);
+  window.addEventListener('orientationchange', naZmenuOkna);
+
+  /* ---------------------------------------------------------------
+     Nová hra.
+     --------------------------------------------------------------- */
+  function novaHra() {
+    var n = nastaveni();
+
+    zrusAi();
+
+    game.cols   = n.velikost;
+    game.rows   = n.velikost;
+    game.kVyhre = n.k;
+
+    game.deska = [];
+    for (var i = 0; i < game.cols * game.rows; i++) game.deska.push(0);
+
+    game.naTahu      = 1;      // začíná X, jako všude
+    game.state       = 'running';
+    game.vitaznaRada = [];
+    game.historie    = [];
+
+    /* Kurzor začíná uprostřed desky, ne v rohu: odtud je to všude stejně
+       daleko a střed je zároveň nejsilnější první tah. Nastavuje se tady,
+       tedy hned při inicializaci — šipky fungují od načtení stránky, bez
+       jediného kliknutí myší. */
+    game.kurzor.x = Math.floor(game.cols / 2);
+    game.kurzor.y = Math.floor(game.rows / 2);
+
+    postavDesku();
+    prizpusob();
+    vykresliUI();
+
+    // hraje-li AI za X, začíná ona
+    naplanujAi();
+  }
+
+  elNova.addEventListener('click', function () {
+    // bez blur() by tlačítko zůstalo zaostřené a mezerník by rozdával
+    // další a další hry místo pokládání symbolů
+    elNova.blur();
+    novaHra();
+  });
+
+  elZpet.addEventListener('click', function () {
+    krokZpet();
+
+    /* Fokus pouštíme jen tehdy, když se tlačítko zakázalo — jinak by si
+       ho prohlížeč vzal zpátky na <body> sám a další Enter by nic
+       nevrátil. Dokud je co vracet, fokus zůstává: mačkat Enter dokola
+       je nejrychlejší cesta o několik tahů zpátky. */
+    if (elZpet.disabled) elZpet.blur();
+  });
+
+  /* ---------------------------------------------------------------
+     Přepínače.
+
+     ARIA přepínače: skupina má role="radiogroup", tlačítka role="radio"
+     a aria-checked. Tabulátorem se do skupiny vstoupí na zvolené položce
+     (roving tabindex), šipkami se přepíná.
+
+     Všechny tři skupiny (soupeř, začátek, deska) se ovládají stejně,
+     tak je staví jedna funkce. Detail položky se počítá funkcí, ne bere
+     z pevného textu — u „Vlastní“ se mění podle polí pod nabídkou.
+     --------------------------------------------------------------- */
+  function postavSkupinu(el, polozky, popis, vyber, naVolbu) {
+    var tlacitka = [];
+    var detaily  = [];
+
+    polozky.forEach(function (polozka, poradi) {
+      var b = document.createElement('button');
+      b.type = 'button';
+      b.className = 'prepinac';
+      b.setAttribute('role', 'radio');
+      b.setAttribute('aria-checked', 'false');
+      b.tabIndex = -1;
+
+      var nazev = document.createElement('span');
+      nazev.className = 'prepinac__nazev';
+      nazev.textContent = polozka.nazev;
+
+      var detail = document.createElement('span');
+      detail.className = 'prepinac__detail';
+      detaily[poradi] = detail;
+
+      b.appendChild(nazev);
+      b.appendChild(detail);
+      b.addEventListener('click', function (e) {
+        naVolbu(polozka.id);
+
+        /* Po kliknutí myší fokus pustíme: panel je vidět i rozehrané
+           a zaostřený přepínač si bere šipky i mezerník. Klávesnicí
+           (detail === 0) fokus necháváme, jinak by se ve skupině nedalo
+           pohybovat šipkami. */
+        if (e.detail > 0) b.blur();
+      });
+
+      el.appendChild(b);
+      tlacitka.push(b);
+    });
+
+    /* Šipky uvnitř skupiny patří přepínačům. preventDefault tu musí být,
+       jinak stránka odscrolluje. */
+    el.addEventListener('keydown', function (e) {
+      var k = e.key;
+      var posun = (k === 'ArrowRight' || k === 'ArrowDown') ?  1 :
+                  (k === 'ArrowLeft'  || k === 'ArrowUp')   ? -1 : 0;
+      if (!posun && k !== 'Home' && k !== 'End') return;
+
+      e.preventDefault();
+
+      var i = tlacitka.indexOf(document.activeElement);
+      if (i < 0) {
+        for (i = 0; i < polozky.length; i++) {
+          if (polozky[i].id === vyber()) break;
+        }
+        if (i >= polozky.length) i = 0;
+      }
+
+      var cil = k === 'Home' ? 0
+              : k === 'End'  ? polozky.length - 1
+              : (i + posun + polozky.length) % polozky.length;
+
+      tlacitka[cil].focus();
+      naVolbu(polozky[cil].id);
+    });
+
+    return {
+      obnov: function () {
+        var vybrane = vyber();
+
+        for (var i = 0; i < tlacitka.length; i++) {
+          var aktivni = polozky[i].id === vybrane;
+
+          detaily[i].textContent = popis(polozky[i]);
+          tlacitka[i].setAttribute('aria-checked', aktivni ? 'true' : 'false');
+          tlacitka[i].tabIndex = aktivni ? 0 : -1;
+        }
+      }
+    };
+  }
+
+  function detailPredvolby(p) {
+    if (p.id === 'vlastni') {
+      return vlastni.velikost + '×' + vlastni.velikost + ' na ' + vlastni.k;
+    }
+    return 'na ' + p.k;
+  }
+
+  function detailPolozky(p) {
+    return p.detail;
+  }
+
+  var skupinaSouper = postavSkupinu(
+    elVolbaSouper, SOUPERI, detailPolozky,
+    function () { return souperId; },
+    function (id) { zmenSoupere(id); }
+  );
+
+  var skupinaZacina = postavSkupinu(
+    elVolbaZacina, ZACATKY, detailPolozky,
+    function () { return zacinaId; },
+    function (id) { zmenZacatek(id); }
+  );
+
+  var skupinaDeska = postavSkupinu(
+    elVolba, PREDVOLBY, detailPredvolby,
+    function () { return volbaId; },
+    function (id) { zmenVolbu(id); }
+  );
+
+  /* Přepíše popisky i značky zvolených položek. Volá se po každé změně,
+     která se jich může dotknout — přepnutí kterékoliv skupiny i úpravu
+     vlastních polí, protože ta mění detail položky „Vlastní“. */
+  function obnovPrepinace() {
+    skupinaSouper.obnov();
+    skupinaZacina.obnov();
+    skupinaDeska.obnov();
+
+    /* Kdo začíná, se volí jen proti AI. Ve hře dvou lidí X začíná podle
+       pravidel a oba sedí u stejného stolu — nabídka by tam byla volbou
+       bez následku. */
+    elBlokZacina.hidden = !jeAi();
+  }
+
+  /* Změna nastavení znamená novou desku — pravidla se nikdy nemění pod
+     rozehranou hrou. Stejná volba nic neruší, jinak by omylem kliknutá
+     už zvolená položka smazala rozehrané kolo. */
+  function zmenVolbu(id) {
+    if (volbaId === id) return;
+
+    volbaId = id;
+    uloz(KLIC_VOLBA, id);
+    obnovPrepinace();
+    novaHra();
+  }
+
+  function zmenSoupere(id) {
+    if (souperId === id) return;
+
+    souperId = id;
+    uloz(KLIC_SOUPER, id);
+    obnovPrepinace();
+    novaHra();
+  }
+
+  function zmenZacatek(id) {
+    if (zacinaId === id) return;
+
+    zacinaId = id;
+    uloz(KLIC_ZACINA, id);
+    obnovPrepinace();
+    novaHra();
+  }
+
+  /* ---------------------------------------------------------------
+     Vlastní rozměr.
+
+     Nabídka délek řady se staví z velikosti desky, takže kombinace mimo
+     povolený rozsah se vůbec neobjeví — nedají se tedy ani omylem
+     zvolit, ani schovat do adresy nebo do úložiště. Kdyby tu místo
+     výběru bylo druhé číselné pole, musela by se špatná dvojice po
+     zadání odmítat, a to je horší: hráč se dozví o pravidle až ve chvíli,
+     kdy ho poruší.
+     --------------------------------------------------------------- */
+  function postavVyberRady() {
+    var lo = kMin(vlastni.velikost);
+    var hi = kMax(vlastni.velikost);
+
+    // po zvětšení desky může dosavadní délka vypadnout z rozsahu
+    vlastni.k = Math.max(lo, Math.min(hi, vlastni.k));
+
+    elVstupK.textContent = '';
+
+    for (var k = lo; k <= hi; k++) {
+      var o = document.createElement('option');
+      o.value = String(k);
+      o.textContent = String(k);
+      if (k === vlastni.k) o.selected = true;
+      elVstupK.appendChild(o);
+    }
+
+    var deska = vlastni.velikost + '×' + vlastni.velikost;
+
+    /* Vysvětlení, proč nabídka nemá víc položek. Bez něj vypadá zúžený
+       výběr jako chyba — hráč vidí, že u větší desky zmizely trojky, ale
+       ne proč. */
+    elPoznK.textContent = lo === hi
+      ? 'Na desce ' + deska + ' dává smysl jedině ' + lo + ' v řadě.'
+      : 'Na desce ' + deska + ' jde volit ' + lo + ' až ' + hi + ' v řadě; ' +
+        'kratší řadu by tu první hráč srovnal skoro vždycky.';
+  }
+
+  /* Číslo z pole velikosti. Ořezané na povolený rozsah — atributy min
+     a max drží jen šipky u pole, ručně napsat jde cokoliv. */
+  function ctiVelikost() {
+    var v = parseInt(elVelikost.value, 10);
+    if (!isFinite(v)) return null;
+
+    return Math.max(VELIKOST_MIN, Math.min(VELIKOST_MAX, v));
+  }
+
+  /* Změna se bere až z 'change', ne z 'input': při psaní chodí událost
+     po každé číslici, takže by se cestou k „15“ deska nejdřív rozdala
+     jako 1 (po ořezu 3). Takhle se ozve, teprve když je číslo hotové —
+     po opuštění pole, po Enteru nebo po kliknutí na šipku. */
+  elVelikost.addEventListener('change', function () {
+    var v = ctiVelikost();
+
+    // prázdné nebo nesmyslné pole vrátíme na poslední platnou hodnotu
+    if (v === null) v = vlastni.velikost;
+
+    elVelikost.value = String(v);       // ať je v poli vidět ořezaná hodnota
+
+    if (v === vlastni.velikost) return;
+
+    vlastni.velikost = v;
+    postavVyberRady();                  // nabídka délek se mění s deskou
+    pouzijVlastni();
+  });
+
+  elVstupK.addEventListener('change', function () {
+    var k = parseInt(elVstupK.value, 10);
+    if (!isFinite(k) || k === vlastni.k) return;
+
+    vlastni.k = k;
+    pouzijVlastni();
+  });
+
+  /* Sáhnutí do polí zároveň přepne volbu na „Vlastní“ a rozdá novou hru.
+     Jinak by se hodnoty daly nastavit, a přesto by se hrálo dál na
+     předvolbě — pole by lhala o tom, co je na desce. */
+  function pouzijVlastni() {
+    ulozVlastni();
+
+    if (volbaId === 'vlastni') {
+      obnovPrepinace();      // detail přepínače nese rozměry, ty se změnily
+      novaHra();
+      return;
+    }
+
+    zmenVolbu('vlastni');    // obnovPrepinace i novaHra si udělá samo
+  }
+
+  /* ===============================================================
+     Testy do konzole.
+
+     Vystrčené na window schválně: celý zbytek souboru je uzavřený
+     v IIFE, takže se k AI zvenčí jinak nedá dostat. Testy nesahají na
+     rozehranou hru ani na DOM — pouštějí Ai.tah nad vlastními deskami,
+     takže se dají spustit kdykoliv.
+
+       piskvorky.test.turnaj()   — 20 partií silné AI proti sobě na 3×3
+       piskvorky.test.cas()      — nejhorší čas tahu na 15×15, hloubka 4
+     =============================================================== */
+  function silna() {
+    return najdiPodleId(SOUPERI, 'silna');
+  }
+
+  /* Odehraje jednu partii AI proti AI a vrátí výsledek. prvniTah se dá
+     vnutit zvenčí — bez toho by byly všechny partie silné AI stejné,
+     protože hraje deterministicky. */
+  function partie(velikost, k, souperX, souperO, prvniTah) {
+    var pocet = velikost * velikost;
+    var deska = [];
+    for (var i = 0; i < pocet; i++) deska.push(0);
+
+    var naTahu = 1;
+    var tahu = 0;
+    var nejdelsi = 0;
+
+    while (tahu < pocet) {
+      var start = performance.now();
+      var tah = (tahu === 0 && prvniTah !== undefined)
+        ? prvniTah
+        : Ai.tah(deska, velikost, velikost, k, naTahu,
+                 naTahu === 1 ? souperX : souperO);
+      var trvalo = performance.now() - start;
+      if (trvalo > nejdelsi) nejdelsi = trvalo;
+
+      if (tah < 0 || deska[tah] !== 0) {
+        return { vysledek: 'chyba', tah: tah, tahu: tahu, nejdelsi: nejdelsi };
+      }
+
+      deska[tah] = naTahu;
+      tahu++;
+
+      if (jeVyhraPo(deska, velikost, velikost, k, tah)) {
+        return { vysledek: naTahu === 1 ? 'X' : 'O', tahu: tahu, nejdelsi: nejdelsi };
+      }
+
+      naTahu = naTahu === 1 ? 2 : 1;
+    }
+
+    return { vysledek: 'remíza', tahu: tahu, nejdelsi: nejdelsi };
+  }
+
+  /* Silná AI proti sobě na 3×3. Zahájení se losuje: tři křížky v řadě
+     jsou remíza při dokonalé hře z KAŽDÉHO prvního tahu, takže losování
+     test nezeslabuje — naopak prověří všech devět zahájení místo
+     jednoho, které by deterministická AI hrála pořád dokola. */
+  function turnaj(pocet) {
+    pocet = pocet || 20;
+
+    var ai = silna();
+    var vysledky = { 'remíza': 0, 'X': 0, 'O': 0, 'chyba': 0 };
+    var nejdelsi = 0;
+
+    for (var n = 0; n < pocet; n++) {
+      var r = partie(3, 3, ai, ai, (Math.random() * 9) | 0);
+      vysledky[r.vysledek]++;
+      if (r.nejdelsi > nejdelsi) nejdelsi = r.nejdelsi;
+    }
+
+    var ok = vysledky['remíza'] === pocet;
+    console.log('Turnaj 3×3, silná AI proti sobě, ' + pocet + ' partií:');
+    console.log('  remíz: ' + vysledky['remíza'] +
+                ', výher X: ' + vysledky['X'] +
+                ', výher O: ' + vysledky['O'] +
+                ', chyb: ' + vysledky['chyba']);
+    console.log('  nejdelší tah: ' + nejdelsi.toFixed(1) + ' ms');
+    console.log(ok ? '  OK — všechny partie skončily remízou'
+                   : '  CHYBA — silná AI na 3×3 nesmí prohrát ani vyhrát');
+
+    return { pocet: pocet, vysledky: vysledky, nejdelsiMs: nejdelsi, ok: ok };
+  }
+
+  /* Nejhorší čas tahu na 15×15 při hloubce 4. Měří se skutečná partie
+     silné AI proti sobě, ne prázdná deska: nejdražší jsou pozice ke
+     středu hry, kde už je na desce dost kamenů, takže je hodně
+     kandidátů, ale ještě nikdo nevyhrál. */
+  function cas(tahu) {
+    tahu = tahu || 30;
+
+    var ai = silna();
+    var velikost = 15;
+    var pocet = velikost * velikost;
+    var deska = [];
+    for (var i = 0; i < pocet; i++) deska.push(0);
+
+    var naTahu = 1;
+    var casy = [];
+
+    for (var n = 0; n < tahu; n++) {
+      var start = performance.now();
+      var tah = Ai.tah(deska, velikost, velikost, 5, naTahu, ai);
+      casy.push(performance.now() - start);
+
+      if (tah < 0 || deska[tah] !== 0) break;
+      deska[tah] = naTahu;
+
+      if (jeVyhraPo(deska, velikost, velikost, 5, tah)) break;
+      naTahu = naTahu === 1 ? 2 : 1;
+    }
+
+    var nej = 0, soucet = 0;
+    for (i = 0; i < casy.length; i++) {
+      soucet += casy[i];
+      if (casy[i] > nej) nej = casy[i];
+    }
+
+    console.log('15×15, řada 5, silná AI (hloubka 4), ' + casy.length + ' tahů:');
+    console.log('  nejhorší tah: ' + nej.toFixed(1) + ' ms');
+    console.log('  průměr:       ' + (soucet / casy.length).toFixed(1) + ' ms');
+
+    return { tahu: casy.length, nejhorsiMs: nej, prumerMs: soucet / casy.length };
+  }
+
+  window.piskvorky = { test: { turnaj: turnaj, cas: cas, partie: partie }, ai: Ai };
+
+  /* ---------------------------------------------------------------
+     Start.
+     --------------------------------------------------------------- */
+  elVelikost.value = String(vlastni.velikost);
+  postavVyberRady();
+  obnovPrepinace();
+  novaHra();
+})();
+</script>
+</body>
+</html>

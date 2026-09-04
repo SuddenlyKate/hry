@@ -1,0 +1,2444 @@
+<!DOCTYPE html>
+<html lang="cs">
+<head>
+  <meta charset="utf-8">
+  <meta name="viewport"
+        content="width=device-width, initial-scale=1, maximum-scale=1, user-scalable=no, viewport-fit=cover">
+  <title>Had — Hry v prohlížeči</title>
+  <!-- Pojistka pro případ, že se sdílený styl nenačte (jiný server,
+       špatný MIME typ, offline). Stránka pak není holý bílý dokument. -->
+  <style>
+    :root {
+      --bg:   #0f1115;
+      --text: #e6e9ef;
+      --font: system-ui, -apple-system, "Segoe UI", Roboto, "Helvetica Neue", Arial, sans-serif;
+    }
+    html { color-scheme: dark; background: #0f1115; }
+    body {
+      margin: 0;
+      background: var(--bg);
+      color: var(--text);
+      font-family: var(--font);
+    }
+  </style>
+  <link rel="stylesheet" href="../shared/style.css">
+  <style>
+    /* Barvy věcí, které jsou jen v módech. Do sdílené palety nepatří,
+       tak sedí tady — JS si je vyzvedne stejnou cestou jako ostatní. */
+    :root {
+      --jed:    #a06cd5;
+      --klic:   #f2c14e;
+      --socha:  #7c8598;
+      --portal: #38bdf8;
+
+      /* Bliknutí po obrácení. Dva odstíny, ať je i v tu chvíli poznat,
+         kde je hlava — právě ta skočila na druhý konec. */
+      --obrat:       #f472b6;
+      --obrat-hlava: #fbcfe8;
+
+      /* Dvojče. Jantarová dvojice proti zelené je poznat i koutkem oka;
+         hlava má svůj světlejší odstín stejně jako u prvního hada. */
+      --dvojce:       #c98a2e;
+      --dvojce-hlava: #f5a524;
+    }
+
+    /* Na herní stránce nechceme přiblížení dvojklikem, tažení stránky
+       ani výběr textu při swipu. */
+    html, body {
+      overscroll-behavior: none;
+      -webkit-text-size-adjust: 100%;
+    }
+
+    /* Pruh na posuvník je rezervovaný pořád, i když stránka zrovna
+       rolovat nejde. Bez toho by zamčení scrollu za hry (.hra-bezi níž)
+       posuvník sebralo, stránka by se o jeho šířku rozšířila a plocha
+       by při každém startu poskočila. */
+    html {
+      scrollbar-gutter: stable;
+    }
+
+    /* Za běhu hry patří prst hadovi, ne stránce: swipe mimo plochu
+       nesmí stránkou hnout ani o pixel. Třídu sundá pauza, konec hry
+       i návrat do menu — pod plochou jsou panely nastavení a legenda,
+       ke kterým se hráč musí dostat. */
+    body.hra-bezi {
+      overflow: hidden;
+    }
+
+    /* Herní stránka je užší než rozcestník a drží se uprostřed. */
+    .wrap {
+      max-width: 720px;
+      margin-inline: auto;
+    }
+
+    main {
+      display: flex;
+      flex-direction: column;
+      align-items: center;
+      touch-action: manipulation;     /* zabije double-tap zoom */
+      user-select: none;
+      -webkit-user-select: none;
+      -webkit-touch-callout: none;
+    }
+
+    /* Sloupec hry — šířku určuje plocha, takže se HUD i legenda
+       zarovnají na její levý okraj. Šířku neomezujeme: na úzkém
+       displeji smí plocha při 30×30 zasáhnout do odsazení stránky,
+       aby buňka nemusela pod CELL_MIN. Centrování obstará
+       align-items na <main> — přesah je pak na obou stranách stejný. */
+    .hra {
+      display: flex;
+      flex-direction: column;
+      width: fit-content;
+    }
+
+    /* HUD nad plochou.
+
+       Mřížka s pevnými sloupci, ne volný text s mezerami: každý údaj
+       má vlastní sloupec, takže přibývající cifra skóre neposune
+       sousedy do stran. Sloupce drží šířku díky min-width na číslech
+       níž — max-content se pak nemá podle čeho měnit. */
+    .hud {
+      display: grid;
+      grid-template-columns: repeat(4, max-content);
+      gap: 0.3rem 1.5rem;
+      margin-bottom: 0.75rem;
+      font-family: var(--font-mono);
+      font-variant-numeric: tabular-nums;   /* pojistka, kdyby --font-mono
+                                               spadlo na náhradní písmo */
+      font-size: 0.9rem;
+      color: var(--text-dim);
+    }
+
+    /* Na úzkém displeji by čtyři sloupce přetekly, tak dva a dva. */
+    @media (max-width: 600px) {
+      .hud {
+        grid-template-columns: repeat(2, max-content);
+      }
+    }
+
+    .hud__cislo {
+      display: inline-block;
+      text-align: right;
+      color: var(--text);
+      font-weight: 600;
+    }
+
+    /* Šířka podle nejdelší hodnoty, jaká může padnout: skóre i rekord
+       vyjdou nejvýš na pět cifer (30×30 na rychlou dá 15 249), délka
+       na tři (900 buněk), násobitel na „2,38×“. */
+    .hud__cislo--skore,
+    .hud__cislo--rekord,
+    .hud__cislo--nasobitel {
+      min-width: 5ch;
+    }
+
+    .hud__cislo--delka {
+      min-width: 3ch;
+    }
+
+    /* ---------- pásmo citlivé na swipe ----------
+
+       Prst při rychlém tahu často začne nebo skončí až kousek za
+       okrajem plátna. Rezerva kolem plochy proto poslouchá na tahy
+       stejně jako plocha sama — posluchače má navěšené tenhle obal,
+       ne canvas.
+
+       touch-action: none patří sem a nikam jinam. Uvnitř pásma prst
+       stránkou nehne, takže se tah vždycky dopočítá celý; zbytek
+       stránky rolovat musí. Spoléhat na preventDefault v touchmove
+       nejde — ten je ve výchozím stavu pasivní.
+
+       Záporné vodorovné okraje ruší vodorovnou rezervu z rozvržení:
+       .hra má šířku podle obsahu, takže by se jinak o rezervu
+       rozšířila a HUD, panely i legenda by přestaly lícovat s okrajem
+       plátna. Pásmo tak přetéká do odsazení stránky — prizpusob() na
+       ně v rozpočtu šířky pamatuje, aby stránka nepřetekla ven. */
+    .swipe-zona {
+      --swipe-rezerva: 18px;
+      align-self: center;
+      display: flex;
+      justify-content: center;
+      padding: var(--swipe-rezerva);
+      margin-inline: calc(-1 * var(--swipe-rezerva));
+      touch-action: none;
+    }
+
+    /* Plocha a překrytí.
+
+       align-self je tu podstatné: obal je flex položka, takže by se bez
+       něj roztáhl na šířku nejširšího sourozence (HUD) a vedle plátna
+       by v rámu zbyl pruh pozadí stránky. Takhle rám obepne plátno
+       a zbylé místo patří sloupci, ne ploše. */
+    .plocha-obal {
+      position: relative;
+      align-self: center;
+      display: flex;
+      justify-content: center;
+      border: 1px solid var(--border);
+      border-radius: var(--radius-sm);
+      overflow: hidden;
+      background: var(--board);       /* záloha, kdyby přece jen zbylo místo */
+      line-height: 0;                 /* ať pod canvasem nezůstane mezera */
+    }
+
+    canvas {
+      display: block;
+      margin-inline: auto;
+      background: var(--board);
+      /* touch-action řeší .swipe-zona nad plátnem, tady být nesmí:
+         plocha citlivá na tah je větší než plátno */
+      /* rozměry nastavuje JS podle okna a devicePixelRatio */
+    }
+
+    /* Odpočet před startem — velké číslo přes plochu, ale plocha pod
+       ním musí zůstat vidět, takže bez pozadí. pointer-events: none je
+       nutnost: bez toho by číslo spolklo swipe určený plátnu.
+       Velikost písma dopočítá JS podle skutečné velikosti plochy. */
+    .odpocet {
+      position: absolute;
+      inset: 0;
+      display: flex;
+      align-items: center;
+      justify-content: center;
+      pointer-events: none;
+      font-family: var(--font-mono);
+      font-weight: 700;
+      line-height: 1;
+      color: var(--accent);
+      /* Číslo sedí přesně nad hadem uprostřed plochy, takže musí být
+         průsvitné — jinak by hráč přes ně hada neviděl. */
+      opacity: 0.8;
+      text-shadow: 0 0.02em 0.12em rgba(0, 0, 0, 0.75);
+    }
+
+    /* .je-skryte je v souboru výš, samo o sobě by nad display: flex
+       nevyhrálo — proto tahle dvojtřída. */
+    .odpocet.je-skryte {
+      display: none;
+    }
+
+    /* Jediné překrytí pro všechny stavy. Mění se jen texty a třída,
+       prvky uvnitř zůstávají. Pozadí je neprůhledné, aby přes něj
+       nebyla vidět herní plocha. */
+    .overlay {
+      position: absolute;
+      inset: 0;
+      display: none;
+      flex-direction: column;
+      align-items: center;
+      justify-content: center;
+      gap: 0.7rem;
+      padding: 0.9rem;
+      text-align: center;
+      line-height: 1.5;
+      background: var(--board);
+      /* Na malé ploše (12×12) se s volbou obtížnosti obsah nemusí
+         vejít — radši ať jde odrolovat, než aby přetekl přes okraj. */
+      overflow-y: auto;
+    }
+
+    .overlay.je-videt {
+      display: flex;
+    }
+
+    .overlay h2 {
+      margin: 0;
+      font-size: clamp(1.3rem, 6vw, 1.7rem);
+      letter-spacing: -0.01em;
+    }
+
+    .overlay__skore {
+      margin: 0;
+      font-family: var(--font-mono);
+      font-size: 1.05rem;
+      color: var(--text);
+    }
+
+    .je-skryte {
+      display: none;
+    }
+
+    /* Legenda ovládání pod plochou. Sloupec kláves má šířku podle
+       nejširšího řádku, takže popisy začínají všechny na stejné ose. */
+    .ovladani {
+      display: grid;
+      grid-template-columns: max-content 1fr;
+      gap: 0.35rem 0.9rem;
+      align-items: center;
+      margin: 0.9rem 0 0;
+      font-size: 0.85rem;
+    }
+
+    .ovladani dt {
+      justify-self: start;
+      display: flex;
+      gap: 0.15rem;
+      align-items: center;
+      flex-wrap: wrap;
+    }
+
+    .ovladani dd {
+      justify-self: start;
+      margin: 0;
+      color: var(--text-dim);
+    }
+
+    .ovladani kbd {
+      padding: 0.1rem 0.35rem;
+      border: 1px solid var(--border-hover);
+      border-radius: 4px;
+      background: var(--bg-elev);
+      font-family: var(--font-mono);
+      font-size: 0.9em;
+      line-height: 1.4;
+      color: var(--text);
+    }
+
+    .dotyk {
+      margin: 0.6rem 0 0;
+      color: var(--text-dim);
+      font-size: 0.85rem;
+    }
+
+    /* ---------- směrová tlačítka ----------
+       Záloha ke swipu: na rychlost 70 ms je tah prstem nepřesný a ne
+       každému sedne. Klávesnice a myš je nepotřebují, proto se ukážou
+       jen na hrubém ukazateli — u tvrdého display: none v základu,
+       aby se do rozpočtu výšky plochy nezapočítaly. */
+    .dpad {
+      display: none;
+    }
+
+    @media (pointer: coarse) {
+      .dpad {
+        display: grid;
+        /* 56px je spodní hranice pro pohodlný zásah palcem. Přes max()
+           drží i tehdy, když si uživatel zmenší výchozí písmo. */
+        grid-template-columns: repeat(3, max(3.5rem, 56px));
+        grid-auto-rows: max(3.5rem, 56px);
+        gap: 0.75rem;
+        align-self: center;
+        margin-top: 0.8rem;
+      }
+    }
+
+    /* Plný kříž 3x3: každý směr sedí tam, kam ukazuje, takže se trefíš
+       bez dívání. Prostřední buňka zůstane prázdná — palec má kde
+       odpočívat, aniž by omylem zadal směr. */
+    .dpad__btn--nahoru { grid-column: 2; grid-row: 1; }
+    .dpad__btn--vlevo  { grid-column: 1; grid-row: 2; }
+    .dpad__btn--vpravo { grid-column: 3; grid-row: 2; }
+    .dpad__btn--dolu   { grid-column: 2; grid-row: 3; }
+
+    .dpad__btn {
+      display: flex;
+      align-items: center;
+      justify-content: center;
+      border: 1px solid var(--border);
+      border-radius: var(--radius-sm);
+      background: var(--bg-elev);
+      color: var(--text-dim);
+      font: inherit;
+      font-size: 1rem;
+      line-height: 1;
+      cursor: pointer;
+      touch-action: manipulation;     /* žádné přiblížení dvojklikem */
+      -webkit-tap-highlight-color: transparent;
+      padding: 0;
+    }
+
+    /* Šipka je kreslená, ne psaná: znaky ▲▼◀▶ i emoji vykreslí každý
+       systém jinou velikostí a někde je nahradí barevnou verzí. Jeden
+       trojúhelník otočený po čtvrtinách vypadá všude stejně a všechny
+       čtyři jsou zaručeně shodné. */
+    .dpad__ikona {
+      width: 40%;
+      height: 40%;
+      fill: currentColor;
+      display: block;
+      pointer-events: none;   /* cíl události je vždy tlačítko */
+    }
+
+    .dpad__btn--vpravo .dpad__ikona { transform: rotate(90deg); }
+    .dpad__btn--dolu   .dpad__ikona { transform: rotate(180deg); }
+    .dpad__btn--vlevo  .dpad__ikona { transform: rotate(270deg); }
+
+    /* Odezva na stisk musí být vidět hned — tlačítko zabírá už při
+       pointerdown, ne až po zvednutí prstu. */
+    .dpad__btn:active {
+      background: var(--accent-soft);
+      border-color: var(--accent);
+      color: var(--accent);
+    }
+
+    /* touch-action se nedědí, takže ho každý ovládací prvek potřebuje
+       vlastní — jinak dvojklik na tlačítko stránku přiblíží. */
+    .btn,
+    .prepinac,
+    .smazat,
+    .mody__nadpis {
+      touch-action: manipulation;
+    }
+
+    /* hláška o rekordu na obrazovce konce hry */
+    .rekord {
+      margin: 0;
+      color: var(--accent);
+      font-weight: 600;
+      font-size: 1rem;
+      letter-spacing: 0.02em;
+    }
+
+    /* ---------- volba obtížnosti pod plochou ----------
+       Dvě nezávislé osy. Vedle sebe, dokud je na ně místo, na úzkém
+       displeji pod sebou. Panel je vidět pořád, i za hry — změna volby
+       hru ukončí a vrátí na úvodní obrazovku. */
+    .nastaveni {
+      display: flex;
+      flex-wrap: wrap;
+      gap: 0.55rem 1.2rem;
+      margin-top: 0.9rem;
+    }
+
+    .nastaveni__skupina {
+      flex: 1 1 13rem;      /* pod dvojnásobek téhle šířky se zalomí */
+      min-width: 0;
+    }
+
+    .nastaveni__popis {
+      display: block;
+      margin-bottom: 0.25rem;
+      color: var(--text-dim);
+      font-size: 0.68rem;
+      font-weight: 600;
+      text-transform: uppercase;
+      letter-spacing: 0.08em;
+    }
+
+    .prepinace {
+      display: flex;
+      gap: 0.3rem;
+    }
+
+    .prepinac {
+      flex: 1 1 0;
+      min-width: 0;
+      display: flex;
+      flex-direction: column;
+      align-items: center;
+      gap: 0.05rem;
+      padding: 0.35rem 0.25rem;
+      border: 1px solid var(--border);
+      border-radius: var(--radius-sm);
+      background: var(--bg-elev);
+      color: var(--text-dim);
+      font: inherit;
+      line-height: 1.25;
+      cursor: pointer;
+      transition: background 0.15s ease, border-color 0.15s ease, color 0.15s ease;
+    }
+
+    .prepinac:hover {
+      background: var(--bg-elev-hover);
+      border-color: var(--border-hover);
+      color: var(--text);
+    }
+
+    /* Aktivní volba — jiná barva, rám i výplň, ne jen odstín textu.
+       aria-checked mají předvolby obtížnosti (jedna z řady),
+       aria-pressed přepínače módů (nezávislé zapnout/vypnout). */
+    .prepinac[aria-checked="true"],
+    .prepinac[aria-pressed="true"] {
+      background: var(--accent-soft);
+      border-color: var(--accent);
+      color: var(--accent);
+    }
+
+    .prepinac__nazev {
+      font-size: 0.78rem;
+      font-weight: 600;
+    }
+
+    .prepinac__detail {
+      font-family: var(--font-mono);
+      font-size: 0.66rem;
+      opacity: 0.8;
+    }
+
+    /* Příspěvek módu do násobitele. Vlastní barva schválně přebíjí
+       i barvu zapnutého tlačítka — plus a minus musí být poznat
+       na první pohled, zapnuté nebo ne. */
+    .prepinac__prispevek {
+      font-family: var(--font-mono);
+      font-size: 0.66rem;
+      font-weight: 600;
+      color: var(--accent);
+    }
+
+    .prepinac__prispevek--zapor {
+      color: var(--danger);
+    }
+
+    /* Rozpis násobitele pod panelem módů — hráč vidí, co mu která
+       volba vynese, i z čeho se výsledek skládá. */
+    .nasobitel {
+      margin: 0.5rem 0 0;
+      color: var(--accent);
+      font-family: var(--font-mono);
+      font-size: 0.74rem;
+    }
+
+    /* ---------- módy ----------
+       Nezávislé přepínače, dají se kombinovat. Sbalené pod nadpisem,
+       protože je to nadstavba — <details> to umí bez kusu JS a je
+       ovladatelné z klávesnice zadarmo. */
+    .mody {
+      margin-top: 0.75rem;
+    }
+
+    .mody__nadpis {
+      display: inline-flex;
+      align-items: center;
+      gap: 0.4rem;
+      cursor: pointer;
+      color: var(--text-dim);
+      font-size: 0.68rem;
+      font-weight: 600;
+      text-transform: uppercase;
+      letter-spacing: 0.08em;
+      list-style: none;               /* pryč s výchozím trojúhelníkem */
+    }
+
+    .mody__nadpis::-webkit-details-marker {
+      display: none;
+    }
+
+    .mody__nadpis::before {
+      content: '▸';
+      display: inline-block;
+      transition: transform 0.15s ease;
+    }
+
+    .mody[open] .mody__nadpis::before {
+      transform: rotate(90deg);
+    }
+
+    /* Co je zapnuté, musí být poznat i se sbaleným panelem. */
+    .mody__stav {
+      color: var(--accent);
+      font-weight: 400;
+      text-transform: none;
+      letter-spacing: 0;
+    }
+
+    .mody__seznam {
+      flex-wrap: wrap;                /* až módů přibude, řada se zalomí */
+      margin-top: 0.35rem;
+    }
+
+    .mody__seznam .prepinac {
+      flex: 1 1 7rem;
+    }
+
+    /* Na opravdu malé ploše (12×12 s nejmenší buňkou) by se i tenhle
+       krátký obsah nevešel. Třídu přidává JS podle skutečné velikosti
+       plochy, ne podle šířky okna. */
+    .overlay.je-tesne {
+      gap: 0.3rem;
+      padding: 0.6rem;
+    }
+
+    .overlay.je-tesne h2 {
+      font-size: 1.15rem;
+    }
+
+    .overlay.je-tesne .overlay__skore { font-size: 0.95rem; }
+    .overlay.je-tesne .rekord         { font-size: 0.9rem; }
+    .overlay.je-tesne .btn            { padding: 0.4rem 0.9rem; }
+
+    /* nenápadné tlačítko pod legendou — nemá vypadat jako akce hry */
+    .smazat {
+      align-self: flex-start;   /* jinak by se v .hra roztáhlo na plnou šířku */
+      margin-top: 1rem;
+      padding: 0;
+      border: 0;
+      background: none;
+      color: var(--text-dim);
+      font: inherit;
+      font-size: 0.78rem;
+      text-decoration: underline;
+      text-underline-offset: 3px;
+      cursor: pointer;
+    }
+
+    .smazat:hover,
+    .smazat:focus-visible {
+      color: var(--danger);
+    }
+  </style>
+</head>
+<body>
+  <div class="wrap">
+
+    <a class="back-link" href="../">← Zpět na rozcestník</a>
+
+    <header class="site-header">
+      <h1>Had</h1>
+      <p>Sbírej jídlo, rosť a nenaraz do sebe ani do zdi.</p>
+    </header>
+
+    <main>
+      <div class="hra">
+        <div class="hud">
+          <span>Skóre: <strong class="hud__cislo hud__cislo--skore" id="hud-skore">0</strong></span>
+          <span>Délka: <strong class="hud__cislo hud__cislo--delka" id="hud-delka">3</strong></span>
+          <span>Násobitel: <strong class="hud__cislo hud__cislo--nasobitel" id="hud-nasobitel">1×</strong></span>
+          <span>Rekord: <strong class="hud__cislo hud__cislo--rekord" id="hud-rekord">0</strong></span>
+        </div>
+
+        <!-- Pásmo citlivé na swipe: rezerva kolem plochy poslouchá na
+             tahy stejně jako plocha, aby prst nemusel skončit přesně
+             na plátně. Posluchače má tenhle prvek, ne canvas. -->
+        <div class="swipe-zona" id="swipe-zona">
+          <div class="plocha-obal">
+            <canvas id="plocha"></canvas>
+
+            <!-- Odpočet před startem; leží nad plochou, ale pod překrytím. -->
+            <div class="odpocet je-skryte" id="odpocet" aria-live="polite"></div>
+
+            <!-- Jedno překrytí pro všechny stavy; JS mění jen texty
+                 a třídu je-videt, prvky zůstávají na místě. -->
+            <div class="overlay je-videt" id="prekryti">
+              <h2 id="prekryti-nadpis">Had</h2>
+              <p class="overlay__skore je-skryte" id="prekryti-skore">Skóre: <strong id="prekryti-skore-hodnota">0</strong></p>
+              <p class="rekord je-skryte" id="prekryti-rekord">Nový rekord!</p>
+              <button class="btn btn--primary" id="prekryti-btn" type="button">Hrát</button>
+            </div>
+          </div>
+        </div>
+
+        <!-- Směrová tlačítka jako záloha ke swipu. Skrytá v CSS všude,
+             kde ukazatel není hrubý — na myši a klávesnici by jen
+             ukrajovala výšku ploše. -->
+        <div class="dpad" id="dpad" role="group" aria-label="Směrové ovládání">
+          <button class="dpad__btn dpad__btn--nahoru" type="button"
+                  data-smer="nahoru" aria-label="Nahoru"><svg
+              class="dpad__ikona" viewBox="0 0 24 24" aria-hidden="true"
+              focusable="false"><path d="M12 5 L22 19 H2 Z"/></svg></button>
+          <button class="dpad__btn dpad__btn--vlevo" type="button"
+                  data-smer="vlevo" aria-label="Doleva"><svg
+              class="dpad__ikona" viewBox="0 0 24 24" aria-hidden="true"
+              focusable="false"><path d="M12 5 L22 19 H2 Z"/></svg></button>
+          <button class="dpad__btn dpad__btn--vpravo" type="button"
+                  data-smer="vpravo" aria-label="Doprava"><svg
+              class="dpad__ikona" viewBox="0 0 24 24" aria-hidden="true"
+              focusable="false"><path d="M12 5 L22 19 H2 Z"/></svg></button>
+          <button class="dpad__btn dpad__btn--dolu" type="button"
+                  data-smer="dolu" aria-label="Dolů"><svg
+              class="dpad__ikona" viewBox="0 0 24 24" aria-hidden="true"
+              focusable="false"><path d="M12 5 L22 19 H2 Z"/></svg></button>
+        </div>
+
+        <!-- Volba obtížnosti je mimo překrytí, takže je vidět i za hry.
+             Přepínače staví JS ze seznamu stupňů, ať je popis předvoleb
+             jen na jednom místě. -->
+        <div class="nastaveni" id="nastaveni">
+          <div class="nastaveni__skupina">
+            <span class="nastaveni__popis" id="popis-pole">Velikost pole</span>
+            <div class="prepinace" role="radiogroup" aria-labelledby="popis-pole" id="volba-pole"></div>
+          </div>
+          <div class="nastaveni__skupina">
+            <span class="nastaveni__popis" id="popis-rychlost">Rychlost</span>
+            <div class="prepinace" role="radiogroup" aria-labelledby="popis-rychlost" id="volba-rychlost"></div>
+          </div>
+        </div>
+
+        <!-- Módy: nezávislé přepínače, dají se kombinovat.
+             Tlačítka staví JS ze seznamu MODY. -->
+        <details class="mody" id="mody" open>
+          <summary class="mody__nadpis">
+            Módy <span class="mody__stav" id="mody-stav"></span>
+          </summary>
+          <div class="prepinace mody__seznam" role="group"
+               aria-label="Herní módy" id="volba-mody"></div>
+        </details>
+
+        <!-- Rozpis stojí mimo <details>, ať je vidět i se sbalenými módy. -->
+        <p class="nasobitel" id="rozpis-nasobitele"></p>
+
+        <dl class="ovladani">
+          <dt><kbd>←</kbd><kbd>↑</kbd><kbd>↓</kbd><kbd>→</kbd>&nbsp;&nbsp; <kbd>W</kbd><kbd>A</kbd><kbd>S</kbd><kbd>D</kbd></dt>
+          <dd>směr hada</dd>
+          <dt><kbd>mezerník</kbd></dt>
+          <dd>pauza</dd>
+        </dl>
+
+        <p class="dotyk">Na dotykových zařízeních ovládej tahem prstu po ploše i jejím okolí, nebo směrovými tlačítky.</p>
+
+        <button class="smazat" id="btn-smazat" type="button">Vymazat rekord</button>
+      </div>
+    </main>
+
+  </div>
+
+<script>
+(function () {
+  'use strict';
+
+  var CELL_MIN = 10;             // pod tím už je hra nečitelná
+  var CELL_MAX = 24;             // nad tím zbytečně velká na desktopu
+  var TESNA_PLOCHA = 200;        // pod tím se překrytí přepne do úsporné verze
+
+  /* Odpočet před startem. Po odpauzování stačí kratší — hráč už ví,
+     kde had je, jen potřebuje chvíli položit prst na klávesy. */
+  var ODPOCET_MS    = 1000;      // jak dlouho svítí jedno číslo
+  var ODPOCET_START = 3;         // před novou hrou
+  var ODPOCET_PAUZA = 1;         // po odpauzování
+
+  var ODPOCET_PODIL = 0.3;       // výška číslice vůči straně plochy
+
+  /* Zrychlování je relativní k výchozí rychlosti zvoleného stupně —
+     jinak by pomalá obtížnost skončila stejně rychlá jako rychlá. */
+  var ZRYCHLI_PO     = 5;        // po kolika jídlech zrychlit
+  var ZRYCHLENI_KROK = 0.05;     // o kolik z výchozího kroku pokaždé ubrat
+  var ZRYCHLENI_DNO  = 0.60;     // pod 60 % výchozího kroku už ne
+
+  /* Dvě nezávislé osy obtížnosti. Seznamy jsou zároveň jediným
+     zdrojem popisků, platných hodnot při načítání z úložiště
+     i bodových násobitelů. Výsledný násobitel je součin obou os:
+     malá plocha a vysoká rychlost se sčítají do nejvyšší sazby. */
+  var VELIKOSTI = [
+    { pole: 12, nazev: 'Malé',    detail: '12×12', nasobitel: 2.0 },
+    { pole: 20, nazev: 'Střední', detail: '20×20', nasobitel: 1.4 },
+    { pole: 30, nazev: 'Velké',   detail: '30×30', nasobitel: 1.0 }
+  ];
+
+  var RYCHLOSTI = [
+    { stepMs: 160, nazev: 'Pomalá',   detail: '160 ms', nasobitel: 1.0 },
+    { stepMs: 110, nazev: 'Normální', detail: '110 ms', nasobitel: 1.3 },
+    { stepMs:  70, nazev: 'Rychlá',   detail: '70 ms',  nasobitel: 1.7 }
+  ];
+
+  var BODY_ZA_JIDLO = 10;        // základ, který se násobí obtížností
+
+  var VYCHOZI_NASTAVENI = { pole: 20, stepMs: 110 };
+
+  /* Herní módy. Nezávislé přepínače, libovolně kombinovatelné —
+     nejde o výběr jednoho z. Seznam je jediné místo, kde se mód
+     zavádí: odsud se berou popisky, klíče do game.mods i do úložiště.
+     Přidání dalšího módu je řádek tady plus jeho chování ve step().
+
+     id se nesmí měnit, je to klíč v localStorage. */
+  var MODY = [
+    { id: 'bezZdi',  nazev: 'Bez zdí', detail: 'průchozí okraje',  prispevek: -0.3 },
+    { id: 'jed',     nazev: 'Jed',     detail: '−3 články',        prispevek:  0.3 },
+    { id: 'klic',    nazev: 'Klíč',    detail: 'odemyká jídlo',    prispevek:  0.2 },
+    { id: 'sochy',   nazev: 'Sochy',   detail: 'z jídla překážka', prispevek:  0.6 },
+    { id: 'portaly', nazev: 'Portály', detail: 'spojené brány',    prispevek:  0.1 },
+    { id: 'obraceni', nazev: 'Obrácení', detail: 'po jídle otočka', prispevek: 0.3 },
+    { id: 'mizejici', nazev: 'Mizející jídlo', detail: 'po 5 s jinam', prispevek: 0.3 },
+    { id: 'tma',     nazev: 'Tma',     detail: 'světlo jen u hlavy', prispevek: 0.5 },
+    { id: 'syr',     nazev: 'Sýr',     detail: 'každý druhý článek dutý', prispevek: 0.4 },
+    { id: 'dvojce',  nazev: 'Dvojče',  detail: 'druhý had zrcadlově', prispevek: 0.8 }
+  ];
+
+  var NASOBITEL_MIN = 0.5;       // ať násobitel nikdy neklesne k nule
+
+  var HAD_MIN      = 3;          // kratší už není had; zároveň startovní délka
+  var JED_ZKRACENI = 3;          // o kolik článků zkrátí otrávené jídlo
+
+  /* O kolik článků had povyroste za snědené jídlo. Se sýrem o dvojnásobek:
+     polovina jeho délky je dutá a nepřekáží, takže by mód byl jinak jen
+     snazší verzí základní hry. */
+  var NAROST     = 1;
+  var NAROST_SYR = 2;
+
+  var PORTAL_ODSTUP = 3;         // portály musí být od sebe aspoň cols/3
+  var PORTAL_POKUSY = 40;        // kolikrát zkusit dvojici, než vezmeme nejlepší
+
+  var BLIK_MS = 150;             // jak dlouho svítí had po obrácení
+
+  /* Jak dlouho jídlo (a klíč) vydrží na místě v módu Mizející jídlo.
+     Změna se musí promítnout i do popisku módu v MODY. */
+  var MIZENI_MS = 5000;
+
+  /* Mód Tma: poloměry světla kolem hlavy, v buňkách. Do prvního je
+     scéna vidět beze změny, od druhého je tma úplná, mezi nimi se
+     přechází. */
+  var TMA_JASNO = 3;
+  var TMA_PLNA  = 5;
+
+  var NADPIS_VYHRA = 'Vyhrála jsi!';   // zaplněná plocha není prohra
+
+  var canvas = document.getElementById('plocha');
+  var ctx = canvas.getContext('2d');
+  var obal = canvas.parentNode;
+  var zona = obal.parentNode;          // pásmo citlivé na swipe
+  var hra = document.querySelector('.hra');
+  var main = document.querySelector('main');
+  var elDpad = document.getElementById('dpad');
+
+  var elSkore     = document.getElementById('hud-skore');
+  var elDelka     = document.getElementById('hud-delka');
+  var elNasobitel = document.getElementById('hud-nasobitel');
+  var elRekord    = document.getElementById('hud-rekord');
+
+  var elOdpocet       = document.getElementById('odpocet');
+  var elPrekryti      = document.getElementById('prekryti');
+  var elNadpis        = document.getElementById('prekryti-nadpis');
+  var elSkoreRadek    = document.getElementById('prekryti-skore');
+  var elSkoreHodnota  = document.getElementById('prekryti-skore-hodnota');
+  var elRekordHlaska  = document.getElementById('prekryti-rekord');
+  var elBtn           = document.getElementById('prekryti-btn');
+  var elSmazat        = document.getElementById('btn-smazat');
+
+  var elNastaveni     = document.getElementById('nastaveni');
+  var elVolbaPole     = document.getElementById('volba-pole');
+  var elVolbaRychlost = document.getElementById('volba-rychlost');
+  var elMody          = document.getElementById('mody');
+  var elVolbaMody     = document.getElementById('volba-mody');
+  var elModyStav      = document.getElementById('mody-stav');
+  var elRozpis        = document.getElementById('rozpis-nasobitele');
+
+  /* ---------------------------------------------------------------
+     Úložiště: nastavení a nejlepší skóre.
+
+     Všechna volání jsou v try/catch: v privátním okně a při zakázaném
+     úložišti localStorage vyhazuje výjimku už při čtení. Hra pak běží
+     dál, jen si nic nepamatuje.
+
+     Rekord je jeden jediný, prosté číslo: nejvyšší skóre napříč vším.
+     Díky násobitelům jsou výsledky z různých obtížností i módů
+     srovnatelné, takže se vede pořád a nic se z něj nevyjímá.
+
+     Klíč má verzi: hodnota pod starým 'had:best' vznikla podle jiných
+     pravidel bodování, takže se nedá porovnávat a při startu se maže.
+     --------------------------------------------------------------- */
+  var KLIC_NASTAVENI    = 'had:nastaveni';
+  var KLIC_REKORD       = 'had:best:v2';
+  var KLIC_REKORD_STARY = 'had:best';
+  var KLIC_MODY         = 'had:mody';
+
+  /* Hodnota z úložiště se bere jen tehdy, když odpovídá některé
+     předvolbě — jinak by ručně upravený záznam nastavil mřížku,
+     na kterou hra není stavěná. */
+  function jePredvolba(seznam, klic, hodnota) {
+    for (var i = 0; i < seznam.length; i++) {
+      if (seznam[i][klic] === hodnota) return true;
+    }
+    return false;
+  }
+
+  function nactiNastaveni() {
+    try {
+      var ulozene = JSON.parse(localStorage.getItem(KLIC_NASTAVENI));
+      if (ulozene &&
+          jePredvolba(VELIKOSTI, 'pole', ulozene.pole) &&
+          jePredvolba(RYCHLOSTI, 'stepMs', ulozene.stepMs)) {
+        return { pole: ulozene.pole, stepMs: ulozene.stepMs };
+      }
+    } catch (e) {
+      /* poškozený nebo nepřístupný záznam — jedeme na výchozím */
+    }
+    return { pole: VYCHOZI_NASTAVENI.pole, stepMs: VYCHOZI_NASTAVENI.stepMs };
+  }
+
+  function ulozNastaveni() {
+    try {
+      localStorage.setItem(KLIC_NASTAVENI, JSON.stringify(nastaveni));
+    } catch (e) {
+      /* nevadí, volba vydrží jen do konce sezení */
+    }
+  }
+
+  /* Módy se čtou jen podle seznamu MODY — neznámé klíče z úložiště se
+     zahodí a chybějící zůstanou vypnuté. Přidání nebo odebrání módu
+     tak starý záznam nerozbije. */
+  function nactiMody() {
+    var mody = {};
+    var i;
+
+    for (i = 0; i < MODY.length; i++) mody[MODY[i].id] = false;
+
+    try {
+      var ulozene = JSON.parse(localStorage.getItem(KLIC_MODY));
+      if (ulozene && typeof ulozene === 'object') {
+        for (i = 0; i < MODY.length; i++) {
+          if (ulozene[MODY[i].id] === true) mody[MODY[i].id] = true;
+        }
+      }
+    } catch (e) {
+      /* poškozený nebo nepřístupný záznam — jede se bez módů */
+    }
+    return mody;
+  }
+
+  function ulozMody() {
+    try {
+      localStorage.setItem(KLIC_MODY, JSON.stringify(game.mods));
+    } catch (e) {
+      /* nevadí, volba vydrží jen do konce sezení */
+    }
+  }
+
+  function nactiRekord() {
+    try {
+      var v = parseInt(localStorage.getItem(KLIC_REKORD), 10);
+      return isFinite(v) && v > 0 ? v : 0;
+    } catch (e) {
+      return 0;
+    }
+  }
+
+  function ulozRekord(skore) {
+    try {
+      localStorage.setItem(KLIC_REKORD, String(skore));
+    } catch (e) {
+      /* nevadí, rekord vydrží jen do konce sezení */
+    }
+  }
+
+  function smazRekord() {
+    try {
+      localStorage.removeItem(KLIC_REKORD);
+    } catch (e) {
+      /* nevadí */
+    }
+  }
+
+  /* Rekord z verze bez módových násobitelů. Nedá se porovnávat
+     s novým bodováním, takže po něm nezůstane nic viset. */
+  function zahodStaryRekord() {
+    try {
+      localStorage.removeItem(KLIC_REKORD_STARY);
+    } catch (e) {
+      /* nevadí */
+    }
+  }
+
+  zahodStaryRekord();
+
+  var nastaveni = nactiNastaveni();
+
+  // Rekord stojí mimo objekt game schválně — restart ho nesmí smazat.
+  var rekord = nactiRekord();
+  var novyRekord = false;
+
+  function volba(seznam, klic) {
+    for (var i = 0; i < seznam.length; i++) {
+      if (seznam[i][klic] === nastaveni[klic]) return seznam[i];
+    }
+    return seznam[0];
+  }
+
+  /* Násobitel: základ z obtížnosti je součin obou os, módy do něj
+     mluví sčítáním svých příspěvků. Sečtené příspěvky by se násobením
+     mezi sebou přemrštily, takhle jeden mód nikdy nezastíní ostatní.
+
+     Zaokrouhluje se na jedno desetinné místo — jednak kvůli plovoucí
+     čárce (1.4 * 1.3 není přesně 1.82), jednak ať je výsledek čitelný.
+     Spodní hranice drží násobitel v kladných číslech i kdyby záporných
+     módů přibylo. */
+  function aktualniNasobitel() {
+    var zaklad = volba(VELIKOSTI, 'pole').nasobitel *
+                 volba(RYCHLOSTI, 'stepMs').nasobitel;
+    var soucet = 0;
+
+    for (var i = 0; i < MODY.length; i++) {
+      if (game.mods[MODY[i].id]) soucet += MODY[i].prispevek;
+    }
+
+    return Math.max(NASOBITEL_MIN,
+                    Math.round(zaklad * (1 + soucet) * 10) / 10);
+  }
+
+  function desetinne(n) {
+    return n.toFixed(1).replace('.', ',');
+  }
+
+  function formatNasobitel(n) {
+    return desetinne(n) + '×';
+  }
+
+  /* Rozpis, odkud se násobitel bere. Bez zapnutého módu se závorka
+     vynechá, ať tam nesvítí zbytečné „× (1)“. */
+  function rozpisNasobitele() {
+    var text = desetinne(volba(VELIKOSTI, 'pole').nasobitel) + ' × ' +
+               desetinne(volba(RYCHLOSTI, 'stepMs').nasobitel);
+    var zavorka = '';
+
+    for (var i = 0; i < MODY.length; i++) {
+      if (!game.mods[MODY[i].id]) continue;
+      var p = MODY[i].prispevek;
+      zavorka += (p < 0 ? ' − ' : ' + ') + desetinne(Math.abs(p));
+    }
+
+    if (zavorka) text += ' × (1' + zavorka + ')';
+
+    return text + ' = ' + formatNasobitel(game.nasobitel) +
+           ' · ' + game.bodyZaJidlo + ' b. za jídlo';
+  }
+
+  // co se v překrytí ukáže pro který stav; 'running' a 'countdown'
+  // tu chybí schválně — tehdy je překrytí schované a je vidět plocha
+  var PREKRYTI = {
+    menu:   { nadpis: 'Had',       tlacitko: 'Hrát',       skore: false },
+    paused: { nadpis: 'Pauza',     tlacitko: 'Pokračovat', skore: false },
+    over:   { nadpis: 'Konec hry', tlacitko: 'Hrát znovu', skore: true  }
+  };
+
+  /* ---------------------------------------------------------------
+     Barvy bereme ze shared/style.css, ať se paleta ladí na jednom
+     místě. Canvas na CSS proměnné sám nedosáhne, musíme je vyčíst.
+     --------------------------------------------------------------- */
+  function cssVar(nazev, nahrada) {
+    var v = getComputedStyle(document.documentElement)
+              .getPropertyValue(nazev).trim();
+    return v || nahrada;
+  }
+
+  var BARVY = {
+    plocha: cssVar('--board',      '#0a0c10'),
+    telo:   cssVar('--accent-dim', '#2f9e5c'),
+    hlava:  cssVar('--accent',     '#4ade80'),
+    jidlo:  cssVar('--danger',     '#e0533d'),
+    jed:    cssVar('--jed',        '#a06cd5'),
+    klic:   cssVar('--klic',       '#f2c14e'),
+    socha:  cssVar('--socha',      '#7c8598'),
+    portal: cssVar('--portal',     '#38bdf8'),
+    obrat:      cssVar('--obrat',       '#f472b6'),
+    obratHlava: cssVar('--obrat-hlava', '#fbcfe8'),
+    dvojce:      cssVar('--dvojce',       '#c98a2e'),
+    dvojceHlava: cssVar('--dvojce-hlava', '#f5a524')
+  };
+
+  /* ---------------------------------------------------------------
+     Stav hry — jediný zdroj pravdy. Nic jiného si stav nedrží.
+     --------------------------------------------------------------- */
+  var game = {
+    cols: nastaveni.pole,
+    rows: nastaveni.pole,
+
+    /* Hadi na ploše. Bez módu Dvojče je v poli jeden, s ním dva —
+       jinak se nic nevětví, celá hra počítá s libovolným počtem.
+       Každý si nese vlastní tělo, směr, frontu i narůst:
+
+         { snake, dir, queue, narust, blik, zrcadlo, telo, hlava }
+
+       Články těla jsou { x, y, plny }. Plnost si nese článek sám, nedá
+       se spočítat z indexu — ten se každým krokem posouvá. Bez módu Sýr
+       je plny vždycky true, ať je struktura pořád stejná. */
+    snakes: [],
+
+    /* Zapnuté módy. Nezávislé přepínače, restart je nemaže. */
+    mods: nactiMody(),
+
+    food: null,
+    jed: null,                   // jen v módu Jed
+    klic: null,                  // jen v módu Klíč, null = had ho drží
+    maKlic: true,                // bez módu Klíč pořád true, ať jde jíst
+
+    /* Jen v módu Mizející jídlo: kolik herního času uplynulo od chvíle,
+       co věc leží na svém políčku. Každá má vlastní počítadlo, protože
+       se nulují nezávisle na sobě. */
+    casJidla: 0,
+    casKlice: 0,
+
+    sochy: [],                   // jen v módu Sochy, patří k jedné hře
+    portaly: null,               // jen v módu Portály, dvojice buněk
+    vyhra: false,                // konec zaplněním plochy, ne nárazem
+
+    score: 0,                    // vždy celé číslo, nikdy desetinné
+    snedeno: 0,                  // počet jídel — podle něj se zrychluje
+
+    // 'menu' | 'countdown' | 'running' | 'paused' | 'over'
+    state: 'menu',
+    odpocet: 0,                  // zbývající vteřiny odpočtu
+
+    stepMs: nastaveni.stepMs,
+
+    /* Násobitel a z něj spočítaná sazba za jídlo se uzamknou při
+       resetu a během hry se nemění. Sčítají se pak celá čísla,
+       takže skóre nikdy neprojde přes desetinnou hodnotu. */
+    nasobitel: 1,
+    bodyZaJidlo: BODY_ZA_JIDLO
+  };
+
+  // rozměry vykreslení — patří k zobrazení, ne ke stavu hry
+  var cell = CELL_MAX;
+
+  // čas smyčky — taky mimo stav hry
+  var posledni = 0;
+  var akumulator = 0;
+  var odpocetCas = 0;
+
+  /* Jeden had do game.snakes. Tělo se táhne proti směru pohybu, takže
+     ho stačí odvinout od hlavy. Se sýrem se plnost střídá už od začátku,
+     ať had nezačíná celý plný a nezačal se prokousávat až za pochodu.
+
+     zrcadlo obrací vodorovnou osu ovládání, telo a hlava jsou barvy —
+     dvojče se od prvního hada musí lišit na první pohled. */
+  function novyHad(hlavaX, hlavaY, smer, zrcadlo, telo, hlava) {
+    var strida = !!game.mods.syr;
+
+    return {
+      snake: [
+        { x: hlavaX,                 y: hlavaY,                 plny: true },
+        { x: hlavaX - smer.x,        y: hlavaY - smer.y,        plny: !strida },
+        { x: hlavaX - 2 * smer.x,    y: hlavaY - 2 * smer.y,    plny: true }
+      ],
+      dir: { x: smer.x, y: smer.y },
+      queue: [],                   // čekající změny směru
+      narust: 0,                   // kolik článků ještě dorůstá za jídlo
+      blik: 0,                     // zbývající čas bliknutí po obrácení
+      zrcadlo: !!zrcadlo,
+      telo: telo,
+      hlava: hlava
+    };
+  }
+
+  /* Kompletní reset. Vrací hru do výchozího bodu včetně rychlosti
+     a času smyčky, ne jen skóre. */
+  function reset(stav) {
+    var stredY = Math.floor(game.rows / 2);
+    var stredX = Math.floor(game.cols / 2);
+
+    if (game.mods.dvojce) {
+      /* Dvojče je zrcadlo podle svislé osy. Ve středu plochy by ale
+         zrcadlo padlo přesně na prvního hada, tak oba odstartují ve
+         čtvrtinách šířky — pořád zrcadlově, jen dál od osy.
+
+         A startují nahoru, ne doprava jako jinak: zrcadlo obrací
+         vodorovný směr, takže vodorovný start by je poslal proti sobě
+         a bez okamžitého zásahu by se srazili po čtyřech krocích.
+         Svisle jedou vedle sebe a hráč má na rozmyšlenou stejně dlouho
+         jako v základní hře. */
+      var ctvrtina = Math.floor(game.cols / 4);
+      var vzhuru = { x: 0, y: -1 };
+
+      game.snakes = [
+        novyHad(ctvrtina, stredY, vzhuru, false, BARVY.telo, BARVY.hlava),
+        novyHad(game.cols - 1 - ctvrtina, stredY, vzhuru, true,
+                BARVY.dvojce, BARVY.dvojceHlava)
+      ];
+    } else {
+      game.snakes = [
+        novyHad(stredX, stredY, { x: 1, y: 0 }, false, BARVY.telo, BARVY.hlava)
+      ];
+    }
+
+    game.score   = 0;
+    game.snedeno = 0;
+    game.stepMs  = nastaveni.stepMs;
+    game.state   = stav || 'running';
+    game.odpocet = 0;
+
+    /* Napřed uklidit, teprve pak rozmístit: volnaBunka() se vyhýbá
+       všemu, co na ploše leží, včetně věcí z minulého kola. Sochy
+       patří k jedné hře — restart plochu vyklidí. */
+    game.food    = null;
+    game.jed     = null;
+    game.klic    = null;
+    game.sochy   = [];
+    game.portaly = null;
+    game.vyhra   = false;
+
+    // portály první, ať na ně jídlo, jed ani klíč nepadnou
+    game.portaly = game.mods.portaly ? umistiPortaly() : null;
+
+    game.food = volnaBunka();
+    game.jed  = game.mods.jed  ? volnaBunka() : null;
+    game.klic = game.mods.klic ? volnaBunka() : null;
+
+    // bez módu Klíč (nebo když se klíč nemá kam vejít) se jí rovnou
+    game.maKlic = !game.mods.klic || !game.klic;
+
+    game.casJidla = 0;
+    game.casKlice = 0;
+
+    game.nasobitel   = aktualniNasobitel();
+    game.bodyZaJidlo = Math.round(BODY_ZA_JIDLO * game.nasobitel);
+
+    posledni   = 0;
+    akumulator = 0;
+    odpocetCas = 0;
+    novyRekord = false;   // rekord samotný zůstává, ta hláška ne
+  }
+
+  /* ---------------------------------------------------------------
+     Rozměry plátna.
+
+     Strana plochy se zaokrouhluje dolů na násobek počtu buněk, takže
+     velikost buňky je celé číslo CSS pixelů a mřížka padne na pixely.
+
+     Canvas má dvojí rozměr: atributy width/height jsou v zařízených
+     pixelech (CSS rozměr * devicePixelRatio), CSS width/height v CSS
+     pixelech. ctx.scale(dpr, dpr) pak vrátí souřadnice do CSS pixelů,
+     takže draw() o devicePixelRatio nemusí vědět.
+     --------------------------------------------------------------- */
+  var REZERVA = 24;              // ať se plocha nelepí na spodek okna
+
+  /* Plátno navíc pro masku tmy. Drží se rozměrů herního plátna, takže
+     ho přenastavuje prizpusob() spolu s ním. V DOMu není a nemusí být —
+     kreslí se z něj na plochu přes drawImage. */
+  var maska = document.createElement('canvas');
+  var maskaCtx = maska.getContext('2d');
+
+  function prizpusob() {
+    // Rám kolem plochy má vlastní šířku (border). Kdyby se nezapočetl,
+    // je obal o 2 px širší než kontejner a stránka vodorovně přeteče.
+    var ramecek = obal.offsetWidth - obal.clientWidth;
+    var sirka = main.clientWidth - ramecek;
+
+    /* Vodorovná rezerva pásma pro swipe. Do šířky sloupce nezasahuje —
+       záporné okraje ji z rozvržení ruší —, ale ven z okna přetéct
+       nesmí, takže se počítá do stropu níž. Čte se z výpočtu stylu,
+       ne z offsetWidth: clientWidth výplň už obsahuje, rozdíl by tedy
+       vyšel nula. */
+    var stylZony = window.getComputedStyle(zona);
+    var rezerva = (parseFloat(stylZony.paddingLeft) || 0) +
+                  (parseFloat(stylZony.paddingRight) || 0);
+
+    // 30×30 se do sloupce stránky na úzkém displeji nevejde, aniž by
+    // buňka klesla pod CELL_MIN. Než mřížku zdrobnit, radši sáhneme do
+    // odsazení stránky — plocha je v <main> vycentrovaná, takže přesah
+    // je na obou stranách stejný. Dál než k okraji okna nejdeme.
+    var potreba = CELL_MIN * game.cols;
+    if (sirka < potreba) {
+      var okno = document.documentElement.clientWidth - ramecek - rezerva - 2;
+      sirka = Math.max(sirka, Math.min(okno, potreba));
+    }
+
+    /* Výškový rozpočet: okno bez hlavičky nad plochou a bez legendy
+       ovládání pod ní. Hlavička se měří od začátku dokumentu, ne od
+       okraje okna — s getBoundingClientRect().top by se po odscrollování
+       rozpočet nafoukl a plocha by rostla sama od sebe. Výška legendy
+       na velikosti plátna nezávisí, takže ji smíme změřit teď. */
+    var hlavicka = obal.getBoundingClientRect().top -
+                   document.documentElement.getBoundingClientRect().top;
+    var podPlochou = hra.getBoundingClientRect().bottom -
+                     obal.getBoundingClientRect().bottom;
+    var vyska = window.innerHeight - hlavicka - podPlochou - REZERVA - ramecek;
+
+    // Buňka je celé číslo CSS pixelů, aby mřížka padla na pixely.
+    cell = Math.floor(Math.min(sirka / game.cols, vyska / game.rows));
+
+    if (cell < CELL_MIN) cell = CELL_MIN;
+    if (cell > CELL_MAX) cell = CELL_MAX;
+
+    /* Plátno má rozměr přesně na mřížku — ani o pixel víc, jinak by
+       vedle ní zůstal nepokreslený pruh. Zbylé místo patří obalu. */
+    var plochaSirka = game.cols * cell;
+    var plochaVyska = game.rows * cell;
+
+    // na malé ploše musí překrytí zhubnout, jinak by se rolovalo
+    elPrekryti.classList.toggle('je-tesne', plochaSirka < TESNA_PLOCHA);
+
+    // číslo odpočtu drží poměr k ploše, ne k oknu
+    elOdpocet.style.fontSize = Math.round(plochaVyska * ODPOCET_PODIL) + 'px';
+
+    var dpr = window.devicePixelRatio || 1;
+
+    canvas.style.width  = plochaSirka + 'px';
+    canvas.style.height = plochaVyska + 'px';
+    canvas.width  = Math.round(plochaSirka * dpr);
+    canvas.height = Math.round(plochaVyska * dpr);
+
+    // nastavení width/height transformaci resetuje, škálujeme načisto
+    ctx.setTransform(1, 0, 0, 1, 0, 0);
+    ctx.scale(dpr, dpr);
+
+    // maska tmy musí ležet na stejné mřížce jako scéna pod ní
+    maska.width  = canvas.width;
+    maska.height = canvas.height;
+    maskaCtx.setTransform(1, 0, 0, 1, 0, 0);
+    maskaCtx.scale(dpr, dpr);
+  }
+
+  /* Resize i otočení telefonu. Debounce, protože při tažení okna
+     přijdou desítky událostí a po orientationchange bývá innerHeight
+     ještě chvíli stará. Hned po přepočtu překreslíme aktuální stav,
+     ať plocha neproblikne prázdná — nastavení width/height ji smaže. */
+  var casovacResize = null;
+
+  function naZmenuOkna() {
+    if (casovacResize) clearTimeout(casovacResize);
+    casovacResize = setTimeout(function () {
+      casovacResize = null;
+      prizpusob();
+      draw();
+    }, 120);
+  }
+
+  window.addEventListener('resize', naZmenuOkna);
+  window.addEventListener('orientationchange', naZmenuOkna);
+
+  /* Sbalení a rozbalení módů mění výšku toho, co je pod plochou, a tím
+     i rozpočet na plátno — přepočítá se stejnou cestou jako resize. */
+  elMody.addEventListener('toggle', naZmenuOkna);
+
+  /* ---------------------------------------------------------------
+     Volná buňka = není pod hadem, sochou, portálem ani jinou věcí.
+     Jídlo, jed ani klíč se tak nikdy nepřekryjí navzájem, s hadem
+     ani s tím, co na ploše vytvořily módy.
+
+     Nepovinné 'krome' vyloučí ještě jednu buňku navíc — hodí se, když
+     se hledá druhá buňka dvojice a ta první ještě není ve stavu hry.
+
+     Seznam se staví celý a vybírá se z něj rovnoměrně — náhodné
+     tipování by na skoro zaplněné ploše mohlo trvat libovolně dlouho.
+     Vrací null, když volná buňka není.
+     --------------------------------------------------------------- */
+  function volnaBunka(krome) {
+    var obsazene = {};
+    var veci = [game.food, game.jed, game.klic, krome];
+    var i;
+
+    // těla všech hadů, ne jen prvního — na dvojče se taky nic klást nesmí
+    for (var h = 0; h < game.snakes.length; h++) {
+      var telo = game.snakes[h].snake;
+      for (i = 0; i < telo.length; i++) {
+        obsazene[telo[i].y * game.cols + telo[i].x] = true;
+      }
+    }
+
+    for (i = 0; i < game.sochy.length; i++) {
+      obsazene[game.sochy[i].y * game.cols + game.sochy[i].x] = true;
+    }
+
+    if (game.portaly) {
+      for (i = 0; i < game.portaly.length; i++) {
+        obsazene[game.portaly[i].y * game.cols + game.portaly[i].x] = true;
+      }
+    }
+
+    for (i = 0; i < veci.length; i++) {
+      if (veci[i]) obsazene[veci[i].y * game.cols + veci[i].x] = true;
+    }
+
+    var volne = [];
+    for (var y = 0; y < game.rows; y++) {
+      for (var x = 0; x < game.cols; x++) {
+        if (!obsazene[y * game.cols + x]) volne.push({ x: x, y: y });
+      }
+    }
+
+    if (volne.length === 0) return null;
+    return volne[Math.floor(Math.random() * volne.length)];
+  }
+
+  /* Portály chceme daleko od sebe, jinak průchod nemá smysl. Zkoušíme
+     dvojice volných buněk (had ani sochy mezi ně nepatří, o to se stará
+     volnaBunka) a bereme první dost vzdálenou. Když se do PORTAL_POKUSY
+     pokusů žádná netrefí — malá nebo zaplněná plocha —, vezmeme
+     nejvzdálenější nalezenou, ať se hledání nezacyklí. */
+  function umistiPortaly() {
+    var minVzdalenost = game.cols / PORTAL_ODSTUP;
+    var nejlepsi = null;
+    var nejlepsiVzd = -1;
+
+    for (var pokus = 0; pokus < PORTAL_POKUSY; pokus++) {
+      var a = volnaBunka();
+      if (!a) return null;
+
+      var b = volnaBunka(a);
+      if (!b) return null;
+
+      var dx = a.x - b.x;
+      var dy = a.y - b.y;
+      var vzd = Math.sqrt(dx * dx + dy * dy);
+
+      if (vzd >= minVzdalenost) return [a, b];
+
+      if (vzd > nejlepsiVzd) {
+        nejlepsiVzd = vzd;
+        nejlepsi = [a, b];
+      }
+    }
+
+    return nejlepsi;
+  }
+
+  function naStejne(a, b) {
+    return !!b && a.x === b.x && a.y === b.y;
+  }
+
+  /* ---------------------------------------------------------------
+     Vstup — jen zařadí směr do fronty, stav hada nemění.
+     Platnost směru se neřeší tady, ale až v step() proti skutečně
+     provedenému směru.
+     --------------------------------------------------------------- */
+  function zaradSmer(novy) {
+    /* Směrová klávesa (i swipe) odpočet utne a hned se zařadí jako
+       normální vstup. Kontrola na shodný směr je až níž, jinak by
+       šipka po směru hada odpočet neukončila. */
+    if (game.state === 'countdown') ukonciOdpocet();
+
+    if (game.state !== 'running') return;
+
+    /* Jeden vstup řídí všechny hady naráz. Zrcadlené dvojče má
+       převrácenou vodorovnou osu — doleva ho pošle doprava —, svislá
+       zůstává shodná, jinak by se zrcadlení nedrželo. */
+    for (var i = 0; i < game.snakes.length; i++) {
+      var had = game.snakes[i];
+      var smer = had.zrcadlo ? { x: -novy.x, y: novy.y } : novy;
+
+      if (had.queue.length >= 2) continue;
+
+      // duplicitu zahodíme, ať držená klávesa nezacpe obě místa
+      var posledniSmer = had.queue.length
+        ? had.queue[had.queue.length - 1]
+        : had.dir;
+      if (smer.x === posledniSmer.x && smer.y === posledniSmer.y) continue;
+
+      had.queue.push(smer);
+    }
+  }
+
+  /* ---------- přepínání stavů ---------- */
+
+  /* Odpočet nechává hada stát na místě, ale plocha je vidět a vstup
+     už se zaznamenává. Odbíjí ho herní smyčka, ne setTimeout — díky
+     tomu se zastaví spolu s ní, když karta zmizí do pozadí. */
+  function spustOdpocet(sekund) {
+    game.odpocet = sekund;
+    game.state = 'countdown';
+    odpocetCas = 0;
+  }
+
+  /* Konec odpočtu, ať doběhl sám, nebo ho hráč utnul šipkou. */
+  function ukonciOdpocet() {
+    game.odpocet = 0;
+    game.state = 'running';
+    akumulator = 0;       // první krok až po celém stepMs, ne hned
+    odpocetCas = 0;
+  }
+
+  function hraj() {
+    reset('countdown');
+    spustOdpocet(ODPOCET_START);
+  }
+
+  function pauza() {
+    if (game.state === 'running' || game.state === 'countdown') {
+      game.state = 'paused';
+    } else if (game.state === 'paused') {
+      spustOdpocet(ODPOCET_PAUZA);
+    }
+  }
+
+  elBtn.addEventListener('click', function () {
+    // Bez blur() by tlačítko zůstalo zaostřené a mezerník s Enterem
+    // by ho mačkaly znovu místo pauzy a restartu.
+    elBtn.blur();
+    if (game.state === 'paused') spustOdpocet(ODPOCET_PAUZA);
+    else hraj();
+  });
+
+  elSmazat.addEventListener('click', function () {
+    elSmazat.blur();
+    if (!window.confirm('Opravdu vymazat uložený rekord?')) return;
+    smazRekord();
+    rekord = 0;
+    novyRekord = false;
+    ui.state = '';        // ať z obrazovky konce zmizí i hláška o rekordu
+  });
+
+  /* ---------------------------------------------------------------
+     Volba obtížnosti.
+
+     Tlačítka jsou ARIA přepínače: skupina má role="radiogroup",
+     tlačítka role="radio" a aria-checked. Tabulátorem se do skupiny
+     vstoupí na zvolené položce (roving tabindex), šipkami se přepíná.
+     --------------------------------------------------------------- */
+  function postavPrepinace(obalSkupiny, seznam, klic) {
+    var tlacitka = [];
+
+    seznam.forEach(function (polozka) {
+      var b = document.createElement('button');
+      b.type = 'button';
+      b.className = 'prepinac';
+      b.setAttribute('role', 'radio');
+      b.setAttribute('aria-checked', 'false');
+      b.tabIndex = -1;
+
+      var nazev = document.createElement('span');
+      nazev.className = 'prepinac__nazev';
+      nazev.textContent = polozka.nazev;
+
+      var detail = document.createElement('span');
+      detail.className = 'prepinac__detail';
+      detail.textContent = polozka.detail;
+
+      b.appendChild(nazev);
+      b.appendChild(detail);
+      b.addEventListener('click', function (e) {
+        zmenNastaveni(klic, polozka[klic]);
+
+        /* Po kliknutí myší fokus pustíme. Panel je vidět i za hry, a
+           zaostřený přepínač si bere šipky i mezerník — hráč by pak
+           místo hada ovládal nastavení. Klávesnicí (detail === 0)
+           fokus schválně necháváme, jinak by se ve skupině nedalo
+           pohybovat šipkami. */
+        if (e.detail > 0) b.blur();
+      });
+
+      obalSkupiny.appendChild(b);
+      tlacitka.push(b);
+    });
+
+    /* Šipky uvnitř skupiny patří přepínačům, ne hadovi. Vlastní
+       preventDefault tu musí být, protože globální obsluha klávesnice
+       události ze skupiny přeskakuje a stránka by odscrollovala. */
+    obalSkupiny.addEventListener('keydown', function (e) {
+      var k = e.key;
+      var posun = (k === 'ArrowRight' || k === 'ArrowDown') ?  1 :
+                  (k === 'ArrowLeft'  || k === 'ArrowUp')   ? -1 : 0;
+      if (!posun && k !== 'Home' && k !== 'End') return;
+
+      e.preventDefault();
+
+      var i = tlacitka.indexOf(document.activeElement);
+      if (i < 0) i = seznam.indexOf(volba(seznam, klic));
+
+      var cil = k === 'Home' ? 0
+              : k === 'End'  ? seznam.length - 1
+              : (i + posun + seznam.length) % seznam.length;
+
+      tlacitka[cil].focus();
+      zmenNastaveni(klic, seznam[cil][klic]);
+    });
+
+    return tlacitka;
+  }
+
+  var tlacitkaPole     = postavPrepinace(elVolbaPole, VELIKOSTI, 'pole');
+  var tlacitkaRychlost = postavPrepinace(elVolbaRychlost, RYCHLOSTI, 'stepMs');
+
+  function oznacPrepinace(tlacitka, seznam, klic) {
+    for (var i = 0; i < tlacitka.length; i++) {
+      var aktivni = seznam[i][klic] === nastaveni[klic];
+      tlacitka[i].setAttribute('aria-checked', aktivni ? 'true' : 'false');
+      tlacitka[i].tabIndex = aktivni ? 0 : -1;
+    }
+  }
+
+  function zmenNastaveni(klic, hodnota) {
+    if (nastaveni[klic] === hodnota) return;   // stejná volba hru neruší
+    nastaveni[klic] = hodnota;
+    ulozNastaveni();
+    pouzijVolby();
+  }
+
+  /* ---------------------------------------------------------------
+     Módy: nezávislé přepínače stavěné ze seznamu MODY. Nejsou to
+     radia — každý si žije sám, takže aria-pressed, ne aria-checked,
+     a žádná šipková navigace ve skupině.
+     --------------------------------------------------------------- */
+  function postavMody() {
+    var tlacitka = [];
+
+    MODY.forEach(function (mod) {
+      var b = document.createElement('button');
+      b.type = 'button';
+      b.className = 'prepinac';
+      b.setAttribute('aria-pressed', 'false');
+
+      var nazev = document.createElement('span');
+      nazev.className = 'prepinac__nazev';
+      nazev.textContent = mod.nazev;
+
+      var detail = document.createElement('span');
+      detail.className = 'prepinac__detail';
+      detail.textContent = mod.detail;
+
+      // příspěvek do násobitele, ať je dopad vidět ještě před zapnutím
+      var prispevek = document.createElement('span');
+      prispevek.className = 'prepinac__prispevek' +
+        (mod.prispevek < 0 ? ' prepinac__prispevek--zapor' : '');
+      prispevek.textContent = (mod.prispevek < 0 ? '−' : '+') +
+        desetinne(Math.abs(mod.prispevek));
+
+      b.appendChild(nazev);
+      b.appendChild(detail);
+      b.appendChild(prispevek);
+      b.addEventListener('click', function (e) {
+        prepniMod(mod.id);
+        if (e.detail > 0) b.blur();   // viz komentář u předvoleb výš
+      });
+
+      elVolbaMody.appendChild(b);
+      tlacitka.push(b);
+    });
+
+    return tlacitka;
+  }
+
+  var tlacitkaMody = postavMody();
+
+  function oznacMody() {
+    var aktivni = [];
+
+    for (var i = 0; i < MODY.length; i++) {
+      var zapnuto = !!game.mods[MODY[i].id];
+      tlacitkaMody[i].setAttribute('aria-pressed', zapnuto ? 'true' : 'false');
+      if (zapnuto) aktivni.push(MODY[i].nazev);
+    }
+
+    // se sbaleným panelem je tohle jediná stopa po zapnutých módech
+    elModyStav.textContent = aktivni.length ? '· ' + aktivni.join(', ') : '';
+  }
+
+  function prepniMod(id) {
+    game.mods[id] = !game.mods[id];
+    ulozMody();
+    pouzijVolby();
+  }
+
+  /* Každá změna obtížnosti i módu znamená čistý restart — mřížka ani
+     pravidla se nikdy nemění pod běžícím hadem. Oba panely jsou vidět
+     i za hry, takže se sem chodí i uprostřed kola: končíme na úvodní
+     obrazovce, ne rovnou v odpočtu, ať si hráč všimne, že hra skončila
+     a proč. */
+  function pouzijVolby() {
+    game.cols = nastaveni.pole;
+    game.rows = nastaveni.pole;
+
+    reset('menu');        // rozmístí věci podle zapnutých módů
+    prizpusob();
+
+    oznacPrepinace(tlacitkaPole, VELIKOSTI, 'pole');
+    oznacPrepinace(tlacitkaRychlost, RYCHLOSTI, 'stepMs');
+    oznacMody();
+
+    /* Rozpis se přepisuje tady, ne v drawUI: mění se s každou volbou,
+       ale ne každý snímek, a stejný výsledný násobitel může vyjít
+       z různých kombinací, takže hlídat jen číslo by nestačilo. */
+    elRozpis.textContent = rozpisNasobitele();
+
+    ui.state = '';        // překrytí se překreslí, i když stav zůstal 'menu'
+    draw();
+    drawUI();
+  }
+
+  /* ---------- klávesnice ---------- */
+
+  var SMERY = {
+    arrowup:    { x:  0, y: -1 },
+    arrowdown:  { x:  0, y:  1 },
+    arrowleft:  { x: -1, y:  0 },
+    arrowright: { x:  1, y:  0 },
+    w:          { x:  0, y: -1 },
+    s:          { x:  0, y:  1 },
+    a:          { x: -1, y:  0 },
+    d:          { x:  1, y:  0 }
+  };
+
+  // klávesy, kterými prohlížeč scrolluje stránkou
+  var NESCROLLOVAT = {
+    arrowup: true, arrowdown: true, arrowleft: true, arrowright: true,
+    ' ': true
+  };
+
+  window.addEventListener('keydown', function (e) {
+    var key = e.key.toLowerCase();
+
+    /* Co patří ovládacím prvkům, hře nepředáváme. U obtížnosti je to
+       celá klávesnice — skupina si šipky řeší sama. U módů jsou to
+       samostatná tlačítka, takže stačí ustoupit u aktivace a šipky
+       můžou dál řídit hada. */
+    if (elNastaveni.contains(e.target)) return;
+    if (elMody.contains(e.target) && (key === ' ' || key === 'enter')) return;
+
+    if (NESCROLLOVAT[key]) e.preventDefault();
+
+    if (SMERY[key]) {
+      zaradSmer(SMERY[key]);
+      return;
+    }
+
+    if (key === ' ') {
+      if (game.state === 'menu') hraj();
+      else pauza();
+      return;
+    }
+
+    if (key === 'enter' && (game.state === 'menu' || game.state === 'over')) {
+      hraj();
+    }
+  });
+
+  /* ---------- dotyk / myš: swipe po ploše i kolem ní ----------
+     Pointer events pokrývají prst i myš jedním kódem. Posluchače nese
+     pásmo s rezervou kolem plátna (.swipe-zona), ne canvas — citlivá
+     plocha je tím o rezervu větší na každé straně a tah nemusí začít
+     ani skončit přesně na plátně. Rolování stránky pásmu bere CSS
+     (touch-action: none); touchmove s preventDefault by nestačil,
+     posluchače tam prohlížeče věší jako pasivní.
+
+     Kratší tah než SWIPE_MIN bereme jako klepnutí a ignorujeme ho. */
+
+  var SWIPE_MIN = 24;            // px
+  var zacatek = null;
+
+  zona.addEventListener('pointerdown', function (e) {
+    /* Tlačítko v překrytí (Hrát) leží uvnitř pásma. Kdyby si tah
+       zabralo pásmo a chytilo ukazatel, klepnutí by se k tlačítku
+       nedostalo — do hry se pak nedá vstoupit. */
+    if (elPrekryti.contains(e.target)) return;
+
+    zacatek = { x: e.clientX, y: e.clientY, id: e.pointerId };
+    zona.setPointerCapture(e.pointerId);   // ať dotah mimo pásmo nezmizí
+  });
+
+  zona.addEventListener('pointerup', function (e) {
+    if (!zacatek || e.pointerId !== zacatek.id) return;
+
+    var dx = e.clientX - zacatek.x;
+    var dy = e.clientY - zacatek.y;
+    zacatek = null;
+
+    if (Math.abs(dx) < SWIPE_MIN && Math.abs(dy) < SWIPE_MIN) return;
+
+    if (Math.abs(dx) > Math.abs(dy)) {
+      zaradSmer({ x: dx > 0 ? 1 : -1, y: 0 });
+    } else {
+      zaradSmer({ x: 0, y: dy > 0 ? 1 : -1 });
+    }
+  });
+
+  zona.addEventListener('pointercancel', function () {
+    zacatek = null;
+  });
+
+  /* ---------- směrová tlačítka ----------
+     Záloha ke swipu pro dotyk: při 70 ms na krok je tah prstem
+     nepřesný. Reagují na pointerdown, ne na click — o těch pár desítek
+     milisekund, než prst odejde, se u nejrychlejší volby hraje.
+
+     preventDefault drží zaostření na těle stránky: kdyby ho tlačítko
+     převzalo, mezerník by ho mačkal znovu místo pauzy. */
+  var DPAD_SMERY = {
+    nahoru: { x:  0, y: -1 },
+    dolu:   { x:  0, y:  1 },
+    vlevo:  { x: -1, y:  0 },
+    vpravo: { x:  1, y:  0 }
+  };
+
+  Array.prototype.forEach.call(
+    elDpad.querySelectorAll('.dpad__btn'),
+    function (btn) {
+      var smer = DPAD_SMERY[btn.getAttribute('data-smer')];
+
+      btn.addEventListener('pointerdown', function (e) {
+        e.preventDefault();
+        zaradSmer(smer);
+      });
+    }
+  );
+
+  /* ---------------------------------------------------------------
+     Logika — jeden krok hry. Jen mění stav, nic nekreslí.
+     --------------------------------------------------------------- */
+
+  /* Konec hry na jednom místě, ať se rekord vyhodnotí ve všech třech
+     případech stejně (stěna, tělo, zaplněná plocha). */
+  function konecHry(vyhra) {
+    game.state = 'over';
+    game.vyhra = !!vyhra;
+
+    // násobitel obtížnost i módy vyrovnává, rekord tedy platí vždycky
+    novyRekord = game.score > rekord;
+    if (novyRekord) {
+      rekord = game.score;
+      ulozRekord(rekord);
+    }
+  }
+
+  /* Mód Mizející jídlo: co leží moc dlouho na jednom místě, přeskočí
+     jinam. Žádné varování ani ukazatel — jídlo prostě zmizí a objeví
+     se jinde. S módem Klíč mizí i klíč, každý si měří čas sám.
+
+     Nové políčko hledá volnaBunka(), a ta se vyhýbá i tomu, kde věc
+     právě leží — nová pozice se tedy nikdy netrefí do té staré. Když
+     volno není, věc zůstane, kde byla; časovač se stejně nuluje, ať
+     se hledání neopakuje každý snímek.
+
+     Čas přitéká z herní smyčky, ne z hodin: v pauze ani při odpočtu se
+     sem smyčka nedostane, takže časovač stojí spolu s hadem. */
+  function mizeni(dt) {
+    if (!game.mods.mizejici) return;
+
+    if (game.food) {
+      game.casJidla += dt;
+      if (game.casJidla >= MIZENI_MS) {
+        game.food = volnaBunka() || game.food;
+        game.casJidla = 0;
+      }
+    }
+
+    // klíč, který už had sebral, je null — tomu není co přesouvat
+    if (game.klic) {
+      game.casKlice += dt;
+      if (game.casKlice >= MIZENI_MS) {
+        game.klic = volnaBunka() || game.klic;
+        game.casKlice = 0;
+      }
+    }
+  }
+
+  /* Směr od druhého článku k prvnímu, tedy ven z těla. Vrací null,
+     když se dopočítat nedá:
+
+     — u jednočlánkového hada není z čeho počítat (jed hlídá HAD_MIN,
+       takže v praxi nehrozí, ale ať se to nedá rozbít odjinud),
+     — konec těla může přeskakovat portálem a mezi jeho ústími žádný
+       směr o jedno políčko není.
+
+     Bez zdí jsou sousedy i buňky přes okraj, a ty se liší o celou
+     stranu plochy — takový rozdíl srovnáme zpátky na jeden krok. */
+  function smerOdTela(had) {
+    if (had.snake.length < 2) return null;
+
+    var dx = had.snake[0].x - had.snake[1].x;
+    var dy = had.snake[0].y - had.snake[1].y;
+
+    if (game.mods.bezZdi) {
+      if (dx >  1) dx -= game.cols;
+      if (dx < -1) dx += game.cols;
+      if (dy >  1) dy -= game.rows;
+      if (dy < -1) dy += game.rows;
+    }
+
+    if (Math.abs(dx) + Math.abs(dy) !== 1) return null;   // průchod portálem
+
+    return { x: dx, y: dy };
+  }
+
+  /* Mód Obrácení: po každém soustu se z hlavy stane ocas a z ocasu
+     hlava. Tělo zůstane ležet, kde bylo, mění se jen orientace.
+
+     Volá se až po dokončeném kroku včetně narostení — článek přidaný
+     za snědené jídlo tak skončí správně na konci. Jestli nová hlava
+     míří do zdi nebo do těla, se schválně neřeší: to je legitimní
+     smrt, hráč si ji zavinil pozicí, do které se stočil. */
+  function obratHada(had) {
+    had.snake.reverse();
+
+    // předchozí směr by po otočce ukazoval rovnou do těla
+    var novy = smerOdTela(had);
+    if (novy) had.dir = novy;
+
+    /* Fronta patří ještě k původní orientaci: stisk z doby před soustem
+       by se uplatnil hned a otočku zrušil. */
+    had.queue = [];
+
+    // jen natažení časovače, kreslení je věc draw()
+    had.blik = BLIK_MS;
+  }
+
+  /* Kam had došlápne. Vezme z fronty směr, projde okrajem i portálem
+     a vrátí novou hlavu — nebo null, když narazil do stěny. Stavem
+     hada to ještě nehýbe: o kolizích se rozhoduje až se všemi hlavami
+     naráz, aby nezáleželo na pořadí hadů v poli. */
+  function novaHlava(had) {
+    // Z fronty vezmi první položku. Otočku o 180° proti právě
+    // provedenému směru zahoď a sáhni po další — jinak by dvojice
+    // stisků (nahoru, dolů) během jednoho kroku poslala hada do
+    // vlastního krku.
+    while (had.queue.length) {
+      var novy = had.queue.shift();
+      if (novy.x === -had.dir.x && novy.y === -had.dir.y) continue;
+      had.dir = novy;
+      break;
+    }
+
+    var hlava = {
+      x: had.snake[0].x + had.dir.x,
+      y: had.snake[0].y + had.dir.y,
+
+      /* Plnost se střídá proti předchozí hlavě, ne podle indexu v poli:
+         index se každým krokem posouvá, takže by díry blikaly po těle
+         místo aby s ním putovaly. */
+      plny: game.mods.syr ? !had.snake[0].plny : true
+    };
+
+    if (game.mods.bezZdi) {
+      /* Mód Bez zdí: okraj propouští na protější stranu. Dvojí modulo
+         proto, že % vrací u záporných čísel záporný výsledek — samotné
+         (-1 % 20) je -1, ne 19. */
+      hlava.x = ((hlava.x % game.cols) + game.cols) % game.cols;
+      hlava.y = ((hlava.y % game.rows) + game.rows) % game.rows;
+    } else if (hlava.x < 0 || hlava.y < 0 ||
+               hlava.x >= game.cols || hlava.y >= game.rows) {
+      return null;                             // náraz do stěny
+    }
+
+    /* Portály: vstup do jednoho vyhodí hada z druhého, směr zůstává.
+       Přesun patří sem — až po případném průchodu okrajem a ještě před
+       kontrolou kolizí, aby se posuzovalo skutečné políčko, kam had
+       dopadl. Přeskočí se nejvýš jednou za krok, takže se had nemůže
+       telportovat tam a zpět. Samotný průchod nic nesráží: portál není
+       v seznamu překážek a tělo za hlavou plyne beze změny. */
+    if (game.portaly) {
+      var cil = naStejne(hlava, game.portaly[0]) ? game.portaly[1]
+              : naStejne(hlava, game.portaly[1]) ? game.portaly[0]
+              : null;
+      if (cil) hlava = { x: cil.x, y: cil.y, plny: hlava.plny };
+    }
+
+    return hlava;
+  }
+
+  /* Náraz do těla — kteréhokoliv hada na ploše, vlastní tělo v tom není
+     výjimka. Poslední článek se v tomto kroku uvolní, takže se na jeho
+     místo smí vstoupit. Dutými články (mód Sýr) se dá projet, proto se
+     posuzují jen plné — na plnosti hlavy samotné nezáleží.
+
+     Kdyby někdy přibyl mód, který kolizi s tělem ruší úplně, musel by
+     se se Sýrem vylučovat: dělaly by v jádru totéž. */
+  function narazDoTela(hlava) {
+    for (var h = 0; h < game.snakes.length; h++) {
+      var telo = game.snakes[h].snake;
+      for (var i = 0; i < telo.length - 1; i++) {
+        if (!telo[i].plny) continue;
+        if (telo[i].x === hlava.x && telo[i].y === hlava.y) return true;
+      }
+    }
+    return false;
+  }
+
+  // náraz do sochy — stejný konec jako náraz do těla
+  function narazDoSochy(hlava) {
+    for (var s = 0; s < game.sochy.length; s++) {
+      if (naStejne(hlava, game.sochy[s])) return true;
+    }
+    return false;
+  }
+
+  /* Otrávené jídlo zkrátí hada, který ho snědl, a nic nepřičte. Pod
+     HAD_MIN článků už by z něj had nezbyl, tam hra končí. Vrací false,
+     když hra skončila. */
+  function otrav(had) {
+    if (had.snake.length - JED_ZKRACENI < HAD_MIN) {
+      konecHry();
+      return false;
+    }
+
+    for (var j = 0; j < JED_ZKRACENI; j++) had.snake.pop();
+    game.jed = volnaBunka();
+    return true;
+  }
+
+  /* Sousto. Roste jen ten had, který jídlo sebral, ale body padnou za
+     jídlo, ne za hada — víc hadů naráz ho sníst nemůže, dvě hlavy nad
+     jedním políčkem jsou čelní srážka a hra končí dřív. Vrací false,
+     když hra skončila. */
+  function snez(had, hlava) {
+    game.snedeno++;
+
+    // sazba je celé číslo uzamčené při startu, skóre tedy zůstává celé
+    game.score += game.bodyZaJidlo;
+
+    /* Každých ZRYCHLI_PO jídel ubereme z kroku 5 % výchozí hodnoty
+       zvoleného stupně, nejvýš však na ZRYCHLENI_DNO té hodnoty.
+       Počítá se ze snědených jídel, ne ze skóre — to už s obtížností
+       roste jinak rychle. A ne z aktuálního stepMs, jinak by se
+       ubíralo z už zkráceného kroku a hranice by seděla jinde. */
+    if (game.snedeno % ZRYCHLI_PO === 0) {
+      var ubrano = ZRYCHLENI_KROK * (game.snedeno / ZRYCHLI_PO);
+      game.stepMs = nastaveni.stepMs * Math.max(ZRYCHLENI_DNO, 1 - ubrano);
+    }
+
+    // po snědeném jídle zbyde socha; ještě před hledáním nového jídla,
+    // ať se na čerstvou sochu nic nepoloží
+    if (game.mods.sochy) game.sochy.push({ x: hlava.x, y: hlava.y });
+
+    game.food = volnaBunka();
+    game.casJidla = 0;                        // čerstvé jídlo má celý čas znovu
+    if (!game.food) {
+      konecHry(true);                         // plocha zaplněná = výhra
+      return false;
+    }
+
+    if (game.mods.klic) {
+      game.klic = volnaBunka();
+      game.casKlice = 0;
+      game.maKlic = !game.klic;               // nemá-li se klíč kam vejít, jede se bez něj
+    }
+
+    // úplně nakonec, ať je krok i s narostením hotový
+    if (game.mods.obraceni) obratHada(had);
+    return true;
+  }
+
+  function step() {
+    var hadi = game.snakes;
+    var hlavy = [];
+    var nalezy = [];
+    var i, j;
+
+    /* 1. Kam kdo došlápne. Fronty se čtou tady, takže i had, kterému
+       krok skončí smrtí, spotřebuje svůj vstup — na tom už ale nezáleží. */
+    for (i = 0; i < hadi.length; i++) {
+      var hlava = novaHlava(hadi[i]);
+      if (!hlava) {
+        konecHry();                            // náraz do stěny
+        return;
+      }
+      hlavy.push(hlava);
+    }
+
+    /* 2. Kolize se posuzují proti stavu před krokem, ne postupně —
+       jinak by záleželo na pořadí hadů v poli a ten první by měl výhodu.
+       Konec kteréhokoliv z nich je konec hry. */
+    for (i = 0; i < hlavy.length; i++) {
+      if (narazDoTela(hlavy[i]) || narazDoSochy(hlavy[i])) {
+        konecHry();
+        return;
+      }
+
+      // dvě hlavy na jednom políčku se minout nemůžou, i kdyby tam nic nebylo
+      for (j = i + 1; j < hlavy.length; j++) {
+        if (naStejne(hlavy[i], hlavy[j])) {
+          konecHry();
+          return;
+        }
+      }
+    }
+
+    for (i = 0; i < hadi.length; i++) hadi[i].snake.unshift(hlavy[i]);
+
+    /* 3. Co komu leželo pod hlavou. Zjišťuje se pro všechny hady naráz
+       a ještě před rozdáváním, ať jednomu nezmizí věc pod nosem jen
+       proto, že je v poli později. Věci se nikdy nepřekrývají, takže se
+       každá hlava trefí nejvýš do jedné. Jídlo se dá sníst jen s klíčem —
+       bez módu Klíč je maKlic pořád true, takže se nic nevětví. */
+    for (i = 0; i < hadi.length; i++) {
+      nalezy.push({
+        klic:  naStejne(hlavy[i], game.klic),
+        jed:   naStejne(hlavy[i], game.jed),
+        jidlo: naStejne(hlavy[i], game.food) && game.maKlic
+      });
+    }
+
+    /* 4. Ocas se posune, ledaže had zrovna dorůstá. Víc článků naráz
+       přidat nejde — musely by vzniknout na políčkách, kde had nikdy
+       nebyl —, tak se narůst rozloží do tolika kroků, o kolik jde. */
+    for (i = 0; i < hadi.length; i++) {
+      if (nalezy[i].jidlo) hadi[i].narust += game.mods.syr ? NAROST_SYR : NAROST;
+
+      if (hadi[i].narust > 0) hadi[i].narust--;
+      else hadi[i].snake.pop();
+    }
+
+    // 5. odměny a tresty
+    for (i = 0; i < hadi.length; i++) {
+      if (nalezy[i].jed && !otrav(hadi[i])) return;
+
+      if (nalezy[i].klic) {
+        game.maKlic = true;
+        game.klic = null;                     // klíč si nese had
+      }
+
+      if (nalezy[i].jidlo && !snez(hadi[i], hlavy[i])) return;
+    }
+  }
+
+  /* ---------------------------------------------------------------
+     Vykreslení plochy — jen čte stav, nic v něm nemění.
+     Kreslí se v CSS pixelech, o devicePixelRatio se stará transformace
+     nastavená v prizpusob().
+     --------------------------------------------------------------- */
+  /* Jen cesta, bez vybarvení — vyplnit nebo obtáhnout ji musí volající. */
+  function zaobleny(x, y, w, h, r) {
+    ctx.beginPath();
+    if (ctx.roundRect) {
+      ctx.roundRect(x, y, w, h, r);
+    } else {
+      ctx.rect(x, y, w, h);        // starší prohlížeče: ostré rohy
+    }
+  }
+
+  /* Duté články (mód Sýr) zůstanou prázdné a nakreslí se jen obrysem,
+     ať je na první pohled vidět, kudy se dá projet. Obrys se vejde
+     dovnitř článku, aby nepřetekl do mezery mezi buňkami. */
+  function clanek(bunka, barva, pomer, duty) {
+    var mezera = Math.max(1, Math.round(cell * 0.07));
+    var carka = duty ? Math.max(1, cell * 0.07) : 0;
+    var odsazeni = mezera + carka / 2;
+
+    zaobleny(
+      bunka.x * cell + odsazeni,
+      bunka.y * cell + odsazeni,
+      cell - 2 * odsazeni,
+      cell - 2 * odsazeni,
+      cell * pomer
+    );
+
+    if (duty) {
+      ctx.strokeStyle = barva;
+      ctx.lineWidth = carka;
+      ctx.stroke();
+    } else {
+      ctx.fillStyle = barva;
+      ctx.fill();
+    }
+  }
+
+  /* Jed: kosočtverec, ne kolečko — od jídla se musí lišit tvarem,
+     ne jen barvou. */
+  function kosoctverec(bunka) {
+    var sx = (bunka.x + 0.5) * cell;
+    var sy = (bunka.y + 0.5) * cell;
+    var r = cell * 0.36;
+
+    ctx.fillStyle = BARVY.jed;
+    ctx.beginPath();
+    ctx.moveTo(sx, sy - r);
+    ctx.lineTo(sx + r, sy);
+    ctx.lineTo(sx, sy + r);
+    ctx.lineTo(sx - r, sy);
+    ctx.closePath();
+    ctx.fill();
+  }
+
+  /* Klíč: očko s dříkem a zubem. Na malé buňce z toho zbyde skvrna,
+     ale barva ho odliší i tak. */
+  function klicNaPlose(bunka) {
+    var sx = (bunka.x + 0.5) * cell;
+    var sy = (bunka.y + 0.5) * cell;
+    var r = cell * 0.15;
+
+    ctx.strokeStyle = BARVY.klic;
+    ctx.lineWidth = Math.max(1.5, cell * 0.08);
+    ctx.lineCap = 'round';
+
+    ctx.beginPath();
+    ctx.arc(sx - cell * 0.12, sy, r, 0, Math.PI * 2);
+    ctx.stroke();
+
+    ctx.beginPath();
+    ctx.moveTo(sx - cell * 0.12 + r, sy);
+    ctx.lineTo(sx + cell * 0.3, sy);
+    ctx.moveTo(sx + cell * 0.2, sy);
+    ctx.lineTo(sx + cell * 0.2, sy + cell * 0.15);
+    ctx.stroke();
+  }
+
+  /* Portály: dvojice kroužků ve stejné barvě páru. Aby se daly rozeznat
+     mezi sebou, má jeden plný střed a druhý zůstane prázdný. */
+  function portal(bunka, plnyStred) {
+    var sx = (bunka.x + 0.5) * cell;
+    var sy = (bunka.y + 0.5) * cell;
+
+    ctx.strokeStyle = BARVY.portal;
+    ctx.lineWidth = Math.max(1.5, cell * 0.09);
+    ctx.beginPath();
+    ctx.arc(sx, sy, cell * 0.32, 0, Math.PI * 2);
+    ctx.stroke();
+
+    if (plnyStred) {
+      ctx.fillStyle = BARVY.portal;
+      ctx.beginPath();
+      ctx.arc(sx, sy, cell * 0.13, 0, Math.PI * 2);
+      ctx.fill();
+    }
+  }
+
+  function oci(had) {
+    if (cell < 14) return;         // na malé buňce by z toho byla kaše
+
+    var h = had.snake[0];
+    var d = had.dir;
+    var stx = (h.x + 0.5) * cell;
+    var sty = (h.y + 0.5) * cell;
+
+    var dopredu = cell * 0.15;
+    var stranou = cell * 0.19;
+    var r = Math.max(1, cell * 0.09);
+
+    // kolmice ke směru pohybu
+    var kx = -d.y;
+    var ky = d.x;
+
+    ctx.fillStyle = BARVY.plocha;
+    for (var s = -1; s <= 1; s += 2) {
+      ctx.beginPath();
+      ctx.arc(
+        stx + d.x * dopredu + kx * stranou * s,
+        sty + d.y * dopredu + ky * stranou * s,
+        r, 0, Math.PI * 2
+      );
+      ctx.fill();
+    }
+  }
+
+  /* ---------- mód Tma ----------
+     Kolo světla kolem hlavy: uprostřed vymaže masku úplně, od vnějšího
+     poloměru ji nechá být. Barva gradientu je jedno, u destination-out
+     rozhoduje jen průhlednost.
+
+     Vyplňuje se jen obálka kola, ne celá maska: dál je gradient
+     průhledný, takže by stejně nic nevykrojil. Devět kopií přes celou
+     plochu by jinak stálo devět plných výplní plátna každý snímek. */
+  function vykroj(cx, cy, jasno, plna) {
+    var g = maskaCtx.createRadialGradient(cx, cy, jasno, cx, cy, plna);
+    g.addColorStop(0, 'rgba(0, 0, 0, 1)');
+    g.addColorStop(1, 'rgba(0, 0, 0, 0)');
+
+    maskaCtx.fillStyle = g;
+    maskaCtx.fillRect(cx - plna, cy - plna, 2 * plna, 2 * plna);
+  }
+
+  /* Tma se skládá mimo plochu a teprve hotová se na ni položí. Kreslit
+     gradienty rovnou na plochu nejde: s módem Bez zdí jich je devět
+     a každý další by přemaloval díru vykrojenou tím předchozím —
+     přitom osm z nich má střed mimo plátno. Přes masku se světla
+     naopak sčítají, takže u kraje prosvítá i to z protější strany. */
+  function tma() {
+    var sirka = game.cols * cell;
+    var vyska = game.rows * cell;
+
+    /* Maska celá ve tmě. V zařízených pixelech ze stejného důvodu jako
+       pozadí v draw() — po zaokrouhlení může plátno o zlomek pixelu
+       přesahovat a ten proužek by zůstal neztmavený. */
+    maskaCtx.save();
+    maskaCtx.setTransform(1, 0, 0, 1, 0, 0);
+    maskaCtx.globalCompositeOperation = 'source-over';
+    maskaCtx.fillStyle = BARVY.plocha;
+    maskaCtx.fillRect(0, 0, maska.width, maska.height);
+    maskaCtx.restore();
+
+    /* Bez zdí platí, že co odejde jedním okrajem, přijde druhým —
+       světlo se musí chovat stejně. Kopie posunuté o celou šířku
+       a výšku plochy prosvítí protější stranu i rohy. Se zdmi stačí
+       jedna, za okraj tam nic nepřeteče. */
+    var posuny = game.mods.bezZdi ? [-1, 0, 1] : [0];
+
+    maskaCtx.globalCompositeOperation = 'destination-out';
+    for (var h = 0; h < game.snakes.length; h++) {
+      // každý had si svítí sám, dvojče má vlastní kolo světla
+      var hlava = game.snakes[h].snake[0];
+      var sx = (hlava.x + 0.5) * cell;         // střed buňky, ne její roh
+      var sy = (hlava.y + 0.5) * cell;
+
+      for (var i = 0; i < posuny.length; i++) {
+        for (var j = 0; j < posuny.length; j++) {
+          vykroj(sx + posuny[i] * sirka, sy + posuny[j] * vyska,
+                 TMA_JASNO * cell, TMA_PLNA * cell);
+        }
+      }
+    }
+    maskaCtx.globalCompositeOperation = 'source-over';
+
+    ctx.drawImage(maska, 0, 0, sirka, vyska);
+  }
+
+  /* Jeden had i s očima. Barvy si nese sám, takže se dvojče od prvního
+     hada liší tělem i hlavou a přitom se tu nic nevětví.
+
+     Po obrácení had chvíli bliká jinou barvou — bez toho by otočka na
+     nehybném těle nebyla poznat, mění se jen konec, kterým se rozjede.
+     Bliká vždycky jen ten had, který se otočil. */
+  function nakresliHada(had) {
+    var blika      = had.blik > 0;
+    var barvaTela  = blika ? BARVY.obrat : had.telo;
+    var barvaHlavy = blika ? BARVY.obratHlava : had.hlava;
+
+    // tělo od ocasu k hlavě, hlava jinou barvou a víc zaoblená
+    for (var i = had.snake.length - 1; i >= 1; i--) {
+      clanek(had.snake[i], barvaTela, 0.22, !had.snake[i].plny);
+    }
+
+    /* Hlava se kreslí plná i tehdy, když je zrovna na řadě dutý článek:
+       projet se skrz ni stejně nedá (kolize se počítají proti tělu)
+       a blikající značka hlavy by se špatně sledovala. Až se posune dál
+       do těla, vykreslí se podle své skutečné plnosti. */
+    clanek(had.snake[0], barvaHlavy, 0.34);
+    oci(had);
+  }
+
+  function draw() {
+    /* Pozadí kreslíme přes celé plátno v zařízených pixelech, ne jen
+       přes mřížku v CSS pixelech: po zaokrouhlení width/height na celé
+       zařízené pixely může plátno o zlomek pixelu přesahovat a ten by
+       jinak zůstal průhledný. Na CSS pozadí elementu se nespoléháme. */
+    ctx.save();
+    ctx.setTransform(1, 0, 0, 1, 0, 0);
+    ctx.fillStyle = BARVY.plocha;
+    ctx.fillRect(0, 0, canvas.width, canvas.height);
+    ctx.restore();
+
+    // jídlo — kolečko, ať se neplete s články těla
+    if (game.food) {
+      var fx = (game.food.x + 0.5) * cell;
+      var fy = (game.food.y + 0.5) * cell;
+
+      ctx.fillStyle = BARVY.jidlo;
+      ctx.beginPath();
+      ctx.arc(fx, fy, cell * 0.32, 0, Math.PI * 2);
+      ctx.fill();
+
+      // s klíčem v ruce je jídlo odemčené — kroužek v barvě klíče
+      if (game.mods.klic && game.maKlic) {
+        ctx.strokeStyle = BARVY.klic;
+        ctx.lineWidth = Math.max(1, cell * 0.07);
+        ctx.beginPath();
+        ctx.arc(fx, fy, cell * 0.44, 0, Math.PI * 2);
+        ctx.stroke();
+      }
+    }
+
+    if (game.jed) kosoctverec(game.jed);
+    if (game.klic) klicNaPlose(game.klic);
+
+    if (game.portaly) {
+      portal(game.portaly[0], true);
+      portal(game.portaly[1], false);
+    }
+
+    /* Sochy pod hada — čerstvá socha vzniká přesně pod hlavou a ta
+       musí zůstat vidět. Kámen má ostřejší rohy než články těla. */
+    for (var s = 0; s < game.sochy.length; s++) {
+      clanek(game.sochy[s], BARVY.socha, 0.1);
+    }
+
+    for (var h = 0; h < game.snakes.length; h++) nakresliHada(game.snakes[h]);
+
+    /* Úplně nakonec, ať tma zakryje i jídlo, sochy a portály —
+       o to v tom módu jde. */
+    if (game.mods.tma) tma();
+  }
+
+  /* ---------------------------------------------------------------
+     HUD a překrytí. Do DOMu saháme jen při skutečné změně, ne
+     šedesátkrát za vteřinu.
+     --------------------------------------------------------------- */
+  var ui = { score: -1, delka: -1, state: '', rekord: -1, nasobitel: -1,
+             odpocet: null };
+
+  function drawUI() {
+    if (game.score !== ui.score) {
+      ui.score = game.score;
+      elSkore.textContent = game.score;
+    }
+
+    // délka nad plochou je součet všech hadů, ne jen toho prvního
+    var delka = 0;
+    for (var h = 0; h < game.snakes.length; h++) {
+      delka += game.snakes[h].snake.length;
+    }
+
+    if (delka !== ui.delka) {
+      ui.delka = delka;
+      elDelka.textContent = delka;
+    }
+
+    /* Násobitel je uzamčený ve stavu hry, takže se v HUD během kola
+       nehne. V menu ho reset drží na právě zvolené kombinaci. */
+    if (game.nasobitel !== ui.nasobitel) {
+      ui.nasobitel = game.nasobitel;
+      elNasobitel.textContent = formatNasobitel(game.nasobitel);
+    }
+
+    if (rekord !== ui.rekord) {
+      ui.rekord = rekord;
+      elRekord.textContent = rekord;
+    }
+
+    /* Číslo odpočtu. Prázdný řetězec znamená schované — jedna hodnota
+       tak pokrývá text i viditelnost. */
+    var odpocetText = game.state === 'countdown' ? String(game.odpocet) : '';
+    if (odpocetText !== ui.odpocet) {
+      ui.odpocet = odpocetText;
+      elOdpocet.textContent = odpocetText;
+      elOdpocet.classList.toggle('je-skryte', odpocetText === '');
+    }
+
+    if (game.state !== ui.state) {
+      ui.state = game.state;
+
+      /* Za běhu i za odpočtu je stránka zamčená — prst v tu chvíli řídí
+         hada a nemá jí hnout. V pauze, po konci hry i v menu se zase
+         rolovat musí, pod plochou jsou nastavení a legenda. */
+      document.body.classList.toggle(
+        'hra-bezi',
+        game.state === 'running' || game.state === 'countdown'
+      );
+
+      var p = PREKRYTI[game.state];
+      if (p) {
+        // zaplněná plocha není prohra, tam se nadpis mění
+        elNadpis.textContent = game.vyhra && game.state === 'over'
+          ? NADPIS_VYHRA
+          : p.nadpis;
+        elBtn.textContent = p.tlacitko;
+
+        elSkoreRadek.classList.toggle('je-skryte', !p.skore);
+        if (p.skore) elSkoreHodnota.textContent = game.score;
+
+        elRekordHlaska.classList.toggle('je-skryte',
+                                        !(game.state === 'over' && novyRekord));
+
+        elPrekryti.classList.add('je-videt');
+      } else {
+        elPrekryti.classList.remove('je-videt');
+      }
+    }
+  }
+
+  /* ---------------------------------------------------------------
+     Smyčka: rAF s akumulátorem času. Rychlost hry tak nezávisí na
+     obnovovací frekvenci displeje. Skok v čase po uspání karty
+     ořízneme, aby had neudělal deset kroků naráz.
+     --------------------------------------------------------------- */
+  function frame(now) {
+    requestAnimationFrame(frame);
+
+    if (!posledni) posledni = now;
+    var dt = now - posledni;
+    posledni = now;
+    if (dt > 250) dt = 250;
+
+    for (var h = 0; h < game.snakes.length; h++) {
+      if (game.snakes[h].blik > 0) game.snakes[h].blik -= dt;
+    }
+
+    if (game.state === 'countdown') {
+      // odpočet běží, ale step() se nevolá — had stojí
+      odpocetCas += dt;
+      while (game.state === 'countdown' && odpocetCas >= ODPOCET_MS) {
+        odpocetCas -= ODPOCET_MS;
+        game.odpocet--;
+        if (game.odpocet <= 0) ukonciOdpocet();
+      }
+      akumulator = 0;
+    } else if (game.state === 'running') {
+      akumulator += dt;
+      while (akumulator >= game.stepMs) {
+        akumulator -= game.stepMs;
+        step();
+        if (game.state !== 'running') break;
+      }
+
+      /* Mizení běží ze stejného dt jako kroky hada, takže se zastaví
+         spolu s ním. Až po krocích: sousto v tomhle snímku časovač
+         nuluje samo a jídlo nemá mizet hadovi zpod hlavy. */
+      if (game.state === 'running') mizeni(dt);
+    } else {
+      akumulator = 0;
+    }
+
+    draw();
+    drawUI();
+  }
+
+  // Uložená obtížnost i módy se promítnou do mřížky, rychlosti a UI.
+  pouzijVolby();
+  requestAnimationFrame(frame);
+})();
+</script>
+</body>
+</html>

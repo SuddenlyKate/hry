@@ -1,0 +1,1997 @@
+<!DOCTYPE html>
+<html lang="cs">
+<head>
+  <meta charset="utf-8">
+  <meta name="viewport" content="width=device-width, initial-scale=1">
+  <title>Sudoku — Hry v prohlížeči</title>
+  <!-- Pojistka pro případ, že se sdílený styl nenačte (jiný server,
+       špatný MIME typ, offline). Stránka pak není holý bílý dokument. -->
+  <style>
+    :root {
+      --bg:   #0f1115;
+      --text: #e6e9ef;
+      --font: system-ui, -apple-system, "Segoe UI", Roboto, "Helvetica Neue", Arial, sans-serif;
+    }
+    html { color-scheme: dark; background: #0f1115; }
+    body {
+      margin: 0;
+      background: var(--bg);
+      color: var(--text);
+      font-family: var(--font);
+    }
+  </style>
+  <link rel="stylesheet" href="../shared/style.css">
+  <style>
+    /* Barvy a rozměry, které jsou jen tady. Do sdílené palety nepatří —
+       mřížka sudoku se nikde jinde ve sbírce nevyskytuje. */
+    :root {
+      /* Čáry mřížky. Tenká odděluje pole uvnitř bloku, silná bloky 3×3
+         mezi sebou. Ten rozdíl není ozdoba: hráč čte desku po blocích,
+         a na mřížce s jednotnými čarami se blok musí pokaždé hledat. */
+      --cara:      #272c37;
+      --cara-blok: #4a5265;
+
+      /* Podbarvení polí, tři stupně jasu. Nejslabší je dosah výběru
+         (řádek, sloupec a blok vybraného pole), silnější pole se stejným
+         číslem, nejsilnější samo vybrané pole. Odstupňovaný jas, ne tři
+         různé barvy: barva by soupeřila s číslicemi a s červenou
+         u konfliktů. */
+      --dosah:  rgba(255, 255, 255, 0.09);
+      --stejne: rgba(74, 222, 128, 0.13);
+      --vyber:  rgba(74, 222, 128, 0.26);
+
+      /* Konflikt: číslo, které je v řádku, sloupci nebo bloku podruhé.
+         Červená je v celé sbírce barva chyby. Text je světlejší než
+         --danger, aby se na podbarveném poli dal přečíst. */
+      --spor:      rgba(224, 83, 61, 0.2);
+      --spor-text: #ff8f7a;
+
+      /* Číslo, které do pole zapsal hráč. Zadání zůstává v barvě textu —
+         je to daná věc, ne hráčův tah. */
+      --moje: #7ee8a2;
+    }
+
+    /* Na herní stránce nechceme přiblížení dvojklikem ani výběr textu
+       při klepání do mřížky. */
+    html, body {
+      overscroll-behavior: none;
+      -webkit-text-size-adjust: 100%;
+    }
+
+    /* Herní stránka je užší než rozcestník a drží se uprostřed. */
+    .wrap {
+      max-width: 900px;
+      margin-inline: auto;
+    }
+
+    main {
+      display: flex;
+      flex-direction: column;
+      align-items: center;
+      touch-action: manipulation;     /* zabije double-tap zoom */
+      user-select: none;
+      -webkit-user-select: none;
+      -webkit-touch-callout: none;
+    }
+
+    /* Sloupec hry je široký přesně jako deska, takže se HUD, číselník
+       i tlačítka zarovnají na její okraje.
+
+       Všechny rozměry mřížky vycházejí z jediného čísla: --pole, tedy
+       strany jednoho pole v pixelech. Počítá ho JS z místa v okně
+       a nastavuje sem, na kontejner — odsud si ho vezmou stopy mřížky,
+       samotná pole i velikost písma. Hodnota níž platí jen do prvního
+       přepočtu, aby deska nebyla do té doby slepená.
+
+       Šířka sloupce je devět polí plus dva pixely rámu na každé straně,
+       nejvýš však celá šířka místa: když se deska při spodní mezi
+       velikosti pole do okna nevejde, roluje se sama v .deska-obal
+       a zbytek sloupce zůstane na svém. */
+    .hra {
+      --pole: 44px;
+      display: flex;
+      flex-direction: column;
+      width: min(100%, calc(var(--pole) * 9 + 4px));
+    }
+
+    /* Údaje nad deskou. Mřížka s pevnými sloupci, ne text s mezerami:
+       každý údaj má vlastní sloupec, takže přibývající cifra neposune
+       sousedy do stran. */
+    .hud {
+      display: grid;
+      grid-template-columns: repeat(2, max-content);
+      gap: 0.3rem 1.5rem;
+      margin-bottom: 0.75rem;
+      font-family: var(--font-mono);
+      font-variant-numeric: tabular-nums;
+      font-size: 0.9rem;
+      color: var(--text-dim);
+    }
+
+    .hud__cislo {
+      display: inline-block;
+      min-width: 2ch;
+      text-align: right;
+      color: var(--text);
+      font-weight: 600;
+    }
+
+    /* Když se deska při spodní mezi velikosti pole do okna nevejde
+       (úzký telefon, kde má pole zůstat aspoň 40 px), roluje se sama
+       místo toho, aby roztáhla celou stránku. */
+    .deska-obal {
+      max-width: 100%;
+      overflow-x: auto;
+      overscroll-behavior-x: contain;
+    }
+
+    /* Deska. Stopy jsou pevné, obojí devětkrát --pole: rozměr mřížky
+       nesmí vyplývat z obsahu polí. S auto stopami má prázdné pole
+       nulovou výšku, takže by řádek byl vysoký podle toho, jestli v něm
+       zrovna nějaké číslo je — a mřížka by se přeskládala pokaždé, když
+       hráč číslo zapíše nebo smaže.
+
+       Šířku i výšku dávají stopy, ne kontejner (width: max-content),
+       jinak by se deska v rolovacím obalu roztáhla a pole by se rozešla
+       s rámem.
+
+       overflow: hidden ořízne rohová pole do zaoblení rámu; bez toho by
+       jejich podbarvení vylezlo přes oblouk ven. */
+    .deska {
+      display: grid;
+      grid-template-columns: repeat(9, var(--pole));
+      grid-template-rows: repeat(9, var(--pole));
+      width: max-content;
+      border: 2px solid var(--cara-blok);
+      border-radius: var(--radius-sm);
+      overflow: hidden;
+      background: var(--board);
+      font-family: var(--font-mono);
+
+      /* Písmo se odvozuje z --pole, takže velikost číslice nemůže
+         ovlivnit velikost pole — vždycky jen naopak. */
+      font-size: calc(var(--pole) * 0.55);
+      line-height: 1;
+
+      /* Stejně široké číslice: bez toho má jednička v mřížce jinou
+         šířku než osmička a čísla ve sloupci se opticky rozjedou. */
+      font-variant-numeric: tabular-nums;
+    }
+
+    /* Jedno pole. Rozměr má zadaný, ne odvozený z obsahu, a číslo v něm
+       drží uprostřed mřížkové centrování — ne line-height nebo padding,
+       ty se s obsahem mění. Prázdné pole je proto stejně velké jako
+       plné, i když v něm není ani znak.
+
+       aspect-ratio je pojistka: kdyby se někdy jedna z obou stran
+       přestala nastavovat, pole zůstane čtvercem. */
+    .bunka {
+      width: var(--pole);
+      height: var(--pole);
+      aspect-ratio: 1;
+      display: grid;
+      place-items: center;
+
+      /* Číslo a poznámky leží na sobě, ne za sebou: obojí dostane celou
+         plochu pole a je jedno, které z nich je zrovna vidět. Kdyby
+         šlo o dvě mřížkové stopy, měnil by obsah výšku pole — přesně
+         to, čemu se tady celou dobu vyhýbáme. */
+      grid-template-areas: "obsah";
+      padding: 0;
+      border: 0;
+      border-right: 1px solid var(--cara);
+      border-bottom: 1px solid var(--cara);
+      background: transparent;
+      color: var(--text);
+      font: inherit;
+      cursor: pointer;
+      transition: background-color 0.1s ease;
+    }
+
+    /* Poslední sloupec a řádek čáru nekreslí — tam už je rám desky. */
+    .bunka[data-sloupec="8"] { border-right: 0; }
+    .bunka[data-radek="8"]   { border-bottom: 0; }
+
+    /* Hranice bloků 3×3. Silnější čára a světlejší barva než uvnitř
+       bloku, jinak se od tenké nepozná. */
+    .bunka[data-sloupec="2"],
+    .bunka[data-sloupec="5"] { border-right: 2px solid var(--cara-blok); }
+
+    .bunka[data-radek="2"],
+    .bunka[data-radek="5"] { border-bottom: 2px solid var(--cara-blok); }
+
+    /* Čísla ze zadání jsou daná: tučná, v plné barvě textu. Hráčova
+         čísla jsou lehčí a zelená — na první pohled je poznat, co je
+         zadání a co vlastní práce, a při chybě se ví, kde hledat. */
+    .bunka--zadani {
+      font-weight: 700;
+      color: var(--text);
+      cursor: default;      /* zapsat se sem nedá, kurzor to má říct */
+    }
+
+    .bunka--moje {
+      font-weight: 400;
+      color: var(--moje);
+    }
+
+    /* ---------- poznámky ----------
+
+       Zapsané číslo poznámky nepřekrývá, protože zápis je zároveň
+       smaže (viz zapis v JS). Obojí přesto sdílí jednu plochu: obsah
+       pole se skládá na sebe, takže velikost pole neurčuje nikdy nic
+       jiného než --pole. */
+    .bunka__cislo,
+    .bunka__pozn {
+      grid-area: obsah;
+    }
+
+    /* Devět pevných míst v mřížce 3×3, a všech devět tam je pořád:
+       jednička patří vlevo nahoru i tehdy, když je v poli jediná
+       poznámka. Kdyby se poznámky řadily za sebou, znamenalo by totéž
+       místo pokaždé jinou číslici a hráč by musel každou přečíst —
+       takhle se jen podívá, jestli na svém místě něco svítí.
+
+       Rozměr i písmo vycházejí z --pole, tedy ze strany pole. Poznámky
+       proto nemají jak velikost pole ovlivnit, stejně jako ji neovlivní
+       velké číslo. */
+    .bunka__pozn {
+      width: 100%;
+      height: 100%;
+      display: grid;
+      grid-template-columns: repeat(3, 1fr);
+      grid-template-rows: repeat(3, 1fr);
+      font-size: calc(var(--pole) * 0.28);
+      line-height: 1;
+      overflow: hidden;
+    }
+
+    .bunka__pozn i {
+      display: grid;
+      place-items: center;
+      font-style: normal;
+
+      /* Prázdná poznámka místo drží — proto visibility, a ne display:
+         mřížka 3×3 musí zůstat celá, jinak by se zbylé číslice sesunuly
+         a přestaly sedět na svých místech. */
+      visibility: hidden;
+    }
+
+    .bunka__pozn .pozn--muze {
+      visibility: visible;
+      color: var(--text-dim);
+    }
+
+    /* Vyloučená číslice: červeně a přeškrtnutě. Samotná barva by
+       nestačila, na písmu o desíti pixelech se odstíny pletou —
+       přeškrtnutí je vidět i tam, kde se barva neprosadí. */
+    .bunka__pozn .pozn--nemuze {
+      visibility: visible;
+      color: var(--spor-text);
+      text-decoration: line-through;
+    }
+
+    /* Zvýrazněná poznámka se podbarví, nepřebarví: barva už nese to
+       důležitější, totiž jestli číslice může nebo nemůže. */
+    .bunka__pozn .pozn--zvyraznena {
+      background: var(--vyber);
+      border-radius: 2px;
+      font-weight: 700;
+    }
+
+    /* Podbarvení. Pořadí tříd v souboru je zároveň jejich pořadím
+       důležitosti: všechny mají stejnou váhu, takže na poli s víc
+       třídami vyhraje ta poslední. Vybrané pole tedy přebije stejné
+       číslo, to přebije dosah — a konflikt se prosadí nad vším kromě
+       samotného výběru. */
+    .bunka--dosah  { background-color: var(--dosah); }
+    .bunka--stejne { background-color: var(--stejne); }
+
+    .bunka--spor {
+      background-color: var(--spor);
+      color: var(--spor-text);
+    }
+
+    /* Vybrané pole. Svítí od začátku hry, ne až po prvním kliknutí —
+       jinak by nebylo poznat, kam šipky a číslice míří.
+
+       Obrys leží uvnitř pole (offset -2px), aby nepřekryl čáry mřížky
+       a nezhoustl blokovou hranici. */
+    .bunka--vyber {
+      background-color: var(--vyber);
+      outline: 2px solid var(--accent);
+      outline-offset: -2px;
+    }
+
+    /* Pokus přepsat číslo ze zadání. Pole na okamžik zčervená: hráč
+       vidí, že stisk dorazil a že se schválně nic nestalo. Bez přechodu,
+       ten by bliknutí rozmazal přes celou jeho délku. */
+    .bunka--zamek {
+      background-color: var(--spor);
+      transition: none;
+    }
+
+    /* Dohraná deska už na klikání nereaguje, ať kurzor nelže. */
+    .deska--vyhra .bunka {
+      cursor: default;
+    }
+
+    .deska--vyhra {
+      border-color: var(--accent);
+    }
+
+    /* Hláška pod deskou. Pevná výška, i když je text prázdný: jinak by
+       se s každou změnou stavu posunul číselník a tlačítka pod ním. */
+    .stav {
+      min-height: 3.4rem;
+      margin: 0.75rem 0 0;
+      color: var(--text-dim);
+      font-size: 0.9rem;
+    }
+
+    .stav--vyhra {
+      color: var(--accent);
+      font-weight: 600;
+    }
+
+    /* Číselník. Na dotykovém displeji je to jediný rozumný způsob, jak
+       číslo zadat, takže má stejnou šířku jako deska a tlačítka jsou
+       dost velká na prst. Poslední je mazání — patří k zadávání, ne
+       k ovládání hry, tak sedí tady a ne u Nové hry. */
+    .cifernik {
+      display: grid;
+      grid-template-columns: repeat(10, 1fr);
+      gap: 0.3rem;
+      margin-top: 0.25rem;
+    }
+
+    .cifra {
+      display: flex;
+      align-items: center;
+      justify-content: center;
+      min-height: 2.6rem;
+      padding: 0.3rem 0;
+      border: 1px solid var(--border);
+      border-radius: var(--radius-sm);
+      background: var(--bg-elev);
+      color: var(--text);
+      font-family: var(--font-mono);
+      font-size: 1.05rem;
+      font-weight: 600;
+      line-height: 1;
+      cursor: pointer;
+      transition: background 0.15s ease, border-color 0.15s ease, color 0.15s ease;
+    }
+
+    .cifra:hover,
+    .cifra:focus-visible {
+      background: var(--bg-elev-hover);
+      border-color: var(--border-hover);
+    }
+
+    .cifra--smazat {
+      color: var(--text-dim);
+    }
+
+    .cifra:disabled {
+      opacity: 0.4;
+      cursor: not-allowed;
+    }
+
+    /* Číselník podle režimu. Přepínač je sice hned nad ním, ale při
+       zadávání se hráč dívá na tlačítka — barva číslic proto říká, co
+       stisk udělá, ještě jednou a tam, kam se kouká. Mazání tón sdílí:
+       červené ⌫ ve vyloučení nic neslibuje špatně. */
+    .cifernik--muze .cifra   { color: var(--text-dim); }
+    .cifernik--nemuze .cifra { color: var(--spor-text); }
+
+    /* Zamčená číslice vypadá jako zvolená položka jinde na stránce.
+       Bez toho by po chvíli nešlo poznat, proč je půlka mřížky
+       podbarvená — zvýraznění nemá ve mřížce vlastní stopu, kterou by
+       se dalo vysvětlit. Přebíjí i najetí myší: dokud drží zámek, má
+       tlačítko říkat jeho barvu. */
+    .cifernik .cifra--zvyraznena,
+    .cifernik .cifra--zvyraznena:hover {
+      background: var(--accent-soft);
+      border-color: var(--accent);
+      color: var(--accent);
+    }
+
+    /* Deset tlačítek vedle sebe vyjde na úzkém displeji na necelé tři
+       čtvrtiny centimetru — to se prstem netrefí. Pod 520 px se proto
+       číselník zalomí na dvě řady po pěti. */
+    @media (max-width: 520px) {
+      .cifernik {
+        grid-template-columns: repeat(5, 1fr);
+      }
+
+      .cifra {
+        min-height: 3rem;
+      }
+    }
+
+    /* jinak by se tlačítko ve sloupci roztáhlo na plnou šířku desky */
+    .btn-nova {
+      align-self: flex-start;
+      margin-top: 1rem;
+    }
+
+    /* ---------- volba obtížnosti pod deskou ----------
+       Je vidět pořád, i rozehrané — změna volby rozdá nové zadání. */
+    .nastaveni {
+      margin-top: 1.25rem;
+    }
+
+    /* Přepínač režimu patří k číselníku, ne k nastavení pod deskou —
+       drží se proto těsně u něj. */
+    .nastaveni--rezim {
+      margin-top: 0;
+      margin-bottom: 0.4rem;
+    }
+
+    .nastaveni__popis {
+      display: block;
+      margin-bottom: 0.25rem;
+      color: var(--text-dim);
+      font-size: 0.68rem;
+      font-weight: 600;
+      text-transform: uppercase;
+      letter-spacing: 0.08em;
+    }
+
+    .prepinace {
+      display: flex;
+      gap: 0.3rem;
+    }
+
+    .prepinac {
+      flex: 1 1 0;
+      min-width: 0;
+      display: flex;
+      flex-direction: column;
+      align-items: center;
+      gap: 0.05rem;
+      padding: 0.35rem 0.25rem;
+      border: 1px solid var(--border);
+      border-radius: var(--radius-sm);
+      background: var(--bg-elev);
+      color: var(--text-dim);
+      font: inherit;
+      line-height: 1.25;
+      cursor: pointer;
+      transition: background 0.15s ease, border-color 0.15s ease, color 0.15s ease;
+    }
+
+    .prepinac:hover {
+      background: var(--bg-elev-hover);
+      border-color: var(--border-hover);
+      color: var(--text);
+    }
+
+    /* Aktivní volba — jiná barva, rám i výplň, ne jen odstín textu. */
+    .prepinac[aria-checked="true"] {
+      background: var(--accent-soft);
+      border-color: var(--accent);
+      color: var(--accent);
+    }
+
+    .prepinac__nazev {
+      font-size: 0.78rem;
+      font-weight: 600;
+    }
+
+    .prepinac__detail {
+      font-family: var(--font-mono);
+      font-size: 0.66rem;
+      opacity: 0.8;
+    }
+
+    /* Legenda ovládání pod deskou. */
+    .ovladani {
+      display: grid;
+      grid-template-columns: max-content 1fr;
+      gap: 0.35rem 0.9rem;
+      align-items: center;
+      margin: 1.25rem 0 0;
+      font-size: 0.85rem;
+    }
+
+    .ovladani dt {
+      justify-self: start;
+      display: flex;
+      gap: 0.15rem;
+      align-items: center;
+      flex-wrap: wrap;
+    }
+
+    .ovladani dd {
+      justify-self: start;
+      margin: 0;
+      color: var(--text-dim);
+    }
+
+    .ovladani kbd {
+      padding: 0.1rem 0.35rem;
+      border: 1px solid var(--border-hover);
+      border-radius: 4px;
+      background: var(--bg-elev);
+      font-family: var(--font-mono);
+      font-size: 0.9em;
+      line-height: 1.4;
+      color: var(--text);
+    }
+  </style>
+</head>
+<body>
+  <div class="wrap">
+
+    <a class="back-link" href="../">← Zpět na rozcestník</a>
+
+    <header class="site-header">
+      <h1>Sudoku</h1>
+      <p>Doplň čísla 1–9 tak, aby se žádné neopakovalo v řádku, sloupci
+         ani ve čtverci 3×3. Tučná čísla jsou zadání a přepsat se nedají;
+         co zapíšeš ty, je zelené. Kde by se stejná čísla potkala,
+         zčervenají obě. Než si číslem budeš jistý, dá se do pole
+         poznamenat, co v něm může být, i to, co v něm být nemůže.</p>
+    </header>
+
+    <main>
+      <div class="hra">
+        <div class="hud">
+          <span>Zadáno: <strong class="hud__cislo" id="hud-zadano">0</strong></span>
+          <span>Zbývá doplnit: <strong class="hud__cislo" id="hud-zbyva">0</strong></span>
+        </div>
+
+        <!-- Pole staví JS. role="group" a ne "grid": mřížka podle ARIA
+             chce řádky a buňky, a to by tu byla vrstva navíc jen kvůli
+             názvu role. Pohyb šipkami po desce řeší JS sám. -->
+        <div class="deska-obal">
+          <div class="deska" id="deska" role="group" aria-label="Sudoku"></div>
+        </div>
+
+        <p class="stav" id="stav" aria-live="polite"></p>
+
+        <!-- Režim číselníku. Stojí nad ním, ne pod ním: říká, co jeho
+             tlačítka udělají, a to se čte dřív než ona sama.
+             Přepínače staví JS ze seznamu režimů. -->
+        <div class="nastaveni nastaveni--rezim">
+          <span class="nastaveni__popis" id="popis-rezim">Režim číselníku</span>
+          <div class="prepinace" role="radiogroup" aria-labelledby="popis-rezim" id="volba-rezim"></div>
+        </div>
+
+        <!-- Číselník staví JS, ať jsou tlačítka i obsluha na jednom
+             místě. -->
+        <div class="cifernik" id="cifernik" role="group" aria-label="Číselník"></div>
+
+        <button class="btn btn--primary btn-nova" id="btn-nova" type="button">Nová hra</button>
+
+        <!-- Volba obtížnosti; přepínače staví JS ze seznamu stupňů, ať je
+             popis předvoleb jen na jednom místě. -->
+        <div class="nastaveni">
+          <span class="nastaveni__popis" id="popis-obtiznost">Obtížnost</span>
+          <div class="prepinace" role="radiogroup" aria-labelledby="popis-obtiznost" id="volba-obtiznost"></div>
+        </div>
+
+        <dl class="ovladani">
+          <dt><kbd>klik</kbd></dt>
+          <dd>vybere pole</dd>
+          <dt><kbd>←</kbd><kbd>↑</kbd><kbd>↓</kbd><kbd>→</kbd></dt>
+          <dd>posunou výběr po mřížce</dd>
+          <dt><kbd>1</kbd>–<kbd>9</kbd></dt>
+          <dd>zapíšou číslo do vybraného pole</dd>
+          <dt><kbd>0</kbd> <kbd>Delete</kbd> <kbd>Backspace</kbd></dt>
+          <dd>smažou číslo z vybraného pole, a je-li prázdné, jeho poznámky</dd>
+          <dt><kbd>Shift</kbd>+<kbd>1</kbd>–<kbd>9</kbd></dt>
+          <dd>poznamenají číslici do vybraného pole</dd>
+          <dt><kbd>Alt</kbd>+<kbd>1</kbd>–<kbd>9</kbd></dt>
+          <dd>poznamenají ji jako vyloučenou; táž číslice podruhé poznámku smaže</dd>
+          <dt><kbd>dlouhý stisk</kbd> <kbd>pravé tlačítko</kbd></dt>
+          <dd>na tlačítku číselníku zvýrazní číslici v celé mřížce, aniž by ji zapsaly</dd>
+          <dt><kbd>Esc</kbd></dt>
+          <dd>zvýraznění zase zruší</dd>
+          <dt><kbd>N</kbd></dt>
+          <dd>nová hra</dd>
+        </dl>
+      </div>
+    </main>
+
+  </div>
+
+<script>
+(function () {
+  'use strict';
+
+  /* ---------------------------------------------------------------
+     Reprezentace
+
+     Navenek je mřížka pole devíti polí po devíti číslech, 0 = prázdno.
+     Uvnitř řešiče je z ní plochý Uint8Array o 81 prvcích a ke každému
+     řádku, sloupci a boxu maska devíti bitů: bit 0 znamená „jednička
+     už v té řadě je“. Kandidáti políčka jsou pak jedno AND tří masek
+     místo procházení dvaceti sousedů a vracení tahu zpět je XOR.
+
+     Plochý index i běží po řádcích: řádek = i / 9, sloupec = i % 9.
+     --------------------------------------------------------------- */
+
+  var VSE = 0x1FF;               // všech devět bitů, tedy číslice 1–9
+
+  // do kterého boxu 3×3 políčko patří — počítat to pokaždé je zbytečné
+  var BOX = new Uint8Array(81);
+  for (var i = 0; i < 81; i++) {
+    BOX[i] = (((i / 9) | 0) / 3 | 0) * 3 + ((i % 9) / 3 | 0);
+  }
+
+  /* Kolik bitů má maska, tedy kolik číslic do políčka smí. Tabulka pro
+     všech 512 masek se postaví jednou; v hledání se do ní sahá pro
+     každé volné políčko při každém tahu, takže se to vyplatí. */
+  var POCET_BITU = new Uint8Array(512);
+  for (var m = 1; m < 512; m++) {
+    POCET_BITU[m] = POCET_BITU[m >> 1] + (m & 1);
+  }
+
+  function prazdnaMrizka() {
+    var mrizka = [];
+    for (var r = 0; r < 9; r++) {
+      mrizka.push([0, 0, 0, 0, 0, 0, 0, 0, 0]);
+    }
+    return mrizka;
+  }
+
+  function kopieMrizky(mrizka) {
+    var kopie = [];
+    for (var r = 0; r < 9; r++) kopie.push(mrizka[r].slice());
+    return kopie;
+  }
+
+  function doMrizky(pole) {
+    var mrizka = [];
+    for (var r = 0; r < 9; r++) {
+      var radek = [];
+      for (var s = 0; s < 9; s++) radek.push(pole[r * 9 + s]);
+      mrizka.push(radek);
+    }
+    return mrizka;
+  }
+
+  /* Vstup od volajícího může být cokoliv. Rozbít se o to má hned tady
+     a se srozumitelnou hláškou, ne až uvnitř hledání tichým nesmyslem. */
+  function zkontrolujTvar(mrizka) {
+    if (!Array.isArray(mrizka) || mrizka.length !== 9) {
+      throw new TypeError('Mřížka musí být pole devíti řádků.');
+    }
+    for (var r = 0; r < 9; r++) {
+      if (!Array.isArray(mrizka[r]) || mrizka[r].length !== 9) {
+        throw new TypeError('Řádek ' + r + ' není pole devíti čísel.');
+      }
+      for (var s = 0; s < 9; s++) {
+        var c = mrizka[r][s];
+        if (typeof c !== 'number' || c !== (c | 0) || c < 0 || c > 9) {
+          throw new TypeError('Políčko [' + r + '][' + s + '] není celé číslo 0–9.');
+        }
+      }
+    }
+  }
+
+  /* Rozloží mřížku do plochého pole a masek. Vrací null, když zadání už
+     samo odporuje pravidlům (dvě stejná čísla v řadě) — takové zadání
+     nemá řešení a hledání se kvůli němu nemusí ani rozjíždět. */
+  function novyStav(mrizka) {
+    var pole    = new Uint8Array(81);
+    var radky   = new Uint16Array(9);
+    var sloupce = new Uint16Array(9);
+    var boxy    = new Uint16Array(9);
+
+    for (var i = 0; i < 81; i++) {
+      var c = mrizka[(i / 9) | 0][i % 9];
+      if (c === 0) continue;
+
+      var bit = 1 << (c - 1);
+      var r = (i / 9) | 0, s = i % 9, b = BOX[i];
+      if ((radky[r] & bit) || (sloupce[s] & bit) || (boxy[b] & bit)) return null;
+
+      radky[r]   |= bit;
+      sloupce[s] |= bit;
+      boxy[b]    |= bit;
+      pole[i] = c;
+    }
+
+    return { pole: pole, radky: radky, sloupce: sloupce, boxy: boxy };
+  }
+
+  /* ---------------------------------------------------------------
+     Hledání
+
+     Backtracking, ale nikdy ne „první volné políčko“. Vybírá se to
+     s nejmenším počtem možností: když má políčko jediného kandidáta,
+     není co zkoušet, a když nemá žádného, je celá větev mrtvá a pozná
+     se to hned, ne o dvacet tahů dál. Proti pořadí po řádcích je to
+     řádově rychlejší a hlavně to nemá zlé případy, ve kterých by naivní
+     řešič běžel vteřiny.
+
+     limit    kolik řešení stačí najít; pak se hledání vrátí
+     nahodne  zkoušet kandidáty v náhodném pořadí (pro generátor)
+     sber     pole, do kterého se uloží první nalezené řešení, nebo null
+     --------------------------------------------------------------- */
+  function prohledej(st, limit, nahodne, sber) {
+    var pole = st.pole;
+
+    var nej = -1, nejMaska = 0, nejPocet = 10;
+
+    for (var i = 0; i < 81; i++) {
+      if (pole[i] !== 0) continue;
+
+      var maska = VSE & ~(st.radky[(i / 9) | 0] | st.sloupce[i % 9] | st.boxy[BOX[i]]);
+      var pocet = POCET_BITU[maska];
+
+      if (pocet === 0) return 0;        // políčko bez kandidáta — slepá ulička
+      if (pocet < nejPocet) {
+        nejPocet = pocet;
+        nej = i;
+        nejMaska = maska;
+        if (pocet === 1) break;         // líp než jediný kandidát to nebude
+      }
+    }
+
+    if (nej === -1) {                   // žádné volné políčko, mřížka je hotová
+      if (sber && sber.length === 0) sber.push(pole.slice());
+      return 1;
+    }
+
+    var cisla = [];
+    for (var c = 1; c <= 9; c++) {
+      if (nejMaska & (1 << (c - 1))) cisla.push(c);
+    }
+    if (nahodne) zamichej(cisla);
+
+    var r = (nej / 9) | 0, s = nej % 9, b = BOX[nej];
+    var nalezeno = 0;
+
+    for (var k = 0; k < cisla.length; k++) {
+      var bit = 1 << (cisla[k] - 1);
+
+      pole[nej] = cisla[k];
+      st.radky[r] |= bit; st.sloupce[s] |= bit; st.boxy[b] |= bit;
+
+      nalezeno += prohledej(st, limit - nalezeno, nahodne, sber);
+
+      st.radky[r] &= ~bit; st.sloupce[s] &= ~bit; st.boxy[b] &= ~bit;
+      pole[nej] = 0;
+
+      if (nalezeno >= limit) break;
+    }
+
+    return nalezeno;
+  }
+
+  /* Fisher–Yates. Míchá na místě a vrací totéž pole, ať se dá řetězit. */
+  function zamichej(pole) {
+    for (var i = pole.length - 1; i > 0; i--) {
+      var j = (Math.random() * (i + 1)) | 0;
+      var tmp = pole[i]; pole[i] = pole[j]; pole[j] = tmp;
+    }
+    return pole;
+  }
+
+  /* ---------------------------------------------------------------
+     Veřejný řešič
+
+     rezim 'jedno'   → první nalezené řešení jako mřížka, nebo null
+     rezim 'pocitat' → počet řešení, ale nejvýš 2
+
+     Počítání se na dvojce zastaví schválně. Jediná otázka, kterou
+     generátor klade, zní „má tohle zadání pořád právě jedno řešení?“,
+     a na tu druhé nalezené řešení odpoví. Dopočítat všechna řešení
+     u skoro prázdné mřížky by trvalo dlouho a k ničemu by to nebylo.
+     --------------------------------------------------------------- */
+  function resit(mrizka, rezim) {
+    rezim = rezim || 'jedno';
+    if (rezim !== 'jedno' && rezim !== 'pocitat') {
+      throw new TypeError('Režim musí být "jedno" nebo "pocitat".');
+    }
+
+    zkontrolujTvar(mrizka);
+    var st = novyStav(mrizka);
+
+    if (rezim === 'pocitat') {
+      return st ? prohledej(st, 2, false, null) : 0;
+    }
+
+    if (!st) return null;
+    var sber = [];
+    prohledej(st, 1, false, sber);
+    return sber.length ? doMrizky(sber[0]) : null;
+  }
+
+  /* ---------------------------------------------------------------
+     Plná mřížka
+
+     Totéž hledání nad prázdnou deskou, jen s náhodným pořadím číslic.
+     Prázdná deska nemá jak nemít řešení, takže se odsud vrací vždycky
+     hotová mřížka — a pokaždé jiná.
+     --------------------------------------------------------------- */
+  function plnaMrizka() {
+    var st = novyStav(prazdnaMrizka());
+    var sber = [];
+    prohledej(st, 1, true, sber);
+    return doMrizky(sber[0]);
+  }
+
+  /* ---------------------------------------------------------------
+     Zadání
+
+     Prochází se všech 81 pozic v náhodném pořadí. Na každé se číslo
+     dočasně vynuluje a spustí se řešič v režimu počítání: když vyjde
+     víc než jedno řešení, číslo se vrátí zpátky a jde se na další
+     pozici — nekončíme, protože jinde se odebrat ještě může. Skončí se,
+     až dojdou pozice nebo se dosáhne cíle, podle toho, co nastane dřív.
+
+     ponechat je dolní mez, o kterou se snažíme, ne pevná hodnota.
+     U mírného cíle (kolem 30) se skoro každé odebrání povede a zadání
+     vyjdou přesně na cíli; čím níž se míří, tím častěji se odebrání
+     vrací a tím víc se skutečné počty rozcházejí. Kolik čísel v zadání
+     opravdu zůstalo, říká ponechano ve výsledku, a kolik odebrání se
+     muselo vrátit, říká vraceno. Pod 17 čísel se sudoku s jediným
+     řešením dostat nemůže (dokázáno hrubou silou v roce 2012), takže
+     nižší cíl by znamenal jen marné pokusy.
+
+     Řešení se vrací spolu se zadáním. Je to přesně to jediné řešení,
+     které zadání má — kdyby vzniklo ještě jiné, poslední odebrání by se
+     vrátilo zpátky — a kontrola tahů i nápověda se pak obejdou bez
+     řešiče.
+     --------------------------------------------------------------- */
+  function vytvorZadani(ponechat) {
+    ponechat = (ponechat === undefined) ? 30 : (ponechat | 0);
+    if (ponechat < 17) ponechat = 17;
+    if (ponechat > 81) ponechat = 81;
+
+    var reseni = plnaMrizka();
+    var zadani = kopieMrizky(reseni);
+
+    var poradi = [];
+    for (var i = 0; i < 81; i++) poradi.push(i);
+    zamichej(poradi);
+
+    var zbyva = 81;
+    var vraceno = 0;
+
+    for (var k = 0; k < 81 && zbyva > ponechat; k++) {
+      var p = poradi[k];
+      var r = (p / 9) | 0, s = p % 9;
+
+      var puvodni = zadani[r][s];
+      zadani[r][s] = 0;
+
+      if (resit(zadani, 'pocitat') === 1) {
+        zbyva--;
+      } else {
+        zadani[r][s] = puvodni;         // bez toho čísla by šlo doplnit i jinak
+        vraceno++;
+      }
+    }
+
+    return { zadani: zadani, reseni: reseni, ponechano: zbyva, vraceno: vraceno };
+  }
+
+  /* ---------------------------------------------------------------
+     Pomůcky pro konzoli
+     --------------------------------------------------------------- */
+
+  /* Mřížka jako text s čarami mezi boxy. Pole polí se v konzoli rozbaluje
+     po řádcích a není z něj na první pohled vidět vůbec nic. */
+  function jakoText(mrizka) {
+    var radky = [];
+    for (var r = 0; r < 9; r++) {
+      if (r === 3 || r === 6) radky.push('------+-------+------');
+      var radek = '';
+      for (var s = 0; s < 9; s++) {
+        if (s === 3 || s === 6) radek += '| ';
+        radek += (mrizka[r][s] || '.') + ' ';
+      }
+      radky.push(radek);
+    }
+    return radky.join('\n');
+  }
+
+  function vypis(mrizka) {
+    zkontrolujTvar(mrizka);
+    console.log(jakoText(mrizka));
+  }
+
+  function pocetCisel(mrizka) {
+    var n = 0;
+    for (var r = 0; r < 9; r++) {
+      for (var s = 0; s < 9; s++) if (mrizka[r][s] !== 0) n++;
+    }
+    return n;
+  }
+
+  /* Je mřížka opravdu vyplněná a podle pravidel? Kontroluje se tu
+     mřížka, kterou postavil sám řešič, takže by to mělo projít vždycky —
+     a právě proto se to hodí: chytilo by to chybu v maskách, ne v zadání. */
+  function jePlneVyresene(mrizka) {
+    for (var i = 0; i < 9; i++) {
+      var vRadku = 0, vSloupci = 0, vBoxu = 0;
+      for (var j = 0; j < 9; j++) {
+        var vr = mrizka[i][j];                                            // i-tý řádek
+        var vs = mrizka[j][i];                                            // i-tý sloupec
+        var vb = mrizka[((i / 3) | 0) * 3 + ((j / 3) | 0)][(i % 3) * 3 + (j % 3)];  // i-tý box
+        if (!vr || !vs || !vb) return false;
+        vRadku   |= 1 << (vr - 1);
+        vSloupci |= 1 << (vs - 1);
+        vBoxu    |= 1 << (vb - 1);
+      }
+      if (vRadku !== VSE || vSloupci !== VSE || vBoxu !== VSE) return false;
+    }
+    return true;
+  }
+
+  // sedí zadání na řešení, tedy je každé jeho číslo i v řešení?
+  function jePodmnozina(zadani, reseni) {
+    for (var r = 0; r < 9; r++) {
+      for (var s = 0; s < 9; s++) {
+        if (zadani[r][s] !== 0 && zadani[r][s] !== reseni[r][s]) return false;
+      }
+    }
+    return true;
+  }
+
+  /* Kolikrát které číslo padlo, seřazeno od nejmenšího: „24× 7, 25× 9“.
+     Průměr sám o sobě nestačí — jediné, co je na počtech ponechaných
+     čísel zajímavé, je právě to, jestli se rozcházejí. */
+  function rozdeleni(hodnoty) {
+    var serazene = hodnoty.slice().sort(function (a, b) { return a - b; });
+    var kusy = [];
+    for (var i = 0; i < serazene.length; i++) {
+      if (i === 0 || serazene[i] !== serazene[i - 1]) {
+        kusy.push({ hodnota: serazene[i], pocet: 0 });
+      }
+      kusy[kusy.length - 1].pocet++;
+    }
+    return kusy.map(function (k) { return k.hodnota + '× ' + k.pocet; }).join(', ');
+  }
+
+  function stejne(a, b) {
+    for (var r = 0; r < 9; r++) {
+      for (var s = 0; s < 9; s++) if (a[r][s] !== b[r][s]) return false;
+    }
+    return true;
+  }
+
+  /* ---------------------------------------------------------------
+     Test generátoru
+
+     Chyba v generátoru se jinak projeví až u zadání, které nejde
+     dořešit — tedy v půlce hry a bez šance to hráči vysvětlit. Proto se
+     u každého vygenerovaného zadání ověřuje pětero: má právě jedno
+     řešení, vrácené řešení je opravdu vyřešené sudoku, zadání je jeho
+     podmnožinou, ponechano souhlasí se skutečným počtem čísel, a řešič
+     nezávisle najde přesně tu plnou mřížku, ze které generátor odebíral.
+     Poslední kontrola je nejostřejší: u jednoznačného zadání jiné řešení
+     než původní mřížka existovat nemůže, takže kdyby generátor odebral
+     číslo, po kterém jde deska doplnit i jinak, pozná se to tady.
+
+     Vypisuje se i rozdělení skutečných počtů ponechaných čísel, protože
+     samotný průměr by neprozradil to podstatné: u přísného cíle se ho
+     dosáhnout vždycky nedá a počty se musí rozcházet. Kdyby se odebíralo
+     naslepo, vyšla by pokaždé přesně cílová hodnota a vraceno by bylo
+     nula.
+     --------------------------------------------------------------- */
+  function test(kolik, ponechat) {
+    kolik = kolik || 20;
+    ponechat = (ponechat === undefined) ? 30 : ponechat;
+
+    var casy = [], ponechano = [], chyby = [];
+    var celkem = 0, vracenoCelkem = 0;
+
+    function chyba(poradi, zadani, co) {
+      chyby.push({ poradi: poradi, co: co, zadani: zadani });
+    }
+
+    for (var n = 0; n < kolik; n++) {
+      var t0 = performance.now();
+      var v = vytvorZadani(ponechat);
+      var cas = performance.now() - t0;
+
+      casy.push(cas);
+      celkem += cas;
+      ponechano.push(v.ponechano);
+      vracenoCelkem += v.vraceno;
+
+      var pocet = resit(v.zadani, 'pocitat');
+      if (pocet !== 1) {
+        chyba(n + 1, v.zadani, 'počet řešení je ' + pocet + ', ne 1');
+      }
+      if (!jePlneVyresene(v.reseni)) {
+        chyba(n + 1, v.zadani, 'vrácené řešení není platné sudoku');
+      }
+      if (!jePodmnozina(v.zadani, v.reseni)) {
+        chyba(n + 1, v.zadani, 'zadání neodpovídá vrácenému řešení');
+      }
+      if (v.ponechano !== pocetCisel(v.zadani)) {
+        chyba(n + 1, v.zadani, 'ponechano nesedí na počet čísel v zadání');
+      }
+
+      var nalezene = resit(v.zadani, 'jedno');
+      if (!nalezene || !stejne(nalezene, v.reseni)) {
+        chyba(n + 1, v.zadani, 'řešení zadání není ta plná mřížka, ze které se odebíralo');
+      }
+    }
+
+    var soucetPonechano = 0;
+    for (var i = 0; i < ponechano.length; i++) soucetPonechano += ponechano[i];
+
+    console.log('Sudoku — test generátoru: ' + kolik + ' zadání, cíl ' + ponechat + ' ponechaných');
+
+    if (chyby.length === 0) {
+      console.log('  ✓ všechna zadání mají právě jedno řešení a sedí na své řešení');
+    } else {
+      console.error('  ✗ chyb: ' + chyby.length);
+      for (var j = 0; j < chyby.length; j++) {
+        console.error('    zadání ' + chyby[j].poradi + ': ' + chyby[j].co + '\n' +
+                      jakoText(chyby[j].zadani));
+      }
+    }
+
+    console.log('  čas generování: průměr ' + (celkem / kolik).toFixed(1) + ' ms' +
+                ', nejhorší ' + Math.max.apply(null, casy).toFixed(1) + ' ms' +
+                ', celkem ' + (celkem / 1000).toFixed(2) + ' s');
+    console.log('  ponecháno čísel: průměr ' + (soucetPonechano / kolik).toFixed(1) +
+                ', nejméně ' + Math.min.apply(null, ponechano) +
+                ', nejvíc ' + Math.max.apply(null, ponechano));
+    console.log('  rozdělení: ' + rozdeleni(ponechano));
+    console.log('  odebrání vrácených zpátky kvůli druhému řešení: ' + vracenoCelkem +
+                ' (průměr ' + (vracenoCelkem / kolik).toFixed(1) + ' na zadání)');
+
+    return { chyby: chyby, casy: casy, ponechano: ponechano, vraceno: vracenoCelkem };
+  }
+
+  /* Logika zůstává dostupná i z konzole. Test generátoru se od téhle
+     chvíle nespouští sám — na stránce, kde se hraje, nemá co dělat. */
+  window.Sudoku = {
+    resit: resit,
+    plnaMrizka: plnaMrizka,
+    vytvorZadani: vytvorZadani,
+    test: test,
+    vypis: vypis
+  };
+
+  /* ===============================================================
+     Rozhraní
+     =============================================================== */
+
+  /* ---------------------------------------------------------------
+     Obtížnosti
+
+     Rozlišuje je jediné číslo: kolik čísel zůstane v zadání. Míň čísel
+     znamená delší dohledávání, ne jiná pravidla. Je to dolní mez pro
+     generátor (viz vytvorZadani), takže na Velmi těžké občas vyjde
+     zadání o číslo dvě bohatší — kolik jich v něm doopravdy je, ukazuje
+     údaj nad deskou.
+
+     id se nesmí měnit, je to klíč v localStorage.
+     --------------------------------------------------------------- */
+  var OBTIZNOSTI = [
+    { id: 'lehka',       nazev: 'Lehká',       ponechat: 40 },
+    { id: 'stredni',     nazev: 'Střední',     ponechat: 32 },
+    { id: 'tezka',       nazev: 'Těžká',       ponechat: 26 },
+    { id: 'velmi-tezka', nazev: 'Velmi těžká', ponechat: 23 }
+  ];
+
+  var VYCHOZI_OBTIZNOST = 'stredni';
+  var KLIC_OBTIZNOST    = 'sudoku:obtiznost';
+
+  var ZNAK_SMAZAT = '⌫';
+
+  /* ---------------------------------------------------------------
+     Režim číselníku
+
+     Co udělá stisk tlačítka v číselníku: zapíše číslo, poznamená ho,
+     nebo ho vyloučí. Klávesnice režim obchází — tam řekne totéž jedním
+     stiskem Shift nebo Alt (viz obsluha kláves), takže přepínač je
+     hlavně pro dotykový displej, kde žádný modifikátor po ruce není.
+
+     id je zároveň druh poznámky, se kterým pracuje poznacSi, a přípona
+     třídy číselníku (.cifernik--muze). U zápisu žádná poznámka nevzniká
+     a třída se nepřidává.
+     --------------------------------------------------------------- */
+  var REZIMY = [
+    { id: 'zapis',  nazev: 'Zápis',     klavesa: '1–9' },
+    { id: 'muze',   nazev: 'Poznámka',  klavesa: 'Shift+1–9' },
+    { id: 'nemuze', nazev: 'Vyloučení', klavesa: 'Alt+1–9' }
+  ];
+
+  var VYCHOZI_REZIM = 'zapis';
+
+  // čím tlačítko číselníku začíná svůj popisek pro odečítač obrazovky
+  var POPIS_REZIMU = {
+    zapis:  'Zapsat ',
+    muze:   'Poznamenat ',
+    nemuze: 'Vyloučit '
+  };
+
+  function najdiRezim(id) {
+    for (var i = 0; i < REZIMY.length; i++) {
+      if (REZIMY[i].id === id) return REZIMY[i];
+    }
+    return REZIMY[0];
+  }
+
+  /* Jak dlouho musí stisk na tlačítku číselníku vydržet, aby místo
+     zadání zamkl zvýraznění. Kratší prodleva by brala číslice těm, kdo
+     ťukají pomaleji; delší by se přestala podobat stisku a začala
+     vypadat jako zaseknuté tlačítko. */
+  var DRZENI_MS = 450;
+
+  /* ---------------------------------------------------------------
+     Velikost pole
+
+     Strana jednoho pole v pixelech. Počítá se z místa, které deska má,
+     a nastavuje se jako --pole na sloupec hry — jednou pro celou
+     mřížku, ať jsou všechna pole zaručeně stejná a nezávislá na tom,
+     co v nich je.
+
+     Meze: 48 px je pohodlný terč pro kurzor a zároveň strop, nad kterým
+     už deska jen roste, aniž by se lépe četla. Prst potřebuje víc než
+     kurzor, takže na dotykovém displeji se pod 40 px nejde ani na úkor
+     toho, že se deska do okna nevejde a bude se rolovat — netrefitelná
+     pole jsou horší než rolování. Myš se trefí i do menšího, tam je
+     dno 32 px kvůli čitelnosti číslic.
+
+     Číslo je celé: zlomky pixelu by se v devíti stopách posčítaly
+     a řádky by nakonec vyšly různě vysoké. */
+  var POLE_MAX       = 48;
+  var POLE_MIN       = 32;
+  var POLE_MIN_DOTYK = 40;
+
+  /* Kolik výšky okna smí deska zabrat. Zbytek patří hlášce, číselníku
+     a tlačítkům pod deskou — z okna má být poznat, že stránka
+     pokračuje. */
+  var PODIL_VYSKY = 0.62;
+
+  // jak dlouho blikne pole ze zadání, do kterého se hráč pokusil psát
+  var BLIK_MS = 160;
+
+  /* Hláška pod deskou. Za rozehrané hry je prázdná — hráč tehdy kouká
+     do mřížky a stálý text by jen odváděl pozornost. Místo po ní
+     zůstává (min-height v CSS), takže se pod deskou nic neposouvá. */
+  var HLASKY = {
+    start: 'Vyber pole a napiš číslo 1–9. Tučná čísla přepsat nejdou.',
+    hraje: '',
+    plna:  'Mřížka je plná, ale některá čísla se perou — oprav červená pole.',
+    vyhra: 'Hotovo! Celá mřížka sedí.'
+  };
+
+  var SIPKY = {
+    ArrowLeft:  { r:  0, s: -1 },
+    ArrowRight: { r:  0, s:  1 },
+    ArrowUp:    { r: -1, s:  0 },
+    ArrowDown:  { r:  1, s:  0 }
+  };
+
+  var elDeska    = document.getElementById('deska');
+  var elHra      = document.querySelector('.hra');
+  var elCifernik = document.getElementById('cifernik');
+  var elStav     = document.getElementById('stav');
+  var elNova     = document.getElementById('btn-nova');
+  var elVolba    = document.getElementById('volba-obtiznost');
+  var elRezim    = document.getElementById('volba-rezim');
+  var elZadano   = document.getElementById('hud-zadano');
+  var elZbyva    = document.getElementById('hud-zbyva');
+
+  /* ---------------------------------------------------------------
+     Úložiště: zvolená obtížnost.
+
+     Volání je v try/catch: v privátním okně a při zakázaném úložišti
+     localStorage vyhazuje výjimku už při čtení. Hra pak běží dál, jen
+     si volbu nepamatuje.
+     --------------------------------------------------------------- */
+  function najdiObtiznost(id) {
+    for (var i = 0; i < OBTIZNOSTI.length; i++) {
+      if (OBTIZNOSTI[i].id === id) return OBTIZNOSTI[i];
+    }
+    return null;
+  }
+
+  function nactiObtiznost() {
+    try {
+      /* Ručně upravený záznam by jinak nastavil zadání, na jaké hra není
+         stavěná — bereme jen to, co odpovídá některé předvolbě. */
+      var ulozena = najdiObtiznost(localStorage.getItem(KLIC_OBTIZNOST));
+      if (ulozena) return ulozena;
+    } catch (e) {
+      /* nepřístupné úložiště — jedeme na výchozím */
+    }
+    return najdiObtiznost(VYCHOZI_OBTIZNOST);
+  }
+
+  function ulozObtiznost(id) {
+    try {
+      localStorage.setItem(KLIC_OBTIZNOST, id);
+    } catch (e) {
+      /* nevadí, volba vydrží jen do konce sezení */
+    }
+  }
+
+  /* ---------------------------------------------------------------
+     Stav hry
+
+     zadani  původní mřížka, 0 = prázdné pole; tahle čísla jsou zamčená
+     reseni  jediné řešení zadání (zatím se nepoužívá, přijde s nápovědou)
+     pole    aktuální stav mřížky včetně hráčových čísel
+     poznamky  co si hráč do polí poznamenal; viz prazdnePoznamky
+     vyber   index vybraného pole, 0–80
+     spory   pro každé pole 1, když je jeho číslo v řadě podruhé
+     --------------------------------------------------------------- */
+  var obtiznost = nactiObtiznost();
+  var hra = null;
+  var bunky = [];          // 81 tlačítek desky; staví se jednou
+  var cifry = [];          // tlačítka číselníku 1–9
+  var cisla = [];          // <span> s velkým číslem uvnitř každého pole
+  var poznZnaky = [];      // devět <i> poznámek ke každému poli
+  var blikTimer = null;
+
+  var rezimCifernik = najdiRezim(VYCHOZI_REZIM);
+
+  /* Číslice zamčená ke zvýraznění, nebo null. Není součástí hry: se
+     zadáním nesouvisí, nic nezapisuje a novou hru nepřežije. */
+  var zamcena = null;
+
+  /* Rozeznaný dlouhý stisk na tlačítku číselníku. hotovo říká, že
+     stejné gesto už zámek přepnulo — kliknutí, které po něm přijde,
+     tedy nesmí ještě zapisovat. */
+  var stisk = { timer: null, hotovo: false };
+
+  function novaHra() {
+    var v = vytvorZadani(obtiznost.ponechat);
+
+    /* Zámek zvýraznění patří k rozehrané desce, ne ke hře jako takové:
+       na nové mřížce by svítila číslice, kterou si tam nikdo nezamkl. */
+    zamcena = null;
+
+    hra = {
+      zadani: v.zadani,
+      reseni: v.reseni,
+      pole:   kopieMrizky(v.zadani),
+      poznamky: prazdnePoznamky(),
+      vyber:  prvniPrazdne(v.zadani),
+      stav:   'start',
+      spory:  null,
+      prazdnych: 0
+    };
+
+    prepocitej();
+    vykresli();
+  }
+
+  /* Výběr začíná na prvním prázdném poli. Doprostřed ani do rohu ho
+     stavět nemá smysl: pole ze zadání se stejně nedá vyplnit, a hráč by
+     musel začít tím, že výběr někam odsune. */
+  function prvniPrazdne(mrizka) {
+    for (var i = 0; i < 81; i++) {
+      if (mrizka[(i / 9) | 0][i % 9] === 0) return i;
+    }
+    return 0;
+  }
+
+  /* ---------------------------------------------------------------
+     Konflikty
+
+     Pole je ve sporu, když se jeho číslo opakuje v řádku, sloupci nebo
+     bloku. Značí se obě pole, ne jen to novější — hráč potřebuje vidět
+     dvojici, jinak neví, proti čemu se číslo pere. Značí se i čísla ze
+     zadání: proti nim se chybuje nejčastěji a schovat jednu polovinu
+     dvojice by bylo matoucí.
+
+     Řešič se na to nevolá schválně. Konflikt je vidět na první pohled
+     z pravidel, kdežto řešič ví i to, jestli číslo sedí s jediným
+     řešením — a to už by byla nápověda, ne kontrola pravidel.
+     --------------------------------------------------------------- */
+  var RADY = (function () {
+    var rady = [];
+    for (var i = 0; i < 9; i++) {
+      var radek = [], sloupec = [], blok = [];
+      for (var j = 0; j < 9; j++) {
+        radek.push(i * 9 + j);
+        sloupec.push(j * 9 + i);
+        blok.push((((i / 3) | 0) * 3 + ((j / 3) | 0)) * 9 + (i % 3) * 3 + (j % 3));
+      }
+      rady.push(radek, sloupec, blok);
+    }
+    return rady;
+  }());
+
+  function najdiSpory(pole) {
+    var spor = new Uint8Array(81);
+
+    for (var u = 0; u < RADY.length; u++) {
+      var rada = RADY[u];
+      var kde = [-1, -1, -1, -1, -1, -1, -1, -1, -1, -1];   // číslo -> první výskyt
+
+      for (var j = 0; j < 9; j++) {
+        var i = rada[j];
+        var c = pole[(i / 9) | 0][i % 9];
+        if (c === 0) continue;
+
+        if (kde[c] === -1) {
+          kde[c] = i;
+        } else {
+          spor[i] = 1;
+          spor[kde[c]] = 1;
+        }
+      }
+    }
+
+    return spor;
+  }
+
+  /* Přepočítá vše, co plyne z obsahu mřížky, a rozhodne o výhře.
+     Volá se po každé změně čísla, ne při přesunu výběru — ten obsahem
+     mřížky nehýbe. */
+  function prepocitej() {
+    hra.spory = najdiSpory(hra.pole);
+
+    var prazdnych = 0, spornych = 0;
+    for (var i = 0; i < 81; i++) {
+      if (hra.pole[(i / 9) | 0][i % 9] === 0) prazdnych++;
+      if (hra.spory[i]) spornych++;
+    }
+    hra.prazdnych = prazdnych;
+
+    /* Plná mřížka bez sporu je vyhraná: zadání má jediné řešení, takže
+       jinak než správně se vyplnit nedala. */
+    if (hra.stav !== 'vyhra' && prazdnych === 0 && spornych === 0) {
+      hra.stav = 'vyhra';
+    }
+  }
+
+  /* ---------------------------------------------------------------
+     Vykreslení
+
+     Pole se staví jednou a pak se jen přepisují — překreslit 81 prvků
+     po každém stisku je levnější než je bourat a stavět znovu, a hlavně
+     se tím nikam neztratí posluchač ani fokus.
+     --------------------------------------------------------------- */
+  /* Přepočet strany pole. Měří se místo, které má sloupec hry
+     k dispozici — tedy <main>, ne sama deska: šířka desky z --pole
+     vychází, takže měřit ji by znamenalo měřit vlastní výsledek. */
+  function nastavPole() {
+    var dotyk = window.matchMedia('(pointer: coarse)').matches;
+    var dno = dotyk ? POLE_MIN_DOTYK : POLE_MIN;
+
+    var sirka = elHra.parentNode.clientWidth - 4;    // 4 px jsou rám desky
+    var vyska = window.innerHeight * PODIL_VYSKY;
+
+    var pole = Math.floor(Math.min(sirka, vyska) / 9);
+    pole = Math.max(dno, Math.min(POLE_MAX, pole));
+
+    elHra.style.setProperty('--pole', pole + 'px');
+  }
+
+  /* Okno se dá zvětšit, otočit i rozdělit na půl obrazovky. Přepočet je
+     levný (jedno nastavení proměnné), takže se nijak neomezuje. */
+  window.addEventListener('resize', nastavPole);
+  window.addEventListener('orientationchange', nastavPole);
+
+  function postavDesku() {
+    for (var i = 0; i < 81; i++) {
+      var b = document.createElement('button');
+      b.type = 'button';
+      b.className = 'bunka';
+      b.dataset.radek = (i / 9) | 0;
+      b.dataset.sloupec = i % 9;
+      b.dataset.index = i;
+
+      /* Obsah pole má dvě části: velké číslo a mřížku poznámek. Obě se
+         staví rovnou a nastálo. Kdyby se číslo psalo do tlačítka
+         přímo, smazal by každý zápis textContentem i poznámky, a stavět
+         mřížku až podle potřeby by znamenalo měnit stavbu pole během
+         hry — pole se od začátku staví jednou a pak už se jen
+         přepisuje. */
+      var cislo = document.createElement('span');
+      cislo.className = 'bunka__cislo';
+
+      var pozn = document.createElement('span');
+      pozn.className = 'bunka__pozn';
+
+      /* Odečítač obrazovky čte pole z aria-label, kde jsou poznámky
+         vypsané slovy. Devět číslic za sebou by popis jen zaplevelilo. */
+      pozn.setAttribute('aria-hidden', 'true');
+
+      var znaky = [];
+      for (var c = 1; c <= 9; c++) {
+        var znak = document.createElement('i');
+        znak.textContent = c;
+        pozn.appendChild(znak);
+        znaky.push(znak);
+      }
+
+      b.appendChild(cislo);
+      b.appendChild(pozn);
+
+      /* Výběr drží hra, ne fokus prohlížeče. Tabulátorem se tedy po
+         jednotlivých polích nechodí (81 zastávek cestou k tlačítkům
+         pod deskou by byla past), klávesnici obsluhuje posluchač na
+         window. */
+      b.tabIndex = -1;
+
+      elDeska.appendChild(b);
+      bunky.push(b);
+      cisla.push(cislo);
+      poznZnaky.push(znaky);
+    }
+  }
+
+  function vykresli() {
+    var vr = (hra.vyber / 9) | 0, vs = hra.vyber % 9;
+    var hledane = zvyrazneneCislo();
+
+    for (var i = 0; i < 81; i++) {
+      var r = (i / 9) | 0, s = i % 9;
+      var c = hra.pole[r][s];
+      var zeZadani = hra.zadani[r][s] !== 0;
+
+      var trida = 'bunka';
+      if (c !== 0) trida += zeZadani ? ' bunka--zadani' : ' bunka--moje';
+
+      /* Dosah výběru: celý řádek, celý sloupec a celý blok 3×3. Je to
+         přesně ta trojice řad, ve kterých se číslo nesmí opakovat —
+         podbarvení tedy ukazuje, kam se hráč právě dívá. */
+      if (r === vr || s === vs ||
+          (((r / 3) | 0) === ((vr / 3) | 0) && ((s / 3) | 0) === ((vs / 3) | 0))) {
+        trida += ' bunka--dosah';
+      }
+
+      if (c !== 0 && c === hledane) trida += ' bunka--stejne';
+      if (hra.spory[i]) trida += ' bunka--spor';
+      if (i === hra.vyber) trida += ' bunka--vyber';
+
+      var b = bunky[i];
+      b.className = trida;
+      cisla[i].textContent = c === 0 ? '' : c;
+      vykresliPoznamky(poznZnaky[i], hra.poznamky[r][s], hledane);
+      b.setAttribute('aria-label', popisPole(r, s, c, zeZadani));
+
+      if (i === hra.vyber) {
+        b.setAttribute('aria-current', 'true');
+      } else {
+        b.removeAttribute('aria-current');
+      }
+    }
+
+    elDeska.classList.toggle('deska--vyhra', hra.stav === 'vyhra');
+
+    elZadano.textContent = pocetCisel(hra.zadani);
+    elZbyva.textContent = hra.prazdnych;
+
+    elStav.textContent = HLASKY[hlaska()];
+    elStav.classList.toggle('stav--vyhra', hra.stav === 'vyhra');
+
+    /* Po výhře už není co zapisovat. Číselník se tím nezmenší ani
+       nezmizí, jen zešedne — jinak by se pod deskou přeskládalo
+       všechno ostatní. */
+    for (var k = 0; k < cifry.length; k++) {
+      cifry[k].disabled = hra.stav === 'vyhra';
+      cifry[k].classList.toggle('cifra--zvyraznena',
+                                +cifry[k].dataset.cislo === zamcena);
+    }
+  }
+
+  /* Devět míst se přepisuje vždycky všech devět, i u pole, kde není
+     ani jedna poznámka. Přeskočit prázdné by znamenalo nechat na nich
+     třídu z minulého vykreslení — a to je totéž jako je nesmazat. */
+  function vykresliPoznamky(znaky, pozn, hledane) {
+    for (var c = 1; c <= 9; c++) {
+      var druh = pozn[c];
+      znaky[c - 1].className = druh
+        ? 'pozn--' + druh + (c === hledane ? ' pozn--zvyraznena' : '')
+        : '';
+    }
+  }
+
+  function hlaska() {
+    if (hra.stav === 'vyhra') return 'vyhra';
+    if (hra.stav === 'start') return 'start';
+    if (hra.prazdnych === 0) return 'plna';   // plná, ale někde se čísla perou
+    return 'hraje';
+  }
+
+  function popisPole(r, s, c, zeZadani) {
+    var kde = 'řádek ' + (r + 1) + ', sloupec ' + (s + 1) + ', ';
+    if (c !== 0) return kde + c + (zeZadani ? ' ze zadání' : '');
+
+    /* Poznámky se čtou po druzích, ne po pořadí v mřížce: „poznámky 2 6,
+       vyloučeno 4“ se dá poslechnout, kdežto devět míst, z nichž je
+       většina prázdná, ne. */
+    var muze = [], nemuze = [];
+    for (var i = 1; i <= 9; i++) {
+      if (hra.poznamky[r][s][i] === 'muze') muze.push(i);
+      if (hra.poznamky[r][s][i] === 'nemuze') nemuze.push(i);
+    }
+
+    var popis = kde + 'prázdné';
+    if (muze.length) popis += ', poznámky ' + muze.join(' ');
+    if (nemuze.length) popis += ', vyloučeno ' + nemuze.join(' ');
+    return popis;
+  }
+
+  /* ---------------------------------------------------------------
+     Zadávání
+     --------------------------------------------------------------- */
+
+  /* ---------------------------------------------------------------
+     Poznámky
+
+     poznamky[r][s] je objekt, ve kterém je klíčem číslice a hodnotou
+     to, co si o ní hráč myslí: 'muze', nebo 'nemuze'. Jedna struktura
+     na obojí, ne dvě vedle sebe — dva seznamy by musely hlídat, že se
+     v nich táž číslice nesejde v obou zároveň, kdežto v objektu je
+     klíč z definice jednou a rozpor nemá jak vzniknout.
+
+     Objekt, ne pole devíti hodnot: poznámek bývá v poli pár, a takhle
+     je uvnitř jen to, co si tam hráč opravdu napsal.
+     --------------------------------------------------------------- */
+  function prazdnePoznamky() {
+    var vse = [];
+    for (var r = 0; r < 9; r++) {
+      var radek = [];
+      for (var s = 0; s < 9; s++) radek.push({});
+      vse.push(radek);
+    }
+    return vse;
+  }
+
+  function maPoznamky(r, s) {
+    for (var c = 1; c <= 9; c++) {
+      if (hra.poznamky[r][s][c]) return true;
+    }
+    return false;
+  }
+
+  /* Poznámka i vyloučení jsou tentýž zápis, liší se jen druhem.
+
+     Táž číslice podruhé poznámku zase odebere: poznámky se v průběhu
+     hry hlavně opravují, a kdyby šly jen přidávat, musel by na jejich
+     odebrání být další ovladač. Jiný druh téže číslice ji přepíše —
+     „může“ a „nemůže“ o jedné číslici najednou by neznamenalo nic.
+
+     Do pole, kde už číslo je, se poznamenat nedá. V zadání je to
+     zamčené natvrdo; u vlastního čísla by poznámku stejně překrylo,
+     takže by z ní vznikl neviditelný stav — a ten je horší než nic.
+     V obou případech pole blikne: stisk dorazil, jen se schválně nic
+     nestalo. */
+  function poznacSi(cislo, druh) {
+    if (hra.stav === 'vyhra') return;
+
+    var r = (hra.vyber / 9) | 0, s = hra.vyber % 9;
+
+    if (hra.pole[r][s] !== 0) {
+      blikniZamek(hra.vyber);
+      return;
+    }
+
+    var pozn = hra.poznamky[r][s];
+    if (pozn[cislo] === druh) delete pozn[cislo];
+    else pozn[cislo] = druh;
+
+    if (hra.stav === 'start') hra.stav = 'hraje';
+    vykresli();
+  }
+
+  /* Stisk tlačítka číselníku. Co znamená, říká zvolený režim — jenže
+     jen u číslic: mazání maže v každém režimu, protože poznámky se
+     mažou týmž tlačítkem jako čísla (viz zapis). */
+  function zadejCifru(cislo) {
+    if (cislo === 0 || rezimCifernik.id === 'zapis') zapis(cislo);
+    else poznacSi(cislo, rezimCifernik.id);
+  }
+
+  /* ---------------------------------------------------------------
+     Zvýraznění
+
+     Zvýrazňuje se jedna číslice: podbarví se všechna pole, kde je
+     zapsaná, a v poznámkách se podbarví ona sama. Odkud se bere, je
+     otázka přednosti — zamčená číslice přebíjí tu ve vybraném poli,
+     protože si ji hráč zamkl schválně, kdežto výběr se posune při
+     každém kroku po mřížce.
+     --------------------------------------------------------------- */
+  function zvyrazneneCislo() {
+    if (zamcena !== null) return zamcena;
+    return hra.pole[(hra.vyber / 9) | 0][hra.vyber % 9];
+  }
+
+  function prepniZamek(cislo) {
+    zamcena = (zamcena === cislo) ? null : cislo;
+    vykresli();
+  }
+
+  /* Číslice z klávesy, nebo 0. Rozhoduje e.code, tedy poloha klávesy,
+     ne znak: česká klávesnice má v horní řadě bez Shiftu ěščřžýáíé
+     a číslici až se Shiftem, takže podle e.key by se na ní 1–9 psaly
+     jen se Shiftem — a Shift tady znamená poznámku. Numerická
+     klávesnice se počítá stejně. e.key zůstává jako záloha pro
+     prohlížeč, který code neposílá. */
+  function cifraZKlavesy(e) {
+    var kod = /^(?:Digit|Numpad)([1-9])$/.exec(e.code || '');
+    if (kod) return +kod[1];
+    if (e.key >= '1' && e.key <= '9') return +e.key;
+    return 0;
+  }
+
+  function vyberPole(i) {
+    if (i === hra.vyber) return;
+    hra.vyber = i;
+    vykresli();
+  }
+
+  function posunVyber(dr, ds) {
+    var r = ((hra.vyber / 9) | 0) + dr;
+    var s = (hra.vyber % 9) + ds;
+
+    // na kraji mřížky výběr zůstane stát; přeskočit na druhý konec by
+    // při rychlém ťukání do šipky vypadalo jako překlep
+    if (r < 0 || r > 8 || s < 0 || s > 8) return;
+
+    vyberPole(r * 9 + s);
+  }
+
+  /* Zápis čísla, nula maže. Čísla ze zadání se nepřepisují ani nemažou:
+     jsou to podmínky úlohy, ne tahy. */
+  function zapis(cislo) {
+    if (hra.stav === 'vyhra') return;
+
+    var r = (hra.vyber / 9) | 0, s = hra.vyber % 9;
+
+    if (hra.zadani[r][s] !== 0) {
+      blikniZamek(hra.vyber);
+      return;
+    }
+
+    /* Prázdné pole s poznámkami se mazáním taky mění — bez té podmínky
+       by se z něj poznámky nedaly smazat jinak než po jedné. */
+    if (hra.pole[r][s] === cislo && !maPoznamky(r, s)) return;
+
+    hra.pole[r][s] = cislo;
+
+    /* Zapsané číslo poznámky pole ruší: přestaly platit v tu chvíli, co
+       se hráč rozhodl. Smazání čísla je zpátky nevrací — obnovovat je
+       by znamenalo nabídnout jako platné to, co si hráč myslel před
+       tahem, o kterém mezitím zjistil, že byl špatně.
+
+       Mazání (cislo === 0) tudy prochází taky, a je to jediná cesta,
+       jak poznámky celého pole naráz smazat. */
+    hra.poznamky[r][s] = {};
+
+    if (hra.stav === 'start') hra.stav = 'hraje';
+
+    prepocitej();
+    vykresli();
+  }
+
+  /* Krátké červené bliknutí na poli ze zadání. Stisk se schválně
+     neprojevil, a to hráč pozná líp z pohybu než z hlášky. */
+  function blikniZamek(i) {
+    clearTimeout(blikTimer);
+    for (var k = 0; k < bunky.length; k++) bunky[k].classList.remove('bunka--zamek');
+
+    bunky[i].classList.add('bunka--zamek');
+    blikTimer = setTimeout(function () {
+      bunky[i].classList.remove('bunka--zamek');
+    }, BLIK_MS);
+  }
+
+  /* Klik do mřížky. Posluchač je jeden na desce, ne 81 na polích —
+     pole se stejně nikdy nepřestavují, takže by to bylo 81 uzávěrů
+     navíc pro nic. */
+  elDeska.addEventListener('click', function (e) {
+    var cil = e.target.closest('.bunka');
+    if (!cil) return;
+
+    vyberPole(+cil.dataset.index);
+
+    /* Po kliknutí myší fokus pustíme. Zaostřené pole by si vzalo
+       mezerník i Enter a stisk by pak znovu „kliknul“ do mřížky. */
+    if (e.detail > 0) cil.blur();
+  });
+
+  /* ---------------------------------------------------------------
+     Číselník
+
+     Na dotykovém displeji je to jediný způsob, jak číslo zadat —
+     klávesnici tam nikdo nevyvolá. Na myši je to zkratka, kterou nikdo
+     nemusí použít, takže se za ni neplatí ničím než místem pod deskou.
+     --------------------------------------------------------------- */
+  function postavCifernik() {
+    for (var c = 1; c <= 9; c++) {
+      cifry.push(postavCifru(c, String(c), 'Zapsat ' + c));
+    }
+
+    /* Mazání patří do číselníku i do jeho seznamu: po výhře se zamyká
+       celý číselník, a jedno svítící tlačítko mezi zašedlými by slibovalo
+       akci, která se stejně neprovede. */
+    var smazat = postavCifru(0, ZNAK_SMAZAT, 'Smazat číslo');
+    smazat.classList.add('cifra--smazat');
+    cifry.push(smazat);
+  }
+
+  function postavCifru(cislo, znak, popis) {
+    var b = document.createElement('button');
+    b.type = 'button';
+    b.className = 'cifra';
+    b.textContent = znak;
+    b.setAttribute('aria-label', popis);
+    b.dataset.cislo = cislo;
+
+    /* Dlouhý stisk a pravé tlačítko zamknou číslici ke zvýraznění.
+       Je to hledání, ne tah: hráč se ptá „kde všude už sedmička je“,
+       a odpověď ho nemá stát zápis, který by pak musel mazat. Mazací
+       tlačítko se nezamyká, nemá co zvýrazňovat. */
+    if (cislo !== 0) {
+      b.addEventListener('pointerdown', function (e) {
+        stisk.hotovo = false;
+        clearTimeout(stisk.timer);
+        if (e.button !== 0) return;        // pravé tlačítko řeší contextmenu
+
+        stisk.timer = setTimeout(function () {
+          stisk.hotovo = true;             // klik po dlouhém stisku už nezadává
+          prepniZamek(cislo);
+        }, DRZENI_MS);
+      });
+
+      /* Stisk, který odejde jinam nebo skončí dřív, je obyčejné
+         kliknutí — čekání na dlouhý stisk se zruší. */
+      ['pointerup', 'pointerleave', 'pointercancel'].forEach(function (udalost) {
+        b.addEventListener(udalost, function () { clearTimeout(stisk.timer); });
+      });
+
+      /* Nabídka pravého tlačítka by přes číselník jen překážela.
+         Na dotykovém displeji ji vyvolá i dlouhý stisk, takže se ptáme,
+         jestli totéž gesto zámek už nepřepnulo — jinak by ho druhé
+         přepnutí hned zase zrušilo. */
+      b.addEventListener('contextmenu', function (e) {
+        e.preventDefault();
+        clearTimeout(stisk.timer);
+        if (stisk.hotovo) return;
+
+        stisk.hotovo = true;
+        prepniZamek(cislo);
+      });
+    }
+
+    b.addEventListener('click', function (e) {
+      /* Po dlouhém stisku přijde ještě kliknutí. To už patří k němu,
+         ne k zadávání — zvýraznění nemá nic zapisovat. */
+      if (stisk.hotovo) {
+        stisk.hotovo = false;
+        return;
+      }
+
+      zadejCifru(cislo);
+
+      /* Zaostřené tlačítko číselníku by si vzalo mezerník i Enter
+         a zapisovalo by pořád dokola tutéž číslici. Po kliknutí myší
+         (detail > 0) fokus pouštíme, po ovládání klávesnicí ne —
+         tam se bez něj nedá pokračovat. */
+      if (e.detail > 0) b.blur();
+    });
+
+    elCifernik.appendChild(b);
+    return b;
+  }
+
+  /* ---------------------------------------------------------------
+     Klávesnice
+
+     Posluchač visí na window, ne na desce: výběr není fokus, takže by
+     deska klávesy dostávala jen po kliknutí do ní. Takhle se dá hrát
+     hned po načtení stránky.
+     --------------------------------------------------------------- */
+  window.addEventListener('keydown', function (e) {
+    /* Cíl skutečného stisku je vždycky prvek — když nic nedrží fokus,
+       je jím <body>. Na čemkoliv jiném (událost poslaná ručně na
+       window nebo na document) by contains() spadl na TypeError a vzal
+       s sebou celou obsluhu, tak si prvek napřed ověříme. */
+    var cil = e.target instanceof Element ? e.target : null;
+
+    /* Co patří ovládacím prvkům, hře nepředáváme: ve skupině obtížností
+       si šipky i mezerník řídí přepínače samy, a na tlačítkách musí
+       mezerník s Enterem zmáčknout tlačítko. Číslice a šipky zůstávají
+       hře i tehdy, když fokus drží číselník. */
+    if (elVolba.contains(cil) || elRezim.contains(cil)) return;
+    if ((cil === elNova || elCifernik.contains(cil)) &&
+        (e.key === ' ' || e.key === 'Enter')) return;
+
+    /* Escape ruší zamčené zvýraznění. Je to jediný stav, který přežije
+       pohyb po mřížce i zápis, takže se musí dát zrušit odkudkoliv
+       a bez míření na tlačítko. */
+    if (e.key === 'Escape') {
+      if (zamcena !== null) prepniZamek(zamcena);
+      return;
+    }
+
+    /* S Ctrl a Cmd patří klávesy prohlížeči — Ctrl+N je nové okno,
+       ne nová hra. */
+    if (e.ctrlKey || e.metaKey) return;
+
+    // nová hra musí jít rozdat i z dohrané mřížky, proto je nejvýš
+    if (e.key.toLowerCase() === 'n') {
+      e.preventDefault();
+      novaHra();
+      return;
+    }
+
+    var smer = SIPKY[e.key];
+    if (smer) {
+      e.preventDefault();          // šipky jsou naše, stránka se nehne
+      posunVyber(smer.r, smer.s);
+      return;
+    }
+
+    /* Číslice zapisuje, se Shiftem poznamenává a s Altem vylučuje —
+       nezávisle na režimu číselníku. Kdo má klávesnici, nemusí kvůli
+       jedné poznámce nikam přepínat a hlavně se nemusí přepínat zpátky;
+       přepínač je pak jen pro dotykový displej. */
+    var cislo = cifraZKlavesy(e);
+    if (cislo) {
+      e.preventDefault();
+      if (e.altKey) poznacSi(cislo, 'nemuze');
+      else if (e.shiftKey) poznacSi(cislo, 'muze');
+      else zapis(cislo);
+      return;
+    }
+
+    /* Nula maže stejně jako Delete a Backspace: na numerické klávesnici
+       je po ruce dřív než mazací klávesy. Backspace potřebuje
+       preventDefault, jinak by v některých nastaveních odešel na
+       předchozí stránku. */
+    if (e.code === 'Digit0' || e.code === 'Numpad0' ||
+        e.key === '0' || e.key === 'Delete' || e.key === 'Backspace') {
+      e.preventDefault();
+      zapis(0);
+    }
+  });
+
+  /* ---------------------------------------------------------------
+     Přepínače obtížnosti pod deskou.
+
+     ARIA přepínače: skupina má role="radiogroup", tlačítka role="radio"
+     a aria-checked. Tabulátorem se do skupiny vstoupí na zvolené
+     položce (roving tabindex), šipkami se přepíná.
+     --------------------------------------------------------------- */
+  function postavSkupinu(el, polozky, popis, vyber, naVolbu) {
+    var tlacitka = [];
+
+    polozky.forEach(function (polozka) {
+      var b = document.createElement('button');
+      b.type = 'button';
+      b.className = 'prepinac';
+      b.setAttribute('role', 'radio');
+      b.setAttribute('aria-checked', 'false');
+      b.tabIndex = -1;
+
+      var nazev = document.createElement('span');
+      nazev.className = 'prepinac__nazev';
+      nazev.textContent = polozka.nazev;
+
+      var detail = document.createElement('span');
+      detail.className = 'prepinac__detail';
+      detail.textContent = popis(polozka);
+
+      b.appendChild(nazev);
+      b.appendChild(detail);
+      b.addEventListener('click', function (e) {
+        naVolbu(polozka.id);
+
+        /* Po kliknutí myší fokus pustíme: panel je vidět i rozehrané
+           a zaostřený přepínač si bere šipky i mezerník. Klávesnicí
+           (detail === 0) fokus necháváme, jinak by se ve skupině
+           nedalo pohybovat šipkami. */
+        if (e.detail > 0) b.blur();
+      });
+
+      el.appendChild(b);
+      tlacitka.push(b);
+    });
+
+    /* Šipky uvnitř skupiny patří přepínačům. preventDefault tu musí
+       být, jinak stránka odscrolluje. */
+    el.addEventListener('keydown', function (e) {
+      var k = e.key;
+      var posun = (k === 'ArrowRight' || k === 'ArrowDown') ?  1 :
+                  (k === 'ArrowLeft'  || k === 'ArrowUp')   ? -1 : 0;
+      if (!posun && k !== 'Home' && k !== 'End') return;
+
+      e.preventDefault();
+
+      var i = tlacitka.indexOf(document.activeElement);
+      if (i < 0) i = polozky.indexOf(vyber());
+
+      var cil = k === 'Home' ? 0
+              : k === 'End'  ? polozky.length - 1
+              : (i + posun + polozky.length) % polozky.length;
+
+      tlacitka[cil].focus();
+      naVolbu(polozky[cil].id);
+    });
+
+    return {
+      obnov: function () {
+        var vybrana = vyber();
+
+        for (var i = 0; i < tlacitka.length; i++) {
+          var aktivni = polozky[i].id === (vybrana && vybrana.id);
+          tlacitka[i].setAttribute('aria-checked', aktivni ? 'true' : 'false');
+          tlacitka[i].tabIndex = aktivni ? 0 : -1;
+        }
+      }
+    };
+  }
+
+  var skupinaObtiznost = postavSkupinu(
+    elVolba, OBTIZNOSTI,
+    function (polozka) { return polozka.ponechat + ' čísel'; },
+    function () { return obtiznost; },
+    function (id) { zmenObtiznost(id); }
+  );
+
+  /* Změna obtížnosti znamená nové zadání — počet čísel se nikdy nemění
+     pod rozehranou hrou. Stejná volba nedělá nic, jinak by omylem
+     kliknutý už zvolený stupeň smazal rozdělanou mřížku. */
+  function zmenObtiznost(id) {
+    if (obtiznost.id === id) return;
+
+    obtiznost = najdiObtiznost(id);
+    ulozObtiznost(obtiznost.id);
+    skupinaObtiznost.obnov();
+    novaHra();
+  }
+
+  /* ---------------------------------------------------------------
+     Přepínač režimu číselníku. Táž skupina jako u obtížnosti, protože
+     je to táž věc: jedna volba z několika, kterou musí jít přepnout
+     i bez myši.
+     --------------------------------------------------------------- */
+  var skupinaRezim = postavSkupinu(
+    elRezim, REZIMY,
+    function (polozka) { return polozka.klavesa; },
+    function () { return rezimCifernik; },
+    function (id) { zmenRezim(id); }
+  );
+
+  /* Režim mění jen význam stisku v číselníku, do mřížky nesahá —
+     deska se proto nepřekresluje. Číselník to na sobě dá znát barvou
+     číslic a popiskem pro odečítač obrazovky. */
+  function zmenRezim(id) {
+    if (rezimCifernik.id === id) return;
+
+    rezimCifernik = najdiRezim(id);
+    skupinaRezim.obnov();
+    obnovCifernik();
+  }
+
+  function obnovCifernik() {
+    elCifernik.className = 'cifernik' +
+      (rezimCifernik.id === 'zapis' ? '' : ' cifernik--' + rezimCifernik.id);
+
+    for (var i = 0; i < cifry.length; i++) {
+      var cislo = +cifry[i].dataset.cislo;
+      if (cislo === 0) continue;        // mazání maže v každém režimu
+      cifry[i].setAttribute('aria-label', POPIS_REZIMU[rezimCifernik.id] + cislo);
+    }
+  }
+
+  elNova.addEventListener('click', function () {
+    novaHra();
+    elNova.blur();          // ať si tlačítko nebere mezerník
+  });
+
+  nastavPole();
+  postavDesku();
+  postavCifernik();
+  skupinaRezim.obnov();
+  obnovCifernik();
+  skupinaObtiznost.obnov();
+  novaHra();
+}());
+</script>
+</body>
+</html>

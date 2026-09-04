@@ -1,0 +1,2242 @@
+<!DOCTYPE html>
+<html lang="cs">
+<head>
+  <meta charset="utf-8">
+  <meta name="viewport"
+        content="width=device-width, initial-scale=1, maximum-scale=1, user-scalable=no, viewport-fit=cover">
+  <title>Miny — Hry v prohlížeči</title>
+  <!-- Pojistka pro případ, že se sdílený styl nenačte (jiný server,
+       špatný MIME typ, offline). Stránka pak není holý bílý dokument. -->
+  <style>
+    :root {
+      --bg:   #0f1115;
+      --text: #e6e9ef;
+      --font: system-ui, -apple-system, "Segoe UI", Roboto, "Helvetica Neue", Arial, sans-serif;
+    }
+    html { color-scheme: dark; background: #0f1115; }
+    body {
+      margin: 0;
+      background: var(--bg);
+      color: var(--text);
+      font-family: var(--font);
+    }
+  </style>
+  <link rel="stylesheet" href="../shared/style.css">
+  <style>
+    /* Barvy, které jsou jen tady. Do sdílené palety nepatří — číslice
+       ani mina se nikde jinde ve sbírce nevyskytují. */
+    :root {
+      /* Odkryté pole je propadlé: tmavší než neodkryté, ale světlejší
+         než deska pod ním, ať jsou mezery mezi poli pořád vidět. */
+      --odkryte:  #0f1218;
+
+      --mina-pole:   #3a1a14;   /* pole s minou po konci hry */
+      --mina-vybuch: #e0533d;   /* ta jediná, na kterou hráč šlápl */
+
+      /* Přeškrtnutá vlaječka. Schválně bez barvy — červená patří minám
+         a vlaječkám, a omyl má být poznat na první pohled od obojího.
+         Šedá tu čte jako „vyškrtnuto“. */
+      --omyl: #7c8598;
+
+      /* Číslice 1–8. Čím víc min kolem, tím teplejší barva — na první
+         pohled je poznat, kde je hustota min vysoká. Osmička je bílá,
+         ta se stejně objeví jednou za sto her. */
+      --cislo-1: #60a5fa;
+      --cislo-2: #4ade80;
+      --cislo-3: #f472b6;
+      --cislo-4: #c084fc;
+      --cislo-5: #fbbf24;
+      --cislo-6: #22d3ee;
+      --cislo-7: #fb923c;
+      --cislo-8: #cbd5e1;
+
+      /* Meze velikosti jednoho pole. Skutečnou hodnotu mezi nimi počítá
+         JS z rozměru okna, ale prahy patří sem: jediné, co je rozlišuje,
+         je způsob ovládání, a na to se ptá média dotaz. JS si je odsud
+         přečte, takže nastavené jsou jen na jednom místě.
+
+         Strop je 56 px pro myš i pro prst. Výš už deska nevypadá
+         velkoryse, ale neohrabaně: na velkém monitoru by expert zabral
+         přes metr plochy a oko by po něm muselo jezdit. */
+      --bunka-min: 28px;
+      --bunka-max: 56px;
+    }
+
+    /* Prst potřebuje větší terč než kurzor myši — 44 px je spodní hranice
+       doporučovaná pro dotykové cíle. Deska se kvůli tomu na telefonu do
+       okna nevejde; od zmenšování polí je tu důležitější, aby se dala
+       trefit, a přetečení řeší rolování v .deska-obal. */
+    @media (pointer: coarse) {
+      :root {
+        --bunka-min: 44px;
+      }
+    }
+
+    /* Na herní stránce nechceme přiblížení dvojklikem ani tažení
+       stránky při klepání do mřížky. */
+    html, body {
+      overscroll-behavior: none;
+      -webkit-text-size-adjust: 100%;
+    }
+
+    /* Herní stránka je užší než rozcestník a drží se uprostřed. */
+    .wrap {
+      max-width: 900px;
+      margin-inline: auto;
+    }
+
+    main {
+      display: flex;
+      flex-direction: column;
+      align-items: center;
+      touch-action: manipulation;     /* zabije double-tap zoom */
+      user-select: none;
+      -webkit-user-select: none;
+      -webkit-touch-callout: none;
+    }
+
+    /* Sloupec hry — šířku určuje deska, takže se HUD i ovládání
+       zarovnají na její levý okraj. Jakmile deska přeroste sloupec
+       stránky (velký monitor, expert), zůstane HUD, panely i legenda
+       na šířce <main> a ven jde jenom deska; viz .deska-obal.
+
+       max-width je tu podstatné: bez něj by fit-content narostl na šířku
+       desky, a ta bývá širší než okno. Přetekla by celá stránka i
+       s hlavičkou a tlačítky. Takhle se sloupec zastaví na šířce <main>
+       a přes okraj jde jen .deska-obal. */
+    .hra {
+      display: flex;
+      flex-direction: column;
+      width: fit-content;
+      max-width: 100%;
+    }
+
+    /* HUD nad deskou. Mřížka s pevnými sloupci, ne volný text
+       s mezerami: každý údaj má vlastní sloupec, takže přibývající
+       cifra neposune sousedy do stran. */
+    .hud {
+      display: grid;
+      grid-template-columns: repeat(4, max-content);
+      gap: 0.3rem 1.5rem;
+      margin-bottom: 0.75rem;
+      font-family: var(--font-mono);
+      font-variant-numeric: tabular-nums;   /* pojistka, kdyby --font-mono
+                                               spadlo na náhradní písmo */
+      font-size: 0.9rem;
+      color: var(--text-dim);
+    }
+
+    .hud__cislo {
+      display: inline-block;
+      text-align: right;
+      color: var(--text);
+      font-weight: 600;
+    }
+
+    /* Na úzkém displeji by čtyři sloupce přetekly, tak dva a dva. */
+    @media (max-width: 600px) {
+      .hud {
+        grid-template-columns: repeat(2, max-content);
+      }
+    }
+
+    /* Šířka podle nejdelší hodnoty, jaká může padnout: počítadlo min jde
+       i do záporu (vlaječek se dá naklást víc než min), odkrytých na
+       expertovi „381 / 381“, čas „00:00“ i pomlčka místo něj.
+
+       Pevná šířka je u času podstatnější než jinde: bez ní by se s každou
+       přibývající cifrou posunulo všechno napravo od něj, a to čtyřikrát
+       za sekundu. O zbytek se stará tabular-nums na .hud — číslice pak
+       mají stejnou šířku a čas se netřese ani uvnitř pole. */
+    .hud__cislo--miny    { min-width: 4ch; }
+    .hud__cislo--cas     { min-width: 5ch; }
+    .hud__cislo--odkryto { min-width: 9ch; }
+
+    /* Deska a její rám.
+
+       align-self je tu podstatné hned dvakrát. Obal je flex položka
+       v .hra, takže by se bez něj roztáhl na šířku nejširšího sourozence
+       a vedle mřížky by v rámu zbyl pruh pozadí. A hlavně: se
+       zarovnáním na střed smí obal ze sloupce vystoupit — přeteče na
+       obě strany stejně, takže deska zůstane vycentrovaná v okně,
+       i když je širší než max-width společného .wrap. Sloupec stránky
+       (nadpis, HUD, panely, legenda) se tím nemění.
+
+       Přesnou šířku obalu dopočítá JS: je to šířka mřížky, nejvýš však
+       šířka okna bez okraje. Proto ji nastavuje jako width, ne jen jako
+       max-width — fit-content by se zastavil na šířce sloupce a zbytek
+       desky by se zbytečně roloval. */
+    .deska-obal {
+      align-self: center;
+      display: flex;
+      border: 1px solid var(--border);
+
+      /* Záložní strop, než JS napoprvé změří okno. Jakmile změří, přepíše
+         ho vlastní hodnotou v pixelech — obal je flex položka a v příčné
+         ose se sám od sebe nesmršťuje, bez stropu by roztáhl stránku. */
+      max-width: 100%;
+      border-radius: var(--radius-sm);
+      background: var(--board);
+
+      /* Když se deska při zvolené velikosti pole do okna nevejde,
+         neroluje se stránka, ale tenhle obal — a to v obou směrech.
+         Zmenšit pole by bylo jednodušší, jenže pod prstem už by se
+         netrefilo; radši se po desce jezdí. Maximální výšku dopočítá
+         JS z toho, co v okně nad deskou a pod ní zbývá. */
+      overflow: auto;
+
+      /* Dojetí na kraj desky nemá strhnout stránku pod ní ani spustit
+         gesto „přetáhnout pro obnovení“. */
+      overscroll-behavior: contain;
+
+      /* Prst desku posouvá v obou osách. Vypsané osy, ne auto: tím
+         zůstává vypnuté přiblížení dvojklikem (jako na <main>) a hlavně
+         to prohlížeči říká, že o gestu rozhoduje on — jakmile se prst
+         rozjede, přijde pointercancel a dlouhý stisk se zruší sám.
+         Rolování tedy vlaječku neklade, viz DRZENI_MS v JS. */
+      touch-action: pan-x pan-y;
+    }
+
+    /* Mřížka polí. Počet sloupců a stranu pole nastavuje JS podle
+       velikosti okna — v CSS by to byla jen mrtvá čísla. Strana pole
+       i šířka spáry přicházejí jako --cell a --mezera, takže odsud
+       jde stavět geometrie obou tvarů desky. */
+    .deska {
+      display: grid;
+      grid-auto-rows: var(--cell);
+      gap: var(--mezera);
+      font-family: var(--font-mono);
+      font-weight: 700;
+      line-height: 1;
+
+      /* Deska je flex položka v rolovacím obalu. Bez tohohle by ji flex
+         při nedostatku místa smrskl a pole by se rozjela mimo své
+         sloupce — místo aby obal začal rolovat. */
+      flex: 0 0 auto;
+    }
+
+    /* Jedno pole. Čtverec drží grid-auto-rows z JS, takže tady stačí
+       vypnout vše, co si <button> nese s sebou. */
+    .bunka {
+      display: flex;
+      align-items: center;
+      justify-content: center;
+      padding: 0;
+      border: 0;
+      border-radius: 2px;
+      background: var(--bg-elev);
+      color: var(--text);
+      font: inherit;
+      cursor: pointer;
+      transition: background 0.1s ease;
+
+      /* Světlá hrana nahoře dělá z pole vystouplý knoflík. Bez ní se
+         neodkryté pole od odkrytého liší jen odstínem pozadí a na
+         plné desce se ta hranice špatně hledá. */
+      box-shadow: inset 0 1px 0 rgba(255, 255, 255, 0.07);
+    }
+
+    /* Odkryté pole na hover reagovat nesmí — už se s ním nedá nic
+       dělat a bliknutí by mátlo. */
+    .bunka:not(.bunka--odkryta):hover {
+      background: var(--bg-elev-hover);
+    }
+
+    /* Pole vybrané klávesnicí. Je vidět od začátku, i než se hráč
+       klávesnice dotkne — jinak by nebylo poznat, kam šipky míří.
+
+       Obrys musí ležet uvnitř pole: mezery mezi poli jsou dva pixely,
+       takže by odsazený rámeček přetekl přes sousedy. Kreslí se přes
+       obrys, ne přes pozadí, aby zůstal čitelný i na odkrytém poli
+       a na mině. */
+    .bunka--kurzor {
+      outline: 2px solid var(--accent);
+      outline-offset: -2px;
+    }
+
+    /* Odkryté pole je zapuštěné — tedy bez horní hrany. */
+    .bunka--odkryta {
+      background: var(--odkryte);
+      box-shadow: none;
+      cursor: default;
+    }
+
+    /* Po konci hry se nedá klikat nikam, ať kurzor nelže. */
+    .deska--konec .bunka {
+      cursor: default;
+    }
+
+    /* Sousedi čísla, na kterém akord nevyšel. Na okamžik zapadnou, jako
+       by je stisk zmáčkl — hráč vidí, že stisk dorazil, a přitom se na
+       desce nic nezměnilo. Vypadá to jako odkryté pole schválně: přesně
+       tahle pole by akord odkryl, kdyby vlaječky seděly. */
+    .bunka--blik {
+      background: var(--odkryte);
+      box-shadow: none;
+      /* Zapadnout musí okamžitě: přechod z .bunka trvá skoro tak dlouho
+         jako celé bliknutí, takže by pole ztmavlo teprve ve chvíli, kdy
+         už zase světlá. Zpátky se rozsvítí přechodem, ten se po sundání
+         třídy uplatní zase. */
+      transition: none;
+    }
+
+    /* Vlaječka sedí na neodkrytém, tedy vystouplém poli — s číslicemi
+       na zapuštěných polích se tak neplete ani barvou, ani reliéfem. */
+    .bunka--vlajka {
+      color: var(--danger);
+    }
+
+    /* Vlaječka, pod kterou po prohře žádná mina nebyla. Pole zapustíme
+       jako odkryté: je dořešené, jen špatně. */
+    .bunka--omyl {
+      background: var(--odkryte);
+      box-shadow: none;
+      color: var(--omyl);
+    }
+
+    .bunka--mina {
+      background: var(--mina-pole);
+      color: var(--mina-vybuch);
+    }
+
+    /* Pole, na které hráč šlápl. Musí se lišit od ostatních min —
+       jinak by po prohře nebylo poznat, která to odnesla. */
+    .bunka--vybuch {
+      background: var(--mina-vybuch);
+      color: #1a0904;
+    }
+
+    .bunka[data-pocet="1"] { color: var(--cislo-1); }
+    .bunka[data-pocet="2"] { color: var(--cislo-2); }
+    .bunka[data-pocet="3"] { color: var(--cislo-3); }
+    .bunka[data-pocet="4"] { color: var(--cislo-4); }
+    .bunka[data-pocet="5"] { color: var(--cislo-5); }
+    .bunka[data-pocet="6"] { color: var(--cislo-6); }
+    .bunka[data-pocet="7"] { color: var(--cislo-7); }
+    .bunka[data-pocet="8"] { color: var(--cislo-8); }
+
+    /* ---------- šestiúhelníková deska ----------
+
+       Datový model se nemění vůbec: pole je pořád y * cols + x a řádky
+       jsou pořád řádky. Mění se jenom geometrie vykreslení.
+
+       --cell je u šestiúhelníků jenom šířka pole. Výška z ní plyne
+       poměrem --hex-pomer (2/√3), počítá ji aspect-ratio — natvrdo
+       zadaná výška by tvar zploštila. Řádek mřížky je vysoký jen
+       --hex-krok výšky pole (tři čtvrtiny), takže se sousední řádky
+       o čtvrtinu výšky překrývají a do překryvu zapadnou špičky pole
+       z řádku pod ním. Kdyby byl krok celá výška, zůstal by mezi řádky
+       pruh pozadí.
+
+       Odsud vychází i kontrola: střed souseda vedle je daleko --cell,
+       střed souseda šikmo √((cell/2)² + (0.75 · 1.1547 · cell)²), což je
+       zase --cell. Vzdálenost středů je stejná ve všech šesti směrech.
+
+       Pole se schválně nechává přetéct ze svého řádku nahoru i dolů:
+       právě tím zaklesnutí vzniká. Pozdější pole v DOMu kreslí přes
+       dřívější, což tady nevadí — ořezané šestiúhelníky se nepřekrývají
+       plochou. */
+    .deska--hex {
+      --hex-vyska: calc(var(--cell) * var(--hex-pomer, 1.1547));
+
+      grid-auto-rows: calc(var(--hex-vyska) * var(--hex-krok));
+      gap: 0;                 /* mezeru dělá menší pole, ne mřížka */
+
+      /* Posunutý lichý řádek přečnívá o půl pole doprava; svisle
+         přečnívá první a poslední řádek o tu čtvrtinu výšky, o kterou se
+         řádky překrývají, tedy o její polovinu nahoru a dolů. Bez
+         odsazení by to všechno vylezlo z rámu desky a uřízlo se. */
+      padding-right:  calc(var(--cell) / 2);
+      padding-top:    calc(var(--hex-vyska) * (1 - var(--hex-krok)) / 2);
+      padding-bottom: calc(var(--hex-vyska) * (1 - var(--hex-krok)) / 2);
+    }
+
+    .deska--hex .bunka {
+      /* O --mezera užší než sloupec; z toho rozdílu vznikne spára,
+         kterou prosvítá deska. Zmenšuje se celý tvar, takže spára vyjde
+         stejně široká i mezi šikmými sousedy. Přes gap to nejde, ten by
+         rozhodil zaklesnutí řádků i posun lichých. */
+      width: calc(var(--cell) - var(--mezera));
+      height: auto;
+      aspect-ratio: 1 / var(--hex-pomer, 1.1547);
+
+      /* Vodorovně na střed sloupce, svisle na střed řádku: pole je vyšší
+         než řádek, takže přeteče nahoru i dolů stejně a jeho střed sedne
+         přesně na mřížku středů. */
+      justify-self: center;
+      align-self: center;
+
+      /* Špička nahoře: horní vrchol, pravý horní, pravý dolní, dolní
+         vrchol, levý dolní, levý horní. Čtvrtiny výšky u bočních
+         vrcholů jsou totéž, čím se překrývají řádky — proto do sebe
+         tvary sednou. */
+      clip-path: polygon(50% 0%, 100% 25%, 100% 75%, 50% 100%, 0% 75%, 0% 25%);
+    }
+
+    /* Každý druhý řádek je o půl pole vpravo. Bez toho by šestiúhelníky
+       stály v mřížce přesně nad sebou a nezaklesly by se. Třídu rozdává
+       JS podle parity řádku — stejná parita, podle jaké se počítají
+       sousedé. */
+    .deska--hex .bunka--posun {
+      transform: translateX(calc(var(--cell) / 2));
+    }
+
+    /* Reliéf vystouplého pole dělá u čtverců vnitřní stín při horní
+       hraně. Z šestiúhelníku by se odřízl — u horní hrany je z pole jen
+       špička — tak ho nahradí přechod. Ten se ořízne spolu s tvarem,
+       takže reliéf sedí i na špičce.
+
+       :where() drží specificitu na nule: stavová pravidla (mina, výbuch,
+       omyl, blik) si tak přepíšou pozadí i na šestiúhelníkové desce. */
+    :where(.deska--hex) .bunka {
+      box-shadow: none;
+      background-image:
+        linear-gradient(rgba(255, 255, 255, 0.09), rgba(255, 255, 255, 0) 55%);
+    }
+
+    :where(.deska--hex) .bunka--odkryta {
+      background-image: none;
+    }
+
+    /* Obrys kurzoru se ořezem rozpadne na kousky u vrcholů, protože
+       sleduje čtvercový box. Vybrané pole proto svítí barvou, ta se
+       ořízne správně. Konec hry má přednost: pod vlastní barvou miny,
+       výbuchu ani omylu se kurzor neprosadí, jinak by přebarvil právě
+       to pole, kvůli kterému se hráč na desku dívá. */
+    .deska--hex .bunka--kurzor {
+      outline: none;
+    }
+
+    .deska--hex .bunka--kurzor:not(.bunka--mina):not(.bunka--vybuch):not(.bunka--omyl) {
+      background-color: var(--accent-soft);
+    }
+
+    /* Hláška pod deskou. Pevná výška, i když je text prázdný: bez ní by
+       se s každou změnou stavu posunulo všechno pod deskou a při dalším
+       přepočtu by se změnila i velikost polí. */
+    .stav {
+      min-height: 3rem;
+      margin: 0.75rem 0 0;
+      color: var(--text-dim);
+      font-size: 0.9rem;
+    }
+
+    .stav--konec {
+      color: var(--text);
+      font-weight: 600;
+    }
+
+    /* Hláška o rekordu. Vlastní řádek a barva — je to jiná zpráva než
+       výsledek hry a hráč ji má poznat, aniž by ji četl. Prázdná se
+       nezalamuje, takže se pod deskou nic neposune. */
+    .stav__rekord {
+      display: block;
+      color: var(--accent);
+      font-weight: 600;
+    }
+
+    /* jinak by se tlačítko ve sloupci roztáhlo na plnou šířku desky */
+    .btn-nova {
+      align-self: flex-start;
+    }
+
+    /* ---------- volba obtížnosti pod deskou ----------
+       Je vidět pořád, i rozehrané — změna volby rozdá novou desku. */
+    .nastaveni {
+      margin-top: 1.25rem;
+    }
+
+    .nastaveni__popis {
+      display: block;
+      margin-bottom: 0.25rem;
+      color: var(--text-dim);
+      font-size: 0.68rem;
+      font-weight: 600;
+      text-transform: uppercase;
+      letter-spacing: 0.08em;
+    }
+
+    .prepinace {
+      display: flex;
+      gap: 0.3rem;
+    }
+
+    .prepinac {
+      flex: 1 1 0;
+      min-width: 0;
+      display: flex;
+      flex-direction: column;
+      align-items: center;
+      gap: 0.05rem;
+      padding: 0.35rem 0.25rem;
+      border: 1px solid var(--border);
+      border-radius: var(--radius-sm);
+      background: var(--bg-elev);
+      color: var(--text-dim);
+      font: inherit;
+      line-height: 1.25;
+      cursor: pointer;
+      transition: background 0.15s ease, border-color 0.15s ease, color 0.15s ease;
+    }
+
+    .prepinac:hover {
+      background: var(--bg-elev-hover);
+      border-color: var(--border-hover);
+      color: var(--text);
+    }
+
+    /* Aktivní volba — jiná barva, rám i výplň, ne jen odstín textu. */
+    .prepinac[aria-checked="true"] {
+      background: var(--accent-soft);
+      border-color: var(--accent);
+      color: var(--accent);
+    }
+
+    .prepinac__nazev {
+      font-size: 0.78rem;
+      font-weight: 600;
+    }
+
+    .prepinac__detail {
+      font-family: var(--font-mono);
+      font-size: 0.66rem;
+      opacity: 0.8;
+    }
+
+    /* Legenda ovládání pod deskou. */
+    .ovladani {
+      display: grid;
+      grid-template-columns: max-content 1fr;
+      gap: 0.35rem 0.9rem;
+      align-items: center;
+      margin: 1.25rem 0 0;
+      font-size: 0.85rem;
+    }
+
+    .ovladani dt {
+      justify-self: start;
+      display: flex;
+      gap: 0.15rem;
+      align-items: center;
+      flex-wrap: wrap;
+    }
+
+    .ovladani dd {
+      justify-self: start;
+      margin: 0;
+      color: var(--text-dim);
+    }
+
+    .ovladani kbd {
+      padding: 0.1rem 0.35rem;
+      border: 1px solid var(--border-hover);
+      border-radius: 4px;
+      background: var(--bg-elev);
+      font-family: var(--font-mono);
+      font-size: 0.9em;
+      line-height: 1.4;
+      color: var(--text);
+    }
+
+    /* Nenápadné tlačítko pod legendou — maže uložená data, tak nemá
+       vypadat jako akce hry. */
+    .smazat {
+      align-self: flex-start;   /* jinak by se ve sloupci roztáhlo */
+      margin-top: 1.25rem;
+      padding: 0;
+      border: 0;
+      background: none;
+      color: var(--text-dim);
+      font: inherit;
+      font-size: 0.78rem;
+      text-decoration: underline;
+      text-underline-offset: 3px;
+      cursor: pointer;
+    }
+
+    .smazat:hover,
+    .smazat:focus-visible {
+      color: var(--danger);
+    }
+  </style>
+</head>
+<body>
+  <div class="wrap">
+
+    <a class="back-link" href="../">← Zpět na rozcestník</a>
+
+    <header class="site-header">
+      <h1>Miny</h1>
+      <p>Odkryj všechna pole, pod kterými mina není. Číslo říká, kolik min
+         leží v sousedních polích okolo. Kde minu tušíš, zapíchni vlaječku —
+         takové pole se pak nedá omylem odkrýt.</p>
+    </header>
+
+    <main>
+      <div class="hra">
+        <div class="hud">
+          <span>Miny: <strong class="hud__cislo hud__cislo--miny" id="hud-miny">0</strong></span>
+          <span>Čas: <strong class="hud__cislo hud__cislo--cas" id="hud-cas">00:00</strong></span>
+          <span>Nejlepší: <strong class="hud__cislo hud__cislo--cas" id="hud-rekord">—</strong></span>
+          <span>Odkryto: <strong class="hud__cislo hud__cislo--odkryto" id="hud-odkryto">0 / 0</strong></span>
+        </div>
+
+        <!-- Pole staví JS podle zvolené obtížnosti. role="group" a ne
+             "grid": mřížka podle ARIA chce řádky a buňky, a to by tu byla
+             vrstva navíc jen kvůli názvu role. Pohyb šipkami po deskce
+             řeší JS sám. -->
+        <div class="deska-obal">
+          <div class="deska" id="deska" role="group" aria-label="Minové pole"></div>
+        </div>
+
+        <!-- Dva prvky, ne jeden text: hláška o rekordu má vlastní barvu
+             a vlastní řádek, ale hlásit se má zároveň s výsledkem hry,
+             takže bydlí uvnitř téhož aria-live odstavce. -->
+        <p class="stav" id="stav" aria-live="polite"><span id="stav-text"></span><span
+           class="stav__rekord" id="stav-rekord"></span></p>
+
+        <button class="btn btn--primary btn-nova" id="btn-nova" type="button">Nová hra</button>
+
+        <!-- Volba obtížnosti; přepínače staví JS ze seznamu stupňů, ať je
+             popis předvoleb jen na jednom místě. -->
+        <div class="nastaveni">
+          <span class="nastaveni__popis" id="popis-tvar">Tvar desky</span>
+          <div class="prepinace" role="radiogroup" aria-labelledby="popis-tvar" id="volba-tvar"></div>
+        </div>
+
+        <div class="nastaveni">
+          <span class="nastaveni__popis" id="popis-obtiznost">Obtížnost</span>
+          <div class="prepinace" role="radiogroup" aria-labelledby="popis-obtiznost" id="volba-obtiznost"></div>
+        </div>
+
+        <dl class="ovladani">
+          <dt><kbd>klik</kbd></dt>
+          <dd>odkryje pole a přesune výběr</dd>
+          <dt><kbd>pravé tlačítko</kbd></dt>
+          <dd>položí a sundá vlaječku; na dotykovém displeji dlouhý stisk</dd>
+          <dt><kbd>obě tlačítka</kbd></dt>
+          <dd>na čísle odkryje zbylé sousedy, když u něj sedí počet vlaječek</dd>
+          <dt><kbd>←</kbd><kbd>↑</kbd><kbd>↓</kbd><kbd>→</kbd></dt>
+          <dd>posunou výběr po desce</dd>
+          <dt><kbd>mezerník</kbd> <kbd>Enter</kbd></dt>
+          <dd>odkryjí vybrané pole, na čísle akordují jako obě tlačítka</dd>
+          <dt><kbd>F</kbd></dt>
+          <dd>vlaječka na vybraném poli</dd>
+          <dt><kbd>N</kbd></dt>
+          <dd>nová hra</dd>
+        </dl>
+
+        <button class="smazat" id="btn-smazat" type="button">Vymazat nejlepší časy</button>
+      </div>
+    </main>
+
+  </div>
+
+<script>
+(function () {
+  'use strict';
+
+  /* Meze velikosti pole jsou v CSS (--bunka-min, --bunka-max), protože
+     je rozlišuje média dotaz (pointer: coarse). Tyhle hodnoty se použijí
+     jen tehdy, když se proměnná nedá přečíst. */
+  var CELL_MIN_ZALOHA = 28;
+  var CELL_MAX_ZALOHA = 56;
+
+  var MEZERA   = 2;              // px mezi poli — skrz ně prosvítá deska
+  var REZERVA  = 24;             // ať se deska nelepí na spodek okna
+  var OKRAJ_OKNA = 16;           // a ani na boky okna, kam smí vystoupit ze sloupce
+
+  /* Kolik výšky okna dostane deska. Je to jednak podlaha rozpočtu —
+     nafoukne desku i tam, kde by podle měření nezbylo nic — jednak strop
+     rolovacího obalu, takže obojí drží stejné číslo. Kdyby se lišila,
+     deska by se buď rolovala uvnitř obalu, ačkoliv byla spočítaná tak,
+     aby se vešla, nebo by naopak nechala kus okna ležet ladem.
+
+     Tři čtvrtiny okna jsou tak akorát: deska je hlavní obsah stránky
+     a zaslouží si většinu plochy, ale kus dolního okraje má zůstat na
+     hlášku a tlačítko nové hry, aby bylo poznat, že stránka pokračuje.
+     Na telefonu je legenda ovládání pod deskou vyšší než samo okno,
+     takže měřený rozpočet vychází záporně a rozhoduje právě tohle;
+     zbytek stránky se doroluje. */
+  var PODIL_VYSKY    = 0.75;
+  var OBAL_MIN_VYSKA = 200;      // absolutní dno pro hodně nízká okna
+
+  var PODIL_PISMA = 0.58;        // výška číslice vůči straně pole
+
+  /* Kdy se deska staví na výšku: na úzkém displeji, nebo kdykoliv je
+     okno vyšší než širší. Druhá podmínka platí i na velkém monitoru —
+     rozhoduje tvar okna, ne velikost zařízení. */
+  var DOTAZ_NA_VYSKU = '(max-width: 700px), (orientation: portrait)';
+
+  /* Geometrie pravidelného šestiúhelníku se špičkou nahoře. Pole není
+     čtvercové: při šířce w je výška w * 2/√3, jinak se tvar zploští.
+     Svislý krok mezi řádky je tři čtvrtiny té výšky — o zbylou čtvrtinu
+     se řádky překrývají a špičky do sebe zapadnou. Ze dvou konstant pak
+     vychází, že vzdálenost středů je stejná ve všech šesti směrech:
+     vodorovně w, šikmo √((w/2)² + (0.75 * 1.1547 * w)²) = w. */
+  var HEX_POMER = 2 / Math.sqrt(3);   // výška pole / šířka pole ≈ 1.1547
+  var HEX_KROK  = 0.75;               // svislý krok řádků, v násobcích výšky
+
+  /* Tvary desky a jejich předvolby obtížnosti.
+
+     Seznam je jediným zdrojem popisků i platných hodnot při načítání
+     z úložiště. Rozdíl mezi tvary není jen kosmetický: šestiúhelník má
+     šest sousedů místo osmi, a šest čísel nese míň informace. Stejná
+     hustota min by ze šestiúhelníkové desky udělala hádání, proto má
+     vlastní, řidší předvolby.
+
+     cols a rows jsou rozměr naležato. Expert má otacet: true, takže se
+     na výšku překlopí — u čtverců na 16×30, u šestiúhelníků taky. Počet
+     polí ani min se tím nemění, jen se deska postaví tak, aby se do
+     svislého okna vešel rozumný kus. Čtvercové desky (9×9, 16×16, 10×10)
+     otáčet nemá smysl, tam je příznak zbytečný.
+
+     Popisek se z rozměrů dopočítá (popisRozmeru), aby na přepínači stálo
+     to, co hráč po kliknutí opravdu dostane.
+
+     id tvaru ani obtížnosti se nesmí měnit, obojí je klíč v localStorage. */
+  var TVARY = [
+    {
+      id: 'ctverec',
+      nazev: 'Čtverce',
+      hex: false,
+      obtiznosti: [
+        { id: 'zacatecnik', nazev: 'Začátečník', cols:  9, rows:  9, miny: 10 },
+        { id: 'pokrocily',  nazev: 'Pokročilý',  cols: 16, rows: 16, miny: 40 },
+        { id: 'expert',     nazev: 'Expert',     cols: 30, rows: 16, miny: 99, otacet: true }
+      ]
+    },
+    {
+      id: 'hex',
+      nazev: 'Šestiúhelníky',
+      hex: true,
+      obtiznosti: [
+        { id: 'zacatecnik', nazev: 'Začátečník', cols: 10, rows: 10, miny: 10 },
+        { id: 'pokrocily',  nazev: 'Pokročilý',  cols: 16, rows: 16, miny: 30 },
+        { id: 'expert',     nazev: 'Expert',     cols: 30, rows: 16, miny: 75, otacet: true }
+      ]
+    }
+  ];
+
+  var VYCHOZI_TVAR = 'ctverec';
+
+  function popisTvaru(t) {
+    return t.hex ? '6 sousedů' : '8 sousedů';
+  }
+
+  /* Rozměr desky, se kterým se zrovna hraje. Na tvaru okna závisí jen
+     u otáčených předvoleb; u ostatních vrací, co je v seznamu. */
+  function rozmery(o) {
+    if (o.otacet && window.matchMedia(DOTAZ_NA_VYSKU).matches) {
+      return { cols: o.rows, rows: o.cols };
+    }
+    return { cols: o.cols, rows: o.rows };
+  }
+
+  function popisRozmeru(o) {
+    var r = rozmery(o);
+    return r.cols + '×' + r.rows + ' · ' + o.miny + ' min';
+  }
+
+  var VYCHOZI_OBTIZNOST = 'zacatecnik';
+
+  var KLIC_TVAR      = 'miny:tvar';
+  var KLIC_OBTIZNOST = 'miny:obtiznost';
+  var KLIC_REKORD    = 'miny:best:';     // + id tvaru + ':' + id obtížnosti
+
+  // jak často se překresluje časovač; se skutečným časem to nesouvisí
+  var TIK_MS = 250;
+
+  var ZNAK_MINY   = '●';
+  var ZNAK_VLAJKY = '⚑';
+  var ZNAK_OMYLU  = '✕';   // vlaječka, pod kterou žádná mina nebyla
+
+  /* Dlouhý stisk místo pravého tlačítka. 400 ms je dost na to, aby se
+     za dlouhý stisk nepovažovalo klepnutí, a přitom se na něj nečeká.
+     Musí zůstat pod prahem, ve kterém prohlížeč sám otevírá kontextové
+     menu (kolem 500 ms) — jinak by hráč viděl nabídku dřív než vlaječku. */
+  var DRZENI_MS = 400;
+
+  // posun nad tuhle mez už je tažení (rolování), ne držení na místě
+  var DRZENI_POSUN = 10;   // px
+
+  // jak dlouho svítí sousedi po akordu, který nevyšel
+  var BLIK_MS = 130;
+
+  /* Hláška pod deskou. Za běhu hry je prázdná — hráč tehdy sleduje
+     desku a stálý text by jen odváděl pozornost. Místo po ní zůstává
+     (min-height v CSS), takže se nic pod deskou neposouvá. */
+  var HLASKY = {
+    ready:   'Klikni na libovolné pole. První klik nikdy nevybuchne.',
+    running: '',
+    won:     'Vyhrál/a jsi! Všechna pole bez min jsou odkrytá.',
+    lost:    'Bum. Pod tím polem byla mina.'
+  };
+
+  var elDeska    = document.getElementById('deska');
+  var elObal     = elDeska.parentNode;
+  var elHra      = document.querySelector('.hra');
+
+  var elMiny     = document.getElementById('hud-miny');
+  var elCas      = document.getElementById('hud-cas');
+  var elRekord   = document.getElementById('hud-rekord');
+  var elOdkryto  = document.getElementById('hud-odkryto');
+  var elStav     = document.getElementById('stav');
+  var elStavText = document.getElementById('stav-text');
+  var elStavRekord = document.getElementById('stav-rekord');
+  var elNova     = document.getElementById('btn-nova');
+  var elSmazat   = document.getElementById('btn-smazat');
+  var elVolbaTvar = document.getElementById('volba-tvar');
+  var elVolba    = document.getElementById('volba-obtiznost');
+
+  // leží stisk uvnitř některé skupiny přepínačů? (tvar desky, obtížnost)
+  function vPrepinacich(el) {
+    return !!el && (elVolbaTvar.contains(el) || elVolba.contains(el));
+  }
+
+  /* ---------------------------------------------------------------
+     Úložiště: zvolený tvar desky a obtížnost.
+
+     Volání je v try/catch: v privátním okně a při zakázaném úložišti
+     localStorage vyhazuje výjimku už při čtení. Hra pak běží dál, jen
+     si volbu nepamatuje.
+     --------------------------------------------------------------- */
+  function najdiTvar(id) {
+    for (var i = 0; i < TVARY.length; i++) {
+      if (TVARY[i].id === id) return TVARY[i];
+    }
+    return null;
+  }
+
+  function nactiTvar() {
+    try {
+      var ulozeny = najdiTvar(localStorage.getItem(KLIC_TVAR));
+      if (ulozeny) return ulozeny;
+    } catch (e) {
+      /* nepřístupné úložiště — jedeme na výchozím */
+    }
+    return najdiTvar(VYCHOZI_TVAR);
+  }
+
+  function ulozTvar(id) {
+    try {
+      localStorage.setItem(KLIC_TVAR, id);
+    } catch (e) {
+      /* nevadí, volba vydrží jen do konce sezení */
+    }
+  }
+
+  /* Obtížnosti se hledají vždycky v tom tvaru, který se zrovna hraje —
+     stupně se jmenují stejně, ale rozměry a hustotu min mají jiné. */
+  function najdiObtiznost(id) {
+    var seznam = tvar.obtiznosti;
+    for (var i = 0; i < seznam.length; i++) {
+      if (seznam[i].id === id) return seznam[i];
+    }
+    return null;
+  }
+
+  function nactiObtiznost() {
+    try {
+      /* Ručně upravený záznam by jinak nastavil desku, na kterou hra
+         není stavěná — bereme jen to, co odpovídá některé předvolbě. */
+      var ulozena = najdiObtiznost(localStorage.getItem(KLIC_OBTIZNOST));
+      if (ulozena) return ulozena;
+    } catch (e) {
+      /* nepřístupné úložiště — jedeme na výchozím */
+    }
+    return najdiObtiznost(VYCHOZI_OBTIZNOST);
+  }
+
+  function ulozObtiznost(id) {
+    try {
+      localStorage.setItem(KLIC_OBTIZNOST, id);
+    } catch (e) {
+      /* nevadí, volba vydrží jen do konce sezení */
+    }
+  }
+
+  /* ---------------------------------------------------------------
+     Nejlepší časy.
+
+     Pro každou kombinaci tvaru a obtížnosti zvlášť. Čas z devítky a čas
+     z expertu se porovnávat nedají, jeden společný rekord by tedy říkal
+     jen to, na jak malé desce se hrálo. A stejně tak se nedá porovnávat
+     tvar s tvarem: šest sousedů znamená míň informace na pole, takže se
+     šestiúhelníková deska luští jinak dlouho než čtvercová při stejném
+     rozměru. Proto je v klíči obojí.
+
+     Klíč vzniká z id tvaru a id obtížnosti a jen z nich. Deska, která
+     žádné předvolbě neodpovídá (vlastní rozměry), klíč nemá; čas se u ní
+     ani nečte, ani neukládá.
+
+     Ukládá se číslo v sekundách na jedno desetinné místo. Zobrazují se
+     celé sekundy, ale porovnávat se musí jemněji — jinak by dva časy
+     ve stejné sekundě vyšly jako remíza a rekord by se nepřepsal. */
+  function klicRekordu(o) {
+    return o && o.id ? KLIC_REKORD + tvar.id + ':' + o.id : null;
+  }
+
+  function nactiRekord(o) {
+    var klic = klicRekordu(o);
+    if (!klic) return null;
+
+    try {
+      var v = parseFloat(localStorage.getItem(klic));
+
+      /* Poškozený nebo ručně přepsaný záznam bereme, jako by nebyl.
+         Nula je platný čas, ne prázdná hodnota: první klik může odkrýt
+         celou desku a takovou hru hráč vyhraje dřív, než uplyne desetina
+         vteřiny. Prázdný řetězec ani text projdou stejně neprojdou —
+         parseFloat z nich udělá NaN. */
+      return isFinite(v) && v >= 0 ? v : null;
+    } catch (e) {
+      return null;      // nepřístupné úložiště — hraje se bez rekordů
+    }
+  }
+
+  function ulozRekord(o, cas) {
+    var klic = klicRekordu(o);
+    if (!klic) return;
+
+    try {
+      localStorage.setItem(klic, String(cas));
+    } catch (e) {
+      /* nevadí, rekord vydrží jen do konce sezení */
+    }
+  }
+
+  /* Maže časy všech tvarů i obtížností naráz. Mazat jen tu zrovna
+     zvolenou by znamenalo proklikat kvůli úklidu celou nabídku. */
+  function smazRekordy() {
+    try {
+      for (var t = 0; t < TVARY.length; t++) {
+        var seznam = TVARY[t].obtiznosti;
+
+        for (var i = 0; i < seznam.length; i++) {
+          localStorage.removeItem(KLIC_REKORD + TVARY[t].id + ':' + seznam[i].id);
+
+          /* A ještě klíč z doby před tvary desky, tedy bez jeho id. Hra
+             ho už nečte ani nezapisuje, ale tlačítko slibuje smazat
+             všechny časy — ať po něm v úložišti nic nezůstane. Obtížnosti
+             se v obou tvarech jmenují stejně, takže se druhé kolo jen
+             marně pokusí smazat totéž. */
+          localStorage.removeItem(KLIC_REKORD + seznam[i].id);
+        }
+      }
+    } catch (e) {
+      /* nevadí */
+    }
+  }
+
+  var tvar = nactiTvar();
+  var obtiznost = nactiObtiznost();
+
+  /* Rekord zvolené obtížnosti a hláška o jeho překonání. Obojí stojí
+     mimo game — restart hry je nesmí smazat. */
+  var rekord = null;
+  var zpravaRekordu = '';
+
+  /* ---------------------------------------------------------------
+     Stav hry — jediný zdroj pravdy. Nic jiného si stav nedrží, DOM
+     už jen zobrazuje, co je tady.
+     --------------------------------------------------------------- */
+  var game = {
+    cols: rozmery(obtiznost).cols,
+    rows: rozmery(obtiznost).rows,
+    pocetMin: obtiznost.miny,
+
+    /* Tvar desky. Patří do stavu hry, ne k volbě v nabídce: sousedství
+       i geometrie se odsud čtou při každém tahu, a rozehraná deska se
+       pod rukama měnit nesmí. Přepnutí v nabídce proto rozdá novou hru
+       a teprve ta si sem tvar přepíše. */
+    hex: tvar.hex,
+
+    /* Pole jde po řádcích, index je y * cols + x. Každá položka:
+
+         mina     — leží tu mina
+         odkryto  — hráč ji odkryl
+         oznaceno — vlaječka; ta se zatím nedá položit, ale v modelu je
+                    od začátku, ať se kvůli ní později nepředělává tvar
+                    dat ani generování
+         sousedu  — kolik min je v sousedních polích (osm u čtverců,
+                    šest u šestiúhelníků; u miny 0, tam se to nikdy
+                    nečte) */
+    pole: [],
+
+    // 'ready' | 'running' | 'won' | 'lost'
+    state: 'ready',
+
+    // dokud je true, miny na desce ještě nejsou — čekají na první klik
+    prvniKlik: true,
+
+    // kolik polí je odkrytých; podle toho se pozná výhra
+    odkrytych: 0,
+
+    /* Kolik vlaječek leží na desce. Drží se zvlášť jen kvůli počítadlu
+       nahoře — na průběh hry ani na výhru vlaječky nemají vliv. */
+    vlajecek: 0,
+
+    /* Časovač. Běží od prvního odkrytého pole, do té doby je casStart
+       null a hodiny stojí — přemýšlení nad prázdnou deskou se nepočítá.
+
+       Měří se z performance.now(), ne z Date.now(): systémové hodiny se
+       můžou během hry přestavit (letní čas, NTP) a čas by skočil, nebo
+       dokonce šel pozpátku.
+
+       casStart je značka startu, cas je výsledek v sekundách po konci
+       hry. Vždycky platí právě jedno z nich, viz uplynulo(). */
+    casStart: null,
+    cas: 0,
+
+    /* Vybrané pole, po kterém chodí šipky. Patří do stavu hry, ne do
+       DOMu: díky tomu existuje od inicializace, ne teprve od chvíle,
+       kdy se něčeho dotkne myš. novaHra ho posadí doprostřed desky. */
+    kurzor: { x: 0, y: 0 }
+  };
+
+  // tlačítka desky ve stejném pořadí jako game.pole
+  var bunky = [];
+
+  /* Velikost pole v CSS pixelech — patří k zobrazení, ne ke stavu hry.
+     Skutečnou hodnotu spočítá prizpusob() ještě před prvním vykreslením;
+     tahle je jen do té doby. */
+  var cell = CELL_MAX_ZALOHA;
+
+  function souradnice(i) {
+    return { x: i % game.cols, y: Math.floor(i / game.cols) };
+  }
+
+  function indexKurzoru() {
+    return game.kurzor.y * game.cols + game.kurzor.x;
+  }
+
+  /* Posun kurzoru i s překreslením obrysu. Souřadnice se ořezávají na
+     desku — na kraji se kurzor zastaví. Přeskok na protější stranu by
+     mátl: mina za okrajem nečíhá, tak ať tam nevede ani pohyb. */
+  function posunKurzor(x, y) {
+    x = Math.max(0, Math.min(game.cols - 1, x));
+    y = Math.max(0, Math.min(game.rows - 1, y));
+
+    if (x === game.kurzor.x && y === game.kurzor.y) return;
+
+    bunky[indexKurzoru()].classList.remove('bunka--kurzor');
+    game.kurzor.x = x;
+    game.kurzor.y = y;
+    bunky[indexKurzoru()].classList.add('bunka--kurzor');
+  }
+
+  /* ---------------------------------------------------------------
+     Sousedé.
+
+     Jediné místo v celé hře, kde se sousedství definuje. Čte odsud
+     rozmisťování min, počítání čísel, flood fill i akord — kdyby to
+     kterýkoliv z nich počítal po svém, rozešly by se při prvním zásahu
+     do geometrie a hra by lhala v číslech.
+
+     Čtvercová deska má osm sousedů, šestiúhelníková šest. Šestiúhelníky
+     leží ve stejné mřížce jako čtverce, jen se liché řádky VYKRESLUJÍ
+     o půl pole doprava — a právě ten posun mění, kdo s kým sousedí
+     šikmo. Na sudém řádku sedí šikmí sousedé vlevo (x-1), na lichém
+     vpravo (x+1); vodorovní a nic jiného se neposouvá.
+
+     Tabulky musí být navzájem symetrické: když je A sousedem B, musí
+     být B sousedem A. Jinak by číslo hlásilo minu, kterou sousední pole
+     nevidí, a deska by se stala neřešitelnou. Ověřeno testem přes
+     všechna pole obou desek.
+     --------------------------------------------------------------- */
+  var POSUNY_CTVEREC = [
+    [-1, -1], [0, -1], [1, -1],
+    [-1,  0],          [1,  0],
+    [-1,  1], [0,  1], [1,  1]
+  ];
+
+  var POSUNY_HEX_SUDY  = [[-1, 0], [1, 0], [0, -1], [-1, -1], [0, 1], [-1, 1]];
+  var POSUNY_HEX_LICHY = [[-1, 0], [1, 0], [0, -1], [ 1, -1], [0, 1], [ 1, 1]];
+
+  /* Indexy sousedů pole na souřadnicích x, y. Okraj desky sousedy nemá
+     — nic se neobtáčí, na rozdíl od hada tu žádné průchozí okraje
+     nejsou. */
+  function sousede(x, y) {
+    var posuny = !game.hex ? POSUNY_CTVEREC
+               : (y % 2 === 0 ? POSUNY_HEX_SUDY : POSUNY_HEX_LICHY);
+    var ven = [];
+
+    for (var k = 0; k < posuny.length; k++) {
+      var sx = x + posuny[k][0];
+      var sy = y + posuny[k][1];
+      if (sx < 0 || sy < 0 || sx >= game.cols || sy >= game.rows) continue;
+
+      ven.push(sy * game.cols + sx);
+    }
+
+    return ven;
+  }
+
+  // sousedé pole zadaného indexem; jen převod souřadnic, ne druhá definice
+  function sousedeIndexu(i) {
+    return sousede(i % game.cols, Math.floor(i / game.cols));
+  }
+
+  /* ---------------------------------------------------------------
+     Geometrie desky v pixelech.
+
+     Čtverce se sčítají prostě: pole vedle pole a mezi nimi mezera.
+     U šestiúhelníků je cell jen šířka pole; výška je HEX_POMER krát
+     větší. Řádky do sebe zaklesnou, takže svislý krok je jen HEX_KROK
+     výšky, ale první a poslední řádek přidají ještě celou výšku pole.
+     Posunuté liché řádky přidají k šířce právě jedno půlpole. Mezery
+     mezi poli nejsou; spára vzniká tím, že je pole o MEZERA užší než
+     jeho místo v mřížce, což na rozměr desky nemá vliv.
+     --------------------------------------------------------------- */
+  function rozmerDesky(cell) {
+    if (game.hex) {
+      return {
+        w: cell * (game.cols + 0.5),
+        h: cell * HEX_POMER * ((game.rows - 1) * HEX_KROK + 1)
+      };
+    }
+
+    return {
+      w: cell * game.cols + MEZERA * (game.cols - 1),
+      h: cell * game.rows + MEZERA * (game.rows - 1)
+    };
+  }
+
+  // obrácená úloha: největší pole, při kterém se deska vejde do w × h
+  function cellProMisto(w, h) {
+    if (game.hex) {
+      return Math.min(w / (game.cols + 0.5),
+                      h / (HEX_POMER * ((game.rows - 1) * HEX_KROK + 1)));
+    }
+
+    return Math.min((w - MEZERA * (game.cols - 1)) / game.cols,
+                    (h - MEZERA * (game.rows - 1)) / game.rows);
+  }
+
+  /* ---------------------------------------------------------------
+     Generování.
+
+     Miny se rozmisťují až po prvním kliknutí a vynechávají kliknuté
+     pole i všechny jeho sousedy. Kliknuté pole tak vyjde na nulu
+     a první tah vždycky otevře souvislou plochu — hra nezačíná
+     hádáním jednoho políčka.
+
+     Vybírá se z hotového seznamu volných indexů, ne náhodným tipováním
+     do pole: na expertovi je 99 min ve 480 polích a tipování by se ke
+     konci opakovalo čím dál častěji.
+     --------------------------------------------------------------- */
+  function rozmistiMiny(bezpecny) {
+    var vynechat = {};
+    var i;
+
+    vynechat[bezpecny] = true;
+
+    var okoli = sousedeIndexu(bezpecny);
+    for (i = 0; i < okoli.length; i++) vynechat[okoli[i]] = true;
+
+    var volne = [];
+    for (i = 0; i < game.pole.length; i++) {
+      if (!vynechat[i]) volne.push(i);
+    }
+
+    /* Na malé desce s hodně minami se celé okolí vynechat nedá —
+       jinak by se miny neměly kam vejít. Tehdy ustoupíme na minimum
+       a ochráníme jen kliknuté pole samotné; první klik pak nevybuchne,
+       ale velkou plochu neotevře. Žádná z předvoleb sem nespadne, je to
+       pojistka pro případ, že by nějaká přibyla. */
+    if (volne.length < game.pocetMin) {
+      volne = [];
+      for (i = 0; i < game.pole.length; i++) {
+        if (i !== bezpecny) volne.push(i);
+      }
+    }
+
+    /* Částečný Fisher–Yates: prvních pocetMin míst v seznamu je po
+       proběhnutí rovnoměrný náhodný výběr. Míchat celý seznam by bylo
+       zbytečné, dál než k počtu min se stejně nedíváme. */
+    for (i = 0; i < game.pocetMin; i++) {
+      var j = i + Math.floor(Math.random() * (volne.length - i));
+      var t = volne[i];
+      volne[i] = volne[j];
+      volne[j] = t;
+
+      game.pole[volne[i]].mina = true;
+    }
+  }
+
+  /* Počty sousedních min. Až po rozmístění — dřív by nebylo co počítat.
+     Polím s minou se číslo nepočítá, u nich zůstane 0 a nikde se nečte. */
+  function spocitejSousedy() {
+    for (var i = 0; i < game.pole.length; i++) {
+      if (game.pole[i].mina) continue;
+
+      var okoli = sousedeIndexu(i);
+      var n = 0;
+
+      for (var k = 0; k < okoli.length; k++) {
+        if (game.pole[okoli[k]].mina) n++;
+      }
+
+      game.pole[i].sousedu = n;
+    }
+  }
+
+  /* ---------------------------------------------------------------
+     Odkrývání.
+
+     Pole bez min v okolí otevírá i všechny své sousedy, a tak dál. Jde
+     to napsat rekurzivně na tři řádky, ale na velké desce může jedna
+     souvislá prázdná oblast mít stovky polí — a to už je hloubka
+     zásobníku, na kterou se nedá spoléhat. Proto fronta.
+
+     Frontu procházíme ukazatelem, ne shift(): ten při každém volání
+     překopíruje zbytek pole, takže by z lineárního průchodu bylo
+     kvadratické.
+
+     Pole se označí za odkryté ve chvíli, kdy se do fronty zařadí, ne
+     až když z ní vyjde. Tím je odkryto zároveň značkou „už je ve
+     frontě“ a žádné pole se do ní nedostane dvakrát.
+     --------------------------------------------------------------- */
+  function odkryjOblast(start) {
+    if (game.pole[start].odkryto) return;
+
+    var fronta = [start];
+    var hlava = 0;
+
+    game.pole[start].odkryto = true;
+    game.odkrytych++;
+
+    while (hlava < fronta.length) {
+      var i = fronta[hlava++];
+
+      vykresliBunku(i);
+
+      // číslo je zpráva o okolí; dál se šíří jen prázdná pole
+      if (game.pole[i].sousedu !== 0) continue;
+
+      var okoli = sousedeIndexu(i);
+      for (var k = 0; k < okoli.length; k++) {
+        var soused = game.pole[okoli[k]];
+
+        /* Mina v okolí nuly být nemůže — jinak by to nula nebyla.
+           Podmínka je tu, aby oblast nešla protrhnout ani kdyby se
+           někdy měnilo generování. */
+        if (soused.odkryto || soused.mina) continue;
+
+        /* Vlaječku šíření nezastaví: pod prázdným polem mina není,
+           takže je to prokazatelně omyl a oblast se kvůli němu nemá
+           trhat. Vlaječka ale musí zmizet i z počítadla, jinak by
+           v něm po odkrytí zůstala viset zpráva o mině, která tam
+           není — a součet by na konci hry neseděl na nule. */
+        if (soused.oznaceno) {
+          soused.oznaceno = false;
+          game.vlajecek--;
+        }
+
+        soused.odkryto = true;
+        game.odkrytych++;
+        fronta.push(okoli[k]);
+      }
+    }
+  }
+
+  /* ---------------------------------------------------------------
+     Průběh hry.
+     --------------------------------------------------------------- */
+  function klikNaPole(i) {
+    if (game.state === 'won' || game.state === 'lost') return;
+
+    var p = game.pole[i];
+    if (p.odkryto) return;
+
+    /* Označené pole je zamčené, dokud z něj vlaječka nezmizí. O to
+       v označování jde: hráč si pole pojistí proti vlastnímu ukliknutí.
+       Kontrola musí být ještě před rozdáním min, jinak by označený
+       první klik hru rozehrál a nic neodkryl. */
+    if (p.oznaceno) return;
+
+    /* První klik teprve rozdá miny — a to tak, aby se právě sem žádná
+       netrefila. Až pak se počítají čísla, dřív by neměla z čeho vyjít. */
+    if (game.prvniKlik) {
+      rozmistiMiny(i);
+      spocitejSousedy();
+      game.prvniKlik = false;
+      game.state = 'running';
+
+      /* Hodiny se rozjedou až tady, tedy prvním odkrytým polem. Ani
+         načtení stránky, ani Nová hra, ani rozmyšlená vlaječka na
+         prázdné desce čas nezačínají — měří se hra, ne rozhodování,
+         jestli ji vůbec začít. */
+      spustCas();
+    }
+
+    // po prvním kliku sem nedosáhne, dál už je to normální riziko
+    if (p.mina) {
+      konec('lost', i);
+      return;
+    }
+
+    odkryjOblast(i);
+
+    // vyhráno je, když zbývají jen pole s minami
+    if (game.odkrytych === game.pole.length - game.pocetMin) {
+      konec('won', -1);
+      return;
+    }
+
+    vykresliUI();
+  }
+
+  /* ---------------------------------------------------------------
+     Akord.
+
+     Na odkrytém čísle, kolem kterého leží právě tolik vlaječek, kolik
+     číslo říká, se jedním stiskem odkryjí všichni zbylí neoznačení
+     sousedé. Ušetří to hráči hrst kliknutí tam, kde už je stejně
+     rozhodnuto.
+
+     Počítají se vlaječky, ne miny. Hráč akordem tvrdí, že sousedy má
+     přečtené — a když se v tom plete, odkryje minu a hra končí. Právě
+     v tom je akord risk, ne zkratka zadarmo.
+
+     Odkrývání jde přes klikNaPole, takže se nule pod sousedem rozjede
+     flood fill, mina ukončí hru a poslední odkryté pole vyhraje —
+     všechno stejnou cestou jako při obyčejném kliknutí.
+     --------------------------------------------------------------- */
+  function akord(i) {
+    if (game.state !== 'running') return;
+
+    var p = game.pole[i];
+
+    // akordovat jde jen na odkryté číslici; prázdné pole nemá co říct
+    if (!p.odkryto || p.mina || p.sousedu === 0) return;
+
+    var okoli = sousedeIndexu(i);
+    var vlajek = 0;
+    var k;
+
+    for (k = 0; k < okoli.length; k++) {
+      if (game.pole[okoli[k]].oznaceno) vlajek++;
+    }
+
+    /* Nesedí-li počet, neděje se nic — jen sousedi na okamžik zapadnou,
+       ať je poznat, že stisk dorazil a hra ho jen odmítla. */
+    if (vlajek !== p.sousedu) {
+      probliknij(okoli);
+      return;
+    }
+
+    for (k = 0; k < okoli.length; k++) {
+      klikNaPole(okoli[k]);
+
+      // mina mezi sousedy hru ukončí; zbytek akordu už nemá co odkrývat
+      if (game.state !== 'running') return;
+    }
+  }
+
+  /* Co udělá stisk na poli, ať přijde z mezerníku, nebo z Enteru:
+     neodkryté pole odkryje, na odkrytém čísle zkusí akord. Jedna cesta
+     pro obojí, aby se ovládání nemuselo v hlavě přepínat podle toho,
+     kde kurzor zrovna stojí. */
+  function pouzijPole(i) {
+    if (game.pole[i].odkryto) akord(i);
+    else klikNaPole(i);
+  }
+
+  /* Vlaječka. Sedí jen na neodkrytém poli a jen do rozehrané hry —
+     po konci už deska nic nepřijímá.
+
+     Na vítězství ani na počítání odkrytých polí nemá vliv, je to čistě
+     hráčova poznámka. Jediné, co dělá, je zámek proti ukliknutí
+     a odečet z počítadla nahoře. */
+  function prepniVlajku(i) {
+    if (game.state !== 'ready' && game.state !== 'running') return;
+
+    var p = game.pole[i];
+    if (p.odkryto) return;
+
+    p.oznaceno = !p.oznaceno;
+    game.vlajecek += p.oznaceno ? 1 : -1;
+
+    vykresliBunku(i);
+    vykresliUI();
+  }
+
+  /* Konec hry. Miny se ukážou v obou případech: po prohře je to
+     vysvětlení, po výhře tečka za kolem. Vybuch je index pole, na které
+     hráč šlápl, nebo -1, když se vyhrálo. */
+  function konec(stav, vybuch) {
+    game.state = stav;
+
+    // hodiny stojí u výhry i u prohry; obojí je konec téhle hry
+    zastavCas();
+
+    // rekord se zapisuje jen za výhru — prohraný čas není co srovnávat
+    zpravaRekordu = stav === 'won' ? zapisRekord() : '';
+
+    for (var i = 0; i < game.pole.length; i++) {
+      var p = game.pole[i];
+
+      if (p.mina) {
+        /* Po výhře jsou všechny miny nalezené — hráč je obešel, ať už
+           na ně vlaječku dal, nebo ne. Počítadlo nahoře tím sedne přesně
+           na nulu. */
+        if (stav === 'won' && !p.oznaceno) {
+          p.oznaceno = true;
+          game.vlajecek++;
+        }
+
+        /* Označenou minu necháme ležet pod vlaječkou. Po prohře je to
+           jediná zpětná vazba o tom, která pole hráč přečetl správně;
+           odkrývat ji a přepisovat vlaječku minou by tu informaci
+           zahodilo.
+
+           Zbytek odkrýváme jen kvůli vykreslení — do počítadla
+           odkrytých to nepatří, to hlídá výhru a ta je rozhodnutá. */
+        if (!p.oznaceno) p.odkryto = true;
+
+        vykresliBunku(i, i === vybuch);
+      } else if (p.oznaceno) {
+        // vlaječka na poli bez miny; jak vypadá, řeší vykresliBunku
+        vykresliBunku(i);
+      }
+    }
+
+    elDeska.classList.add('deska--konec');
+    vykresliUI();
+  }
+
+  /* ---------------------------------------------------------------
+     Časovač.
+
+     Tikač jenom překresluje. Skutečný čas se pokaždé počítá z rozdílu
+     časových značek, ne přičítáním tiků — sečtené tiky by se s hodinami
+     rozešly hned, jak prohlížeč karty na pozadí zpomalí nebo časovač
+     na chvíli úplně zastaví.
+     --------------------------------------------------------------- */
+  var tikac = null;
+
+  /* Uplynulý čas v sekundách. Pokrývá všechny tři stavy najednou:
+     před startem je casStart null a cas 0, za běhu se počítá od značky,
+     po konci hry vrací uzamčený výsledek. */
+  function uplynulo() {
+    if (game.casStart === null) return game.cas;
+    return (performance.now() - game.casStart) / 1000;
+  }
+
+  function zastavTikac() {
+    clearInterval(tikac);
+    tikac = null;
+  }
+
+  function spustCas() {
+    game.casStart = performance.now();
+    game.cas = 0;
+
+    zastavTikac();
+    tikac = setInterval(vykresliCas, TIK_MS);
+    vykresliCas();
+  }
+
+  /* Konec měření. Výsledek se uzamkne a zaokrouhlí na desetiny —
+     v úložišti pak leží číslo, které jde porovnávat, ne surové
+     milisekundy. */
+  function zastavCas() {
+    if (game.casStart !== null) {
+      game.cas = Math.round((performance.now() - game.casStart) / 100) / 10;
+      game.casStart = null;
+    }
+
+    zastavTikac();
+    vykresliCas();
+  }
+
+  /* mm:ss. Desetiny se schválně nezobrazují: na desce se sleduje hra,
+     ne setiny. Do rekordů se ukládají proto, aby šly dva časy ve stejné
+     sekundě od sebe odlišit. */
+  function formatCas(sekund) {
+    var celkem = Math.floor(sekund);
+    var m = Math.floor(celkem / 60);
+    var s = celkem % 60;
+
+    return (m < 10 ? '0' : '') + m + ':' + (s < 10 ? '0' : '') + s;
+  }
+
+  function desetinne(n) {
+    return n.toFixed(1).replace('.', ',');
+  }
+
+  function vykresliCas() {
+    elCas.textContent = formatCas(uplynulo());
+  }
+
+  function vykresliRekord() {
+    elRekord.textContent = rekord === null ? '—' : formatCas(rekord);
+  }
+
+  /* Zápis rekordu po výhře. Vrací hlášku pod desku, nebo prázdný
+     řetězec, když se nic nezapisovalo.
+
+     Zlepšení se hlásí na desetinu vteřiny, i když se čas jinak ukazuje
+     po sekundách: rozdíl dvou časů bývá menší než sekunda a „o 0 s
+     lepší“ by neřeklo nic. */
+  function zapisRekord() {
+    if (!klicRekordu(obtiznost)) return '';      // deska bez předvolby se nezapisuje
+
+    var predchozi = rekord;
+    if (predchozi !== null && game.cas >= predchozi) return '';
+
+    rekord = game.cas;
+    ulozRekord(obtiznost, game.cas);
+    vykresliRekord();
+
+    if (predchozi === null) {
+      return 'Nový rekord! První zapsaný čas na téhle obtížnosti.';
+    }
+    return 'Nový rekord! O ' + desetinne(predchozi - game.cas) + ' s lepší než dosud.';
+  }
+
+  /* ---------------------------------------------------------------
+     Vykreslování. Do DOMu saháme jen tam, kde se stav opravdu změnil.
+     --------------------------------------------------------------- */
+
+  /* Popis pole pro odečítač obrazovky. Souřadnice jsou v něm i po
+     odkrytí — jinak by se hráč po desce naslepo neorientoval. */
+  function popisBunky(i) {
+    var s = souradnice(i);
+    var p = game.pole[i];
+    var kde = (s.y + 1) + '. řádek, ' + (s.x + 1) + '. sloupec';
+
+    if (!p.odkryto) {
+      if (!p.oznaceno) return kde + ', neodkryté';
+      return kde + (jeOmyl(i) ? ', vlaječka omylem' : ', označené vlaječkou');
+    }
+    if (p.mina) return kde + ', mina';
+    if (p.sousedu === 0) return kde + ', prázdné';
+    return kde + ', ' + p.sousedu;
+  }
+
+  /* Vlaječka na poli, pod kterým mina nebyla. Dokud se hraje, není co
+     soudit — omyl je z ní teprve ve chvíli, kdy hra skončí prohrou. */
+  function jeOmyl(i) {
+    return game.state === 'lost' && game.pole[i].oznaceno && !game.pole[i].mina;
+  }
+
+  function vykresliBunku(i, vybuch) {
+    var b = bunky[i];
+    var p = game.pole[i];
+
+    b.setAttribute('aria-label', popisBunky(i));
+
+    if (!p.odkryto) {
+      /* Neodkryté pole ukazuje nanejvýš vlaječku. Přepisuje se celé,
+         ne jen přidává třída — sundaná vlaječka musí zmizet i se
+         značkou. */
+      var omyl = jeOmyl(i);
+
+      b.classList.toggle('bunka--vlajka', p.oznaceno && !omyl);
+      b.classList.toggle('bunka--omyl', omyl);
+      b.textContent = !p.oznaceno ? '' : (omyl ? ZNAK_OMYLU : ZNAK_VLAJKY);
+      return;
+    }
+
+    b.classList.add('bunka--odkryta');
+
+    if (p.mina) {
+      b.classList.add(vybuch ? 'bunka--vybuch' : 'bunka--mina');
+      b.textContent = ZNAK_MINY;
+      return;
+    }
+
+    /* Nula se nepíše. Prázdné odkryté pole je samo o sobě informace
+       a číslic by jinak na desce byl les. */
+    if (p.sousedu > 0) {
+      b.textContent = p.sousedu;
+      b.setAttribute('data-pocet', p.sousedu);
+    }
+  }
+
+  /* Bliknutí sousedů při akordu, který nevyšel. Pole na okamžik
+     zapadnou, jako by je stisk zmáčkl — hráč tak vidí, že se stiskem
+     něco stalo, aniž by se na desce cokoliv změnilo.
+
+     Zhasíná jeden společný časovač: rychlé akordy za sebou se tak
+     nepřekrývají a nezůstane po nich zapadlé pole. */
+  var blikajici = [];
+  var blikCasovac = null;
+
+  function zhasniBlik() {
+    clearTimeout(blikCasovac);
+    blikCasovac = null;
+
+    while (blikajici.length) {
+      bunky[blikajici.pop()].classList.remove('bunka--blik');
+    }
+  }
+
+  function probliknij(okoli) {
+    zhasniBlik();
+
+    for (var k = 0; k < okoli.length; k++) {
+      var p = game.pole[okoli[k]];
+      if (p.odkryto || p.oznaceno) continue;     // blikat má jen to, co by se odkrylo
+
+      bunky[okoli[k]].classList.add('bunka--blik');
+      blikajici.push(okoli[k]);
+    }
+
+    if (blikajici.length) blikCasovac = setTimeout(zhasniBlik, BLIK_MS);
+  }
+
+  function vykresliUI() {
+    /* Počítadlo min je počet min mínus vlaječky, tedy kolik jich hráč
+       podle sebe ještě nenašel. Do záporných čísel smí: hra nehlídá,
+       kolik vlaječek se položí, a záporné číslo je samo o sobě zpráva,
+       že někde jedna přebývá. */
+    elMiny.textContent = game.pocetMin - game.vlajecek;
+    elOdkryto.textContent = game.odkrytych + ' / ' +
+                            (game.pole.length - game.pocetMin);
+
+    elStavText.textContent = HLASKY[game.state];
+    elStavRekord.textContent = zpravaRekordu;
+    elStav.classList.toggle('stav--konec',
+                            game.state === 'won' || game.state === 'lost');
+  }
+
+  /* ---------------------------------------------------------------
+     Stavba desky.
+
+     Pole jsou <button>, ne <div> s posluchačem: klik, popis pro
+     odečítač obrazovky i kurzor myši pak fungují samy od sebe. Odkryté
+     pole schválně nezakazujeme přes disabled — zakázané tlačítko se
+     jinak hlásí odečítači jako nedostupné, i když je na něm to
+     podstatné (číslo). Klik na ně místo toho ignoruje klikNaPole.
+
+     Tabulátorem se do desky nechodí: na expertovi je to 480 zastávek
+     mezi odkazem nad deskou a tlačítky pod ní. Z klávesnice se hraje
+     kurzorem, a ten na fokusu nestojí — viz posluchač na window níž.
+     --------------------------------------------------------------- */
+  function postavDesku() {
+    var frag = document.createDocumentFragment();
+
+    // po staré desce nesmí zůstat viset časovač mířící do jejích polí
+    zhasniBlik();
+    bunky = [];
+
+    for (var i = 0; i < game.pole.length; i++) {
+      var b = document.createElement('button');
+      b.type = 'button';
+      b.className = 'bunka';
+      b.tabIndex = -1;
+      b.setAttribute('data-i', i);
+      b.setAttribute('aria-label', popisBunky(i));
+
+      /* Posun lichých řádků je věc vykreslení, ale parita se nemění za
+         běhu, tak ji rozdáme rovnou při stavbě desky — resize pak jen
+         mění --cell a nemusí sahat na pět set tlačítek. Na čtvercové
+         desce třída nic nedělá, styl na ni sahá jen uvnitř .deska--hex. */
+      if (Math.floor(i / game.cols) % 2 === 1) b.classList.add('bunka--posun');
+
+      frag.appendChild(b);
+      bunky.push(b);
+    }
+
+    elDeska.textContent = '';             // po předchozí hře
+    elDeska.appendChild(frag);
+    elDeska.classList.remove('deska--konec');
+    elDeska.classList.toggle('deska--hex', game.hex);
+
+    // kurzor je vidět hned, ještě než se hráč klávesnice vůbec dotkne
+    bunky[indexKurzoru()].classList.add('bunka--kurzor');
+  }
+
+  // index pole z tlačítka; closest() proto, že cíl události může být
+  // i text uvnitř tlačítka
+  function poleZUdalosti(e) {
+    var b = e.target.closest('.bunka');
+    return b ? parseInt(b.getAttribute('data-i'), 10) : -1;
+  }
+
+  /* Kurzor jde za myší i za prstem. Bez toho by po kliknutí první šipka
+     skočila tam, kde kurzor zůstal stát, a ovládání by se nedalo
+     střídat. Zároveň to drží klávesu F nad tím polem, kterého se hráč
+     naposled dotkl. */
+  function kurzorNaPole(i) {
+    posunKurzor(i % game.cols, Math.floor(i / game.cols));
+  }
+
+  /* Klik řešíme jedním posluchačem na desce, ne pěti sty vlastními. */
+  elDeska.addEventListener('click', function (e) {
+    var i = poleZUdalosti(e);
+    if (i < 0) return;
+
+    /* Kliknuté tlačítko si v prohlížeči nechává fokus a mezerník by
+       pak mačkal jeho. Odkrylo by se pole pod myší místo pod kurzorem
+       — a to i po konci hry, kdy si mezerník bereme jen na rolování.
+       Pouštíme ho hned, ať fokus nezůstane viset ani u kliku, který
+       níž spolkne gesto. */
+    e.target.closest('.bunka').blur();
+
+    /* Klik po dlouhém stisku nebo po akordu patří tomu gestu, ne
+       odkrývání — prohlížeč ho pošle i tehdy, když prst mezitím jen
+       ležel na místě. */
+    if (gestoSpotrebovano) {
+      gestoSpotrebovano = false;
+      return;
+    }
+
+    kurzorNaPole(i);
+    klikNaPole(i);
+  });
+
+  /* ---------------------------------------------------------------
+     Vlaječka myší i prstem.
+
+     Obojí jede přes pointer events, tedy jedním kódem — prst, pero
+     i myš chodí stejnou cestou a nic se nemusí párovat mezi touch
+     a mouse událostmi, které by jinak na dotyku přišly obojí.
+
+     Pravé tlačítko označuje hned při stisku. Dlouhý stisk (jakýmkoliv
+     ukazovátkem) označí po DRZENI_MS, aniž by ho hráč musel pustit —
+     na dotykovém displeji je to jediné gesto, které je k dispozici.
+     --------------------------------------------------------------- */
+  var drzeni = null;              // probíhající stisk, viz pointerdown
+
+  /* Gesto (dlouhý stisk nebo akord) už stisk spotřebovalo — klik, který
+     po puštění tlačítka ještě dorazí, se má zahodit, ať pole navrch
+     neodkryje. */
+  var gestoSpotrebovano = false;
+
+  function zrusDrzeni() {
+    if (!drzeni) return;
+    clearTimeout(drzeni.casovac);
+    drzeni = null;
+  }
+
+  elDeska.addEventListener('pointerdown', function (e) {
+    var i = poleZUdalosti(e);
+    if (i < 0) return;
+
+    zrusDrzeni();
+    gestoSpotrebovano = false;
+
+    /* Obě tlačítka naráz jsou akord. Druhé z nich přijde jako
+       samostatný stisk, ve kterém už buttons hlásí obě — první z nich
+       mezitím stihl rozeběhnout časovač dlouhého stisku (levé) nebo
+       položit vlaječku (pravé). Časovač proto rušíme; vlaječka zůstává,
+       na tu je hráč zvyklý i z jiných minových polí a akordu nevadí.
+
+       Klik, který po puštění levého tlačítka dorazí, patří tomuhle
+       gestu, ne odkrývání. */
+    if (e.buttons === 3) {
+      gestoSpotrebovano = true;
+      kurzorNaPole(i);
+      akord(i);
+      return;
+    }
+
+    // pravé tlačítko na nic nečeká
+    if (e.button === 2) {
+      kurzorNaPole(i);
+      prepniVlajku(i);
+      return;
+    }
+
+    if (e.button !== 0) return;   // prostřední a boční tlačítka nás nezajímají
+
+    drzeni = {
+      id: e.pointerId,
+      x: e.clientX,
+      y: e.clientY,
+      casovac: setTimeout(function () {
+        drzeni = null;
+        gestoSpotrebovano = true;   // ať klik po puštění pole neodkryje
+        kurzorNaPole(i);
+        prepniVlajku(i);
+      }, DRZENI_MS)
+    };
+  });
+
+  /* Ujetý prst je rolování, ne držení. Bez téhle pojistky by vlaječka
+     padala i na pole, přes které hráč jen přejel cestou dolů stránkou. */
+  elDeska.addEventListener('pointermove', function (e) {
+    if (!drzeni || e.pointerId !== drzeni.id) return;
+
+    if (Math.abs(e.clientX - drzeni.x) > DRZENI_POSUN ||
+        Math.abs(e.clientY - drzeni.y) > DRZENI_POSUN) {
+      zrusDrzeni();
+    }
+  });
+
+  elDeska.addEventListener('pointerup', zrusDrzeni);
+  elDeska.addEventListener('pointercancel', zrusDrzeni);
+
+  /* Nad deskou je pravé tlačítko ovládání hry, takže tu kontextové menu
+     nemá co dělat — překrylo by desku přesně tam, kam hráč míří. Menu
+     ruší i dlouhý stisk na dotyku; tam se o vlaječku postará časovač
+     dřív, než by nabídka stihla vyskočit. Mimo desku (odkaz, text
+     v hlavičce) zůstává menu nedotčené. */
+  elDeska.addEventListener('contextmenu', function (e) {
+    e.preventDefault();
+  });
+
+  /* ---------------------------------------------------------------
+     Klávesnice.
+
+     Posluchač visí na window, ne na desce ani na polích. Posluchač na
+     desce se ozve teprve tehdy, když v ní něco drží fokus, takže by
+     šipky ožily až po prvním kliknutí myší — na to se hra ovládaná
+     výhradně klávesnicí nedá rozehrát.
+
+     Vybrané pole drží game.kurzor, ne fokus. Fokus je jeden na celý
+     dokument a přetahuje se o něj s tlačítky pod deskou; kurzor je
+     stav hry a zůstává, kde ho hráč nechal.
+     --------------------------------------------------------------- */
+  var SIPKY = {
+    ArrowLeft:  { x: -1, y:  0 },
+    ArrowRight: { x:  1, y:  0 },
+    ArrowUp:    { x:  0, y: -1 },
+    ArrowDown:  { x:  0, y:  1 }
+  };
+
+  window.addEventListener('keydown', function (e) {
+    /* Cíl skutečného stisku je vždycky prvek — když nic nedrží fokus,
+       je jím <body>. Na čemkoliv jiném (událost poslaná ručně na
+       window, na document) by contains() spadl na TypeError a vzal
+       s sebou celou obsluhu, tak si prvek napřed ověříme. */
+    var cil = e.target instanceof Element ? e.target : null;
+
+    /* Co patří ovládacím prvkům, hře nepředáváme: ve skupinách tvaru
+       a obtížnosti si šipky i mezerník řídí přepínače samy a na tlačítku
+       nové hry musí mezerník s Enterem zmáčknout tlačítko, ne sáhnout
+       na desku. Ostatní klávesy hře zůstávají i tam. */
+    if (vPrepinacich(cil)) return;
+    if ((cil === elNova || cil === elSmazat) &&
+        (e.key === ' ' || e.key === 'Enter')) return;
+
+    // velká písmena sem chodí se shiftem, tak si klávesu srovnáme
+    var k = e.key.toLowerCase();
+
+    /* Nová hra musí jít rozdat i z dohrané desky, takže je ještě před
+       stavovou zámkou níž. */
+    if (k === 'n') {
+      e.preventDefault();
+      novaHra();
+      return;
+    }
+
+    /* Zbytek si bereme jen do rozehrané hry. Po výhře i prohře už na
+       desce není co dělat, a tehdy patří šipky zpátky stránce — jinak
+       by se dohraná deska nedala odrolovat klávesnicí. */
+    if (game.state !== 'ready' && game.state !== 'running') return;
+
+    var smer = SIPKY[e.key];
+
+    if (smer) {
+      e.preventDefault();          // šipky jsou naše, stránka se nehne
+      posunKurzor(game.kurzor.x + smer.x, game.kurzor.y + smer.y);
+      return;
+    }
+
+    if (e.key === 'Home') {
+      e.preventDefault();
+      posunKurzor(0, game.kurzor.y);
+      return;
+    }
+
+    if (e.key === 'End') {
+      e.preventDefault();
+      posunKurzor(game.cols - 1, game.kurzor.y);
+      return;
+    }
+
+    /* Mezerník a Enter dělají totéž — hráč nemá důvod hádat, která
+       klávesa je „ta správná“. Na neodkrytém poli odkrývají, na čísle
+       akordují; obojí řeší pouzijPole. */
+    if (e.key === ' ' || e.key === 'Enter') {
+      e.preventDefault();          // mezerníkem se jinak roluje stránka
+      pouzijPole(indexKurzoru());
+      return;
+    }
+
+    if (k === 'f') {
+      e.preventDefault();
+      prepniVlajku(indexKurzoru());
+    }
+  });
+
+  /* ---------------------------------------------------------------
+     Rozměry.
+
+     Strana pole je celé číslo CSS pixelů, aby mřížka padla na pixely
+     a mezery mezi poli byly všude stejně široké.
+
+     Pole se nikdy nezmenší pod --bunka-min. Když se deska v té velikosti
+     do okna nevejde, nezdrobní se — jen se začne rolovat uvnitř
+     .deska-obal. Na dotyku je to ten podstatnější kompromis: mřížka
+     zmenšená tak, aby se vešla celá, se nedá trefit prstem.
+     --------------------------------------------------------------- */
+
+  /* Meze čteme z CSS při každém přepočtu, ne jednou při načtení: mění
+     je média dotaz, takže se přepnutím na dotykový vstup i otočením
+     displeje můžou změnit za běhu. */
+  function mezeBunky() {
+    var s = getComputedStyle(document.documentElement);
+    var min = Math.ceil(parseFloat(s.getPropertyValue('--bunka-min')));
+    var max = Math.floor(parseFloat(s.getPropertyValue('--bunka-max')));
+
+    if (!isFinite(min) || min < 1) min = CELL_MIN_ZALOHA;
+    if (!isFinite(max) || max < min) max = Math.max(min, CELL_MAX_ZALOHA);
+
+    return { min: min, max: max };
+  }
+
+  function prizpusob() {
+    var meze = mezeBunky();
+
+    /* Rám kolem desky se měří ze stylu, ne jako offsetWidth - clientWidth:
+       ten rozdíl v sobě nese i šířku posuvníku, a ta se objevuje a mizí
+       podle toho, jak velká pole zrovna vyjdou. Výpočet by se tím zacyklil
+       — posuvník ubere místo, pole se zmenší, posuvník zmizí, a zase. */
+    var st = getComputedStyle(elObal);
+    var ramVodorovne = parseFloat(st.borderLeftWidth) + parseFloat(st.borderRightWidth);
+    var ramSvisle    = parseFloat(st.borderTopWidth) + parseFloat(st.borderBottomWidth);
+
+    /* Kolik místa dostane deska do šířky.
+
+       Ne sloupec stránky, ale celé okno bez okraje. Sloupec je užší
+       (wrap má max-width) a je tak úzký schválně — kvůli délce řádku
+       textu. Deska ale žádné řádky nemá a na velkém monitoru vedle ní
+       zbývalo prázdno, zatímco pole zůstávala na svém minimu. Vystoupí
+       tedy ze sloupce: obal má align-self: center, takže přeteče na obě
+       strany stejně a zůstane v okně vycentrovaný. Nadpis, HUD, panely
+       ani legenda se nikam nestěhují, ty dál drží šířku <main>.
+
+       Dál než k okraji okna se nejde: co se nevejde ani tam, doroluje
+       obal. Na telefonu to je právě ten případ. */
+    var doOkna = document.documentElement.clientWidth - 2 * OKRAJ_OKNA;
+
+    /* Výškový rozpočet: okno bez toho, co je nad deskou, a bez toho, co
+       je pod ní. Hlavička se měří od začátku dokumentu, ne od okraje
+       okna — s getBoundingClientRect().top by se po odscrollování
+       rozpočet nafoukl a deska by rostla sama od sebe. Výška obsahu pod
+       deskou na velikosti polí nezávisí, takže ji smíme změřit teď.
+
+       Pod PODIL_VYSKY okna rozpočet neklesne. Samotné měření je totiž
+       přísné: pod deskou je legenda ovládání a ta na spoustě oken sebere
+       skoro celou výšku, takže by na desku zbyla třetina okna a pole by
+       vyšla na minimum i na velkém monitoru. Deska je hlavní obsah
+       stránky, takže si tři čtvrtiny okna vezme a legenda se doroluje. */
+    var hlavicka = elObal.getBoundingClientRect().top -
+                   document.documentElement.getBoundingClientRect().top;
+    var podDeskou = elHra.getBoundingClientRect().bottom -
+                    elObal.getBoundingClientRect().bottom;
+    var mereno   = window.innerHeight - hlavicka - podDeskou - REZERVA;
+    var rozpocet = Math.max(mereno, window.innerHeight * PODIL_VYSKY);
+
+    /* Velikost pole z dostupného místa. Vodorovně se dělí šířkou všech
+       sloupců, svisle výškou všech řádků — a u šestiúhelníků je řádek
+       vysoký jen tři čtvrtiny pole, takže rows řádků zabere
+       (rows * 0,75 + 0,25) výšky pole. Obě úlohy zná rozmerDesky
+       obráceně, tady se jen odečte rám obalu.
+
+       Dolů na celé pixely: na zlomku pixelu by mřížka nesedla na
+       obrazovku a hrany polí by se rozmazaly. */
+    cell = Math.floor(cellProMisto(doOkna - ramVodorovne, rozpocet - ramSvisle));
+
+    if (cell < meze.min) cell = meze.min;
+    if (cell > meze.max) cell = meze.max;
+
+    /* Obal je přesně tak široký jako mřížka — jinak by v rámu zbyl pruh
+       pozadí — nejvýš však na šířku okna. Šířka, ne jen strop: fit-content
+       by se zastavil na šířce sloupce a deska by se rolovala i tam, kde
+       je vedle sloupce místa dost. Nahoru se zaokrouhluje, aby se kvůli
+       půlce pixelu (šestiúhelníková deska končí na .5) neobjevil
+       vodorovný posuvník.
+
+       Když se deska nevejde ani do okna — na telefonu, kde má pole
+       spodní mez 44 px — ustřihne ji tenhle strop a obal ji roluje.
+       Právě proto se nezmenšuje pod mez: po zmenšené mřížce se dá
+       jezdit, po netrefitelné ne. */
+    var sirkaObalu = Math.min(Math.ceil(rozmerDesky(cell).w + ramVodorovne), doOkna);
+
+    elObal.style.width    = sirkaObalu + 'px';
+    elObal.style.maxWidth = sirkaObalu + 'px';
+
+    /* Do CSS jdou jen čísla, ne hotová geometrie: jak se z nich staví
+       čtvercová a jak šestiúhelníková deska, je věc stylu (.deska,
+       .deska--hex). Odsud se počítá to, co závisí na velikosti okna. */
+    elDeska.style.gridTemplateColumns = 'repeat(' + game.cols + ', ' + cell + 'px)';
+    elDeska.style.setProperty('--cell', cell + 'px');
+    elDeska.style.setProperty('--mezera', MEZERA + 'px');
+    elDeska.style.setProperty('--hex-krok', HEX_KROK);
+    elDeska.style.setProperty('--hex-pomer', HEX_POMER.toFixed(4));
+
+    /* Písmo roste s polem, jinak by číslice na 44px poli byla ztracená.
+       Měřítkem je vždycky šířka pole — u šestiúhelníku je nejužší právě
+       vodorovně přes střed, kde číslice sedí, takže výška pole by dávala
+       písmo, které se do špičatého tvaru nevejde. */
+    elDeska.style.fontSize = Math.round(cell * PODIL_PISMA) + 'px';
+
+    /* Strop výšky obalu. Bez něj by se svisle rolovala celá stránka
+       a hlavička s HUDem by hráči odjela z dohledu.
+
+       Je to tentýž rozpočet, ze kterého se počítala velikost pole —
+       menší číslo tady by desku rolovalo, přestože byla spočítaná tak,
+       aby se vešla. Uplatní se proto jen tehdy, když se do rozpočtu
+       nevešla ani při nejmenším povoleném poli. Na desktopu se do toho
+       případu výpočet nedostane, na telefonu naopak skoro vždycky.
+
+       Počítá se do border-boxu, ten je v projektu globální. */
+    var strop = Math.max(Math.round(rozpocet), OBAL_MIN_VYSKA);
+
+    elObal.style.maxHeight = strop + 'px';
+  }
+
+  /* Resize i otočení telefonu. Debounce, protože při tažení okna
+     přijdou desítky událostí a po orientationchange bývá innerHeight
+     ještě chvíli stará. */
+  var casovacResize = null;
+
+  function naZmenuOkna() {
+    if (casovacResize) clearTimeout(casovacResize);
+    casovacResize = setTimeout(function () {
+      casovacResize = null;
+
+      /* Popisky se přepisují pokaždé, ne jen když se mění deska pod
+         rukama: otočení překlopí experta i ve chvíli, kdy se zrovna hraje
+         čtvercová obtížnost. Na jeho přepínači pak musí stát rozměr, který
+         hráč po kliknutí opravdu dostane — jinak by slíbil 30×16 a rozdal
+         16×30. Jsou to tři přiřazení textu, na debounce se to ztratí. */
+      aktualizujDetaily();
+
+      var r = rozmery(obtiznost);
+
+      /* Otočením se mění tvar desky, ne jen její velikost. Rozehranou hru
+         na otočený tvar přeskládat nejde: miny leží na souřadnicích a po
+         překlopení by čísla přestala sedět se sousedy, ať se pole přenesou
+         jakkoliv. Rozdáme tedy novou desku — a raději o rozehrané kolo
+         přijdeme, než abychom hráči podstrčili nesouhlasnou desku. */
+      if (r.cols !== game.cols || r.rows !== game.rows) {
+        novaHra();
+        return;
+      }
+
+      // pouhá změna velikosti okna se hry nedotkne, jen desku přeměří
+      prizpusob();
+    }, 120);
+  }
+
+  window.addEventListener('resize', naZmenuOkna);
+  window.addEventListener('orientationchange', naZmenuOkna);
+
+  /* ---------------------------------------------------------------
+     Nová hra a volba obtížnosti.
+     --------------------------------------------------------------- */
+  function novaHra() {
+    /* Rozměr se bere podle tvaru okna, ne přímo ze seznamu — expert je
+       naležato 30×16 a na výšku 16×30. Počet min je na tvaru nezávislý. */
+    var r = rozmery(obtiznost);
+
+    game.cols     = r.cols;
+    game.rows     = r.rows;
+    game.pocetMin = obtiznost.miny;
+    game.hex      = tvar.hex;
+
+    game.pole = [];
+    for (var i = 0; i < game.cols * game.rows; i++) {
+      game.pole.push({ mina: false, odkryto: false, oznaceno: false, sousedu: 0 });
+    }
+
+    game.state     = 'ready';
+    game.prvniKlik = true;      // miny přijdou až s prvním klikem
+    game.odkrytych = 0;
+    game.vlajecek  = 0;
+
+    // hodiny na nulu a stojí; rozjede je až první odkryté pole
+    game.casStart  = null;
+    game.cas       = 0;
+    zastavTikac();
+    zpravaRekordu  = '';
+
+    /* Rekord patří k obtížnosti, ne k rozehrané hře — čte se s každou
+       novou deskou, takže se po přepnutí obtížnosti přepíše sám. */
+    rekord = nactiRekord(obtiznost);
+    vykresliCas();
+    vykresliRekord();
+
+    /* Kurzor začíná uprostřed desky, ne v rohu: odtud je to všude
+       stejně daleko a první klik doprostřed navíc otevře největší
+       plochu. Nastavuje se tady, tedy hned při inicializaci — šipky
+       fungují od načtení stránky, bez jediného kliknutí myší. */
+    game.kurzor.x = Math.floor(game.cols / 2);
+    game.kurzor.y = Math.floor(game.rows / 2);
+
+    postavDesku();
+    prizpusob();
+    vykresliUI();
+
+    /* Popisky přepínačů mluví o rozměrech, a ty se právě přepočítaly.
+       Držet je aktuální odsud pokrývá i cesty, které nejdou přes změnu
+       okna — novou hru i přepnutí obtížnosti. */
+    aktualizujDetaily();
+  }
+
+  elNova.addEventListener('click', function () {
+    // bez blur() by tlačítko zůstalo zaostřené a mezerník by rozdával
+    // další a další hry místo odkrývání polí
+    elNova.blur();
+    novaHra();
+  });
+
+  /* Mazání se ptá: uložené časy jsou jediné, co po hraní zůstává, a
+     omylem trefené tlačítko by je vzalo bez možnosti návratu. */
+  elSmazat.addEventListener('click', function () {
+    elSmazat.blur();
+    if (!window.confirm('Opravdu vymazat nejlepší časy všech obtížností?')) return;
+
+    smazRekordy();
+    rekord = null;
+    zpravaRekordu = '';       // ať po smazání nesvítí hláška o rekordu
+    vykresliRekord();
+    vykresliUI();
+  });
+
+  /* ---------------------------------------------------------------
+     Přepínače pod deskou.
+
+     Tvar desky i obtížnost se ovládají úplně stejně, tak je staví jedna
+     funkce. Jsou to ARIA přepínače: skupina má role="radiogroup",
+     tlačítka role="radio" a aria-checked. Tabulátorem se do skupiny
+     vstoupí na zvolené položce (roving tabindex), šipkami se přepíná.
+
+     popis() se volá při stavbě i při každém obnovení — u obtížností
+     mluví o rozměrech, a ty se mění s otočením displeje.
+     --------------------------------------------------------------- */
+  function postavSkupinu(el, polozky, popis, vyber, naVolbu) {
+    var tlacitka = [];
+    var detaily  = [];
+
+    polozky.forEach(function (polozka, poradi) {
+      var b = document.createElement('button');
+      b.type = 'button';
+      b.className = 'prepinac';
+      b.setAttribute('role', 'radio');
+      b.setAttribute('aria-checked', 'false');
+      b.tabIndex = -1;
+
+      var nazev = document.createElement('span');
+      nazev.className = 'prepinac__nazev';
+      nazev.textContent = polozka.nazev;
+
+      var detail = document.createElement('span');
+      detail.className = 'prepinac__detail';
+      detaily[poradi] = detail;
+
+      b.appendChild(nazev);
+      b.appendChild(detail);
+      b.addEventListener('click', function (e) {
+        naVolbu(polozka.id);
+
+        /* Po kliknutí myší fokus pustíme: panel je vidět i rozehrané
+           a zaostřený přepínač si bere šipky i mezerník. Klávesnicí
+           (detail === 0) fokus necháváme, jinak by se ve skupině
+           nedalo pohybovat šipkami. */
+        if (e.detail > 0) b.blur();
+      });
+
+      el.appendChild(b);
+      tlacitka.push(b);
+    });
+
+    /* Šipky uvnitř skupiny patří přepínačům. preventDefault tu musí
+       být, jinak stránka odscrolluje. */
+    el.addEventListener('keydown', function (e) {
+      var k = e.key;
+      var posun = (k === 'ArrowRight' || k === 'ArrowDown') ?  1 :
+                  (k === 'ArrowLeft'  || k === 'ArrowUp')   ? -1 : 0;
+      if (!posun && k !== 'Home' && k !== 'End') return;
+
+      e.preventDefault();
+
+      var i = tlacitka.indexOf(document.activeElement);
+      if (i < 0) i = polozky.indexOf(vyber());
+
+      var cil = k === 'Home' ? 0
+              : k === 'End'  ? polozky.length - 1
+              : (i + posun + polozky.length) % polozky.length;
+
+      tlacitka[cil].focus();
+      naVolbu(polozky[cil].id);
+    });
+
+    return {
+      /* Přepíše popisky i značku zvolené položky. Volá se po každé
+         změně, která se jich může dotknout — přepnutí tvaru, obtížnosti
+         i otočení displeje. */
+      obnov: function () {
+        var vybrana = vyber();
+
+        for (var i = 0; i < tlacitka.length; i++) {
+          var aktivni = polozky[i].id === (vybrana && vybrana.id);
+
+          detaily[i].textContent = popis(polozky[i]);
+          tlacitka[i].setAttribute('aria-checked', aktivni ? 'true' : 'false');
+          tlacitka[i].tabIndex = aktivni ? 0 : -1;
+        }
+      }
+    };
+  }
+
+  var skupinaTvar = postavSkupinu(
+    elVolbaTvar, TVARY, popisTvaru,
+    function () { return tvar; },
+    function (id) { zmenTvar(id); }
+  );
+
+  /* Obtížnosti se přepínají v seznamu toho tvaru, který se hraje.
+     Oba seznamy mají stejná id ve stejném pořadí, takže tlačítka stačí
+     postavit jednou a při změně tvaru jim jen přepsat popisky. */
+  var skupinaObtiznost = postavSkupinu(
+    elVolba, TVARY[0].obtiznosti,
+    function (polozka) { return popisRozmeru(najdiObtiznost(polozka.id) || polozka); },
+    function () { return obtiznost; },
+    function (id) { zmenObtiznost(id); }
+  );
+
+  function aktualizujDetaily() {
+    skupinaTvar.obnov();
+    skupinaObtiznost.obnov();
+  }
+
+  /* Změna tvaru desky znamená novou hru: sousedství i hustota min jsou
+     u šestiúhelníků jiné, přenést rozehrané kolo by nešlo. Obtížnost
+     si držíme podle id — stupně se v obou tvarech jmenují stejně, jen
+     mají jiné rozměry a jiný počet min. */
+  function zmenTvar(id) {
+    if (tvar.id === id) return;
+
+    tvar = najdiTvar(id);
+    ulozTvar(tvar.id);
+
+    obtiznost = najdiObtiznost(obtiznost.id) || najdiObtiznost(VYCHOZI_OBTIZNOST);
+    novaHra();
+  }
+
+  /* Změna obtížnosti znamená novou desku — rozměry se nikdy nemění
+     pod rozehranou hrou. Stejná volba nic neruší, jinak by omylem
+     kliknutý už zvolený stupeň smazal rozehrané kolo. */
+  function zmenObtiznost(id) {
+    if (obtiznost.id === id) return;
+
+    obtiznost = najdiObtiznost(id);
+    ulozObtiznost(obtiznost.id);
+    novaHra();
+  }
+
+  novaHra();
+})();
+</script>
+</body>
+</html>
