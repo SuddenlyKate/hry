@@ -1,0 +1,69 @@
+<!DOCTYPE html>
+<html lang="cs">
+<head>
+  <meta charset="utf-8">
+  <meta name="viewport" content="width=device-width, initial-scale=1">
+  <title>Hry v prohlížeči</title>
+  <meta name="description" content="Sbírka malých her, které běží přímo v prohlížeči.">
+  <link rel="stylesheet" href="shared/style.css">
+</head>
+<body>
+  <div class="wrap">
+
+    <header class="site-header">
+      <h1>Hry v prohlížeči</h1>
+      <p>Malé hry bez instalace — stačí kliknout a hrát.
+         A jeden nástroj na hraní s matematikou.</p>
+    </header>
+
+    <main>
+      <nav class="grid" aria-label="Seznam her">
+
+        <a class="card" href="had/">
+          <h2 class="card__title">Had</h2>
+          <p class="card__desc">Sbírej jídlo, rosť a nenaraz
+             do sebe ani do zdi.</p>
+        </a>
+
+        <a class="card" href="miny/">
+          <h2 class="card__title">Miny</h2>
+          <p class="card__desc">Odkryj všechna pole, pod kterými
+             mina není.</p>
+        </a>
+
+        <a class="card" href="sudoku/">
+          <h2 class="card__title">Sudoku</h2>
+          <p class="card__desc">Doplň čísla tak, aby se žádné
+             neopakovalo v řádku, sloupci ani ve čtverci.</p>
+        </a>
+
+        <a class="card" href="piskvorky/">
+          <h2 class="card__title">Piškvorky</h2>
+          <p class="card__desc">Proti počítači, nebo ve dvou u jednoho
+             zařízení. Srovnej řadu dřív než protihráč.</p>
+        </a>
+
+        <a class="card" href="sachy/">
+          <h2 class="card__title">Šachy</h2>
+          <p class="card__desc">Partie pro dva u jednoho zařízení,
+             se zápisem tahů a se všemi pravidly včetně rošády,
+             braní mimochodem a proměny pěšce.</p>
+        </a>
+
+        <!-- Není to hra, tak to má štítek. Do mřížky patří i tak:
+             je to další věc, která se v prohlížeči otevře a hraje si
+             s ní. -->
+        <a class="card" href="mat/">
+          <h2 class="card__title">Matematika</h2>
+          <p class="card__desc">Dvacet interaktivních vizualizací —
+             od goniometrie a limit po Fourierovy řady, lineární
+             algebru a 3D plochy.</p>
+          <span class="card__tag">nástroj</span>
+        </a>
+
+      </nav>
+    </main>
+
+  </div>
+</body>
+</html>

@@ -1,0 +1,5137 @@
+<!DOCTYPE html>
+<html lang="cs">
+<head>
+  <meta charset="utf-8">
+  <meta name="viewport" content="width=device-width, initial-scale=1">
+  <title>Šachy — Hry v prohlížeči</title>
+  <!-- Pojistka pro případ, že se sdílený styl nenačte (jiný server,
+       špatný MIME typ, offline). Stránka pak není holý bílý dokument. -->
+  <style>
+    :root {
+      --bg:   #0f1115;
+      --text: #e6e9ef;
+      --font: system-ui, -apple-system, "Segoe UI", Roboto, "Helvetica Neue", Arial, sans-serif;
+    }
+    html { color-scheme: dark; background: #0f1115; }
+    body {
+      margin: 0;
+      background: var(--bg);
+      color: var(--text);
+      font-family: var(--font);
+    }
+  </style>
+  <link rel="stylesheet" href="../shared/style.css">
+  <style>
+    /* Barvy a rozměry, které jsou jen tady. Do sdílené palety nepatří —
+       šachovnice se nikde jinde ve sbírce nevyskytuje. */
+    :root {
+      /* Pole desky. Světlé pole je o poznání tmavší než papírová
+         šachovnice: stránka je tmavá a bílá deska by z ní svítila.
+         Rozdíl mezi poli musí zůstat čitelný i pod zvýrazněními, která
+         se na ně kladou. */
+      --pole-svetle: #cbd1de;
+      --pole-tmave:  #737b90;
+
+      /* Figury. Standardní šachová konvence: bílá je skoro bílá výplň
+         s tenkým tmavým obrysem, černá je skoro černá výplň se světlým
+         obrysem. Tvar je u obou týž, poznají se právě jasem.
+
+         Obrys není ozdoba, ale nosná část čitelnosti. Bílá figura má
+         proti světlému poli kontrast jen kolem 1,5:1 — a to má na
+         papírové šachovnici taky, protože ji tam od pole odděluje
+         právě ta tmavá linka (proti světlému poli přes 12:1). U černé
+         figury na tmavém poli je to obráceně. Proto se s výplněmi
+         nesmí hýbat bez obrysu a naopak. */
+      --bila-vypln:  #fcfdff;
+      --bila-obrys:  #0d1016;
+      --cerna-vypln: #15181f;
+      --cerna-obrys: #eef1f7;
+
+      /* Zvýraznění. Výběr je zelený jako všude ve sbírce, poslední tah
+         žlutý (jiná barva schválně — je to jiná informace) a šach
+         červený, což je v celé sbírce barva chyby a nebezpečí. */
+      --vyber:    rgba(74, 222, 128, 0.42);
+      --posledni: rgba(234, 179, 8, 0.30);
+      --sach:     radial-gradient(circle,
+                    rgba(224, 83, 61, 0.95) 14%,
+                    rgba(224, 83, 61, 0.35) 52%,
+                    rgba(224, 83, 61, 0) 72%);
+
+      /* Meze velikosti jednoho pole. Skutečnou hodnotu mezi nimi počítá
+         JS z rozměru okna, ale prahy patří sem: liší je způsob ovládání
+         a na ten se ptá média dotaz. JS si je odsud přečte, takže jsou
+         nastavené jen na jednom místě.
+
+         Myš má 56 px, prst 40. Pro prst je práh nižší schválně: na
+         telefonu je důležitější vidět celou desku najednou než mít pole
+         o pár pixelů větší, a co se nevejde, doroluje obal. Deska se
+         tam dá zvětšit otočením displeje.
+
+         Strop 88 px platí pro obojí: výš už figury nevypadají
+         velkoryse, jen neohrabaně, a oko musí po desce jezdit. */
+      --pole-min: 56px;
+      --pole-max: 88px;
+
+      /* Pruh s popisky sloupců a řad kolem desky. */
+      --popis: 1.15rem;
+    }
+
+    @media (pointer: coarse) {
+      :root { --pole-min: 40px; }
+    }
+
+    /* Skryté prvky (panel proměny, nabídka rozehrané partie, lišta
+       prohlížení) mají display z vlastní třídy, a ten by výchozí
+       [hidden] přebil — třída je v kaskádě silnější než pravidlo
+       prohlížeče. Bez tohohle řádku by byly vidět pořád. */
+    [hidden] { display: none !important; }
+
+    /* Na herní stránce nechceme přiblížení dvojklikem ani výběr textu
+       při klepání do desky. */
+    html, body {
+      overscroll-behavior: none;
+      -webkit-text-size-adjust: 100%;
+    }
+
+    .wrap {
+      max-width: 1100px;
+      margin-inline: auto;
+    }
+
+    main {
+      touch-action: manipulation;     /* zabije double-tap zoom */
+      user-select: none;
+      -webkit-user-select: none;
+      -webkit-touch-callout: none;
+    }
+
+    /* ---------------------------------------------------------------
+       Rozvržení. Deska a zápis vedle sebe, na úzkém okně pod sebou.
+       Zlom je v CSS i v JS (DOTAZ_VEDLE) — JS ho potřebuje, aby při
+       počítání velikosti pole věděl, jestli mu zápis ubírá šířku. */
+    .hra {
+      display: flex;
+      flex-direction: column;
+      align-items: center;
+      gap: 1rem;
+    }
+
+    @media (min-width: 820px) {
+      .hra {
+        flex-direction: row;
+        align-items: flex-start;
+        justify-content: center;
+      }
+    }
+
+    .sloupec-desky {
+      display: flex;
+      flex-direction: column;
+      align-items: center;
+      gap: 0.7rem;
+      max-width: 100%;
+    }
+
+    /* ---------------------------------------------------------------
+       Deska.
+
+       Rozměr pole je v --pole a nastavuje ho JS. Mřížka ho má
+       v grid-template, ne jen v šířce polí: pole se tak nedají
+       roztáhnout obsahem a deska zůstane čtvercová i tehdy, když
+       do některého pole přijde figura s jinými proporcemi. */
+    .deska-obal {
+      position: relative;
+      max-width: 100%;
+      overflow: auto;               /* na malém displeji deska roluje */
+    }
+
+    .deska-ramec {
+      display: grid;
+      grid-template-columns: var(--popis) max-content;
+      grid-template-rows: max-content var(--popis);
+      gap: 2px;
+    }
+
+    .deska {
+      grid-column: 2;
+      grid-row: 1;
+      display: grid;
+      grid-template-columns: repeat(8, var(--pole));
+      grid-template-rows: repeat(8, var(--pole));
+      border-radius: var(--radius-sm);
+      overflow: hidden;
+      box-shadow: var(--shadow);
+    }
+
+    .popisky {
+      display: grid;
+      color: var(--text-dim);
+      font-size: 0.72rem;
+      line-height: 1;
+    }
+
+    .popisky--rady    { grid-column: 1; grid-row: 1; grid-template-rows: repeat(8, var(--pole)); }
+    .popisky--sloupce { grid-column: 2; grid-row: 2; grid-template-columns: repeat(8, var(--pole)); }
+
+    .popisek {
+      display: flex;
+      align-items: center;
+      justify-content: center;
+    }
+
+    /* Pole je tlačítko: dostane tím zaostření z klávesnice i správnou
+       sémantiku pro odečítače obrazovky zadarmo. Vzhled tlačítka se
+       musí umlčet celý, včetně rámu a pozadí. */
+    .pole {
+      position: relative;
+      width: var(--pole);
+      height: var(--pole);
+      margin: 0;
+      padding: 0;
+      border: 0;
+      border-radius: 0;
+      background-color: var(--pole-svetle);
+      background-repeat: no-repeat;
+      font: inherit;
+      color: inherit;
+      cursor: pointer;
+      -webkit-tap-highlight-color: transparent;
+    }
+
+    .pole--tmave { background-color: var(--pole-tmave); }
+
+    /* Značky dosahu čtou z barvy pole: na světlém poli tmavá, na tmavém
+       světlá. Jedna společná barva by na jedné z nich vždycky zmizela. */
+    .pole--svetle { --znacka: rgba(16, 19, 26, 0.38); }
+    .pole--tmave  { --znacka: rgba(244, 247, 255, 0.45); }
+
+    /* Pořadí těchhle tří pravidel je pořadím jejich přednosti: šach
+       přebije výběr a výběr přebije poslední tah. */
+    .pole--posledni { background-image: linear-gradient(var(--posledni), var(--posledni)); }
+    .pole--vyber    { background-image: linear-gradient(var(--vyber), var(--vyber)); }
+    .pole--sach     { background-image: var(--sach); }
+
+    .pole:focus-visible {
+      outline: 2px solid var(--accent);
+      outline-offset: -2px;
+      z-index: 2;
+    }
+
+    /* Kam se dá táhnout: tečka na prázdném poli, kroužek kolem figury,
+       kterou lze vzít. Dvě různé značky, ne jedna — braní je jiný tah
+       než přesun a hráč to má poznat, aniž by se díval, co na poli
+       stojí. */
+    .pole--cil::after,
+    .pole--brani::after {
+      content: '';
+      position: absolute;
+      pointer-events: none;
+    }
+
+    .pole--cil::after {
+      inset: 34%;
+      border-radius: 50%;
+      background: var(--znacka);
+    }
+
+    .pole--brani::after {
+      inset: 4%;
+      border-radius: 50%;
+      border: calc(var(--pole) * 0.08) solid var(--znacka);
+    }
+
+    /* Pole pod taženou figurou. */
+    .pole--pod::before {
+      content: '';
+      position: absolute;
+      inset: 0;
+      box-shadow: inset 0 0 0 3px rgba(255, 255, 255, 0.7);
+      pointer-events: none;
+    }
+
+    /* ---------------------------------------------------------------
+       Figury. Tvar je jeden, barvu dělá výplň a obrys.
+
+       currentColor drží barvu obrysu: pravidly z dokumentu se dovnitř
+       <use> sáhnout nedá, dědičnost je jediná cesta, jak dostat barvu
+       do detailů (oko jezdce, zářez střelce). */
+    .figura {
+      position: absolute;
+      inset: 0;
+      width: 100%;
+      height: 100%;
+      pointer-events: none;
+      stroke-width: 1.35;
+      stroke-linejoin: round;
+      stroke-linecap: round;
+    }
+
+    .figura--bila  { fill: var(--bila-vypln);  color: var(--bila-obrys);  stroke: currentColor; }
+    .figura--cerna { fill: var(--cerna-vypln); color: var(--cerna-obrys); stroke: currentColor; }
+
+    /* Figura tažená myší. Letí nad deskou, takže nesmí chytat události —
+       jinak by pod kurzorem nebylo vidět pole, nad kterým zrovna je. */
+    .tazena {
+      position: fixed;
+      inset: auto;                  /* .figura má inset: 0, tady by roztáhl svg přes okno */
+      z-index: 30;
+      pointer-events: none;
+      transform: translate(-50%, -50%);
+      filter: drop-shadow(0 6px 10px rgba(0, 0, 0, 0.5));
+    }
+
+    .pole--zdroj .figura { opacity: 0; }
+
+    /* ---------------------------------------------------------------
+       Animace přesunu.
+
+       Deska se překreslí okamžitě — animace je jen vrstva nad ní.
+       Figura, která se právě stěhuje, je na cílovém poli schovaná
+       (.pole--ceka) a místo ní letí kopie nad deskou (.letici);
+       braná figura zůstává na svém poli jako .stin, dokud přesun
+       nedoběhne. Obojí visí v <body>, ne v poli — políčko drží svou
+       jedinou figuru a překreslování by jim tam překáželo.
+
+       Délka a průběh přechodu se nastavují z JS (ANIMACE_MS), ať jsou
+       na jednom místě s logikou, která animaci ukončuje. */
+    .letici, .stin {
+      position: fixed;
+      inset: auto;
+      pointer-events: none;
+    }
+
+    .letici { z-index: 25; }
+    .stin   { z-index: 24; }
+
+    .pole--ceka .figura { visibility: hidden; }
+
+    /* Kdo si vypnul pohyb v systému, nemá ho vidět ani tady. JS na to
+       kouká taky a animaci vůbec nespustí; tohle je pojistka pro
+       případ, že se nastavení změní za běhu. */
+    @media (prefers-reduced-motion: reduce) {
+      .letici { transition: none !important; }
+    }
+
+    /* ---------------------------------------------------------------
+       Proměna pěšce. Panel leží nad deskou, ne uprostřed obrazovky:
+       týká se jednoho pole a hráč se v tu chvíli dívá na desku.
+       Automaticky se nikdy neproměňuje — věž nebo jezdec rozhodnou
+       partii dost často na to, aby se hráč nedozvěděl až potom, že
+       dostal dámu. */
+    .promena {
+      position: absolute;
+      inset: 0;
+      z-index: 20;
+      display: flex;
+      align-items: center;
+      justify-content: center;
+      background: rgba(10, 12, 16, 0.72);
+    }
+
+    .promena__panel {
+      display: flex;
+      flex-direction: column;
+      align-items: center;
+      gap: 0.6rem;
+      padding: 0.9rem 1rem;
+      border: 1px solid var(--border);
+      border-radius: var(--radius);
+      background: var(--bg-elev);
+      box-shadow: var(--shadow);
+    }
+
+    .promena__popis {
+      margin: 0;
+      font-size: 0.9rem;
+      color: var(--text-dim);
+    }
+
+    .promena__volby { display: flex; gap: 0.4rem; }
+
+    .promena__volba {
+      position: relative;
+      width: 56px;
+      height: 56px;
+      padding: 0;
+      border: 1px solid var(--border);
+      border-radius: var(--radius-sm);
+      background: var(--pole-svetle);
+      cursor: pointer;
+    }
+
+    .promena__volba:hover,
+    .promena__volba:focus-visible {
+      border-color: var(--accent);
+      outline: none;
+    }
+
+    /* ---------------------------------------------------------------
+       Stav a ovládání. */
+    .stav {
+      margin: 0;
+      min-height: 1.5rem;
+      font-size: 0.95rem;
+      text-align: center;
+    }
+
+    .stav__strana {
+      display: inline-block;
+      width: 0.75rem;
+      height: 0.75rem;
+      margin-right: 0.4rem;
+      border: 1px solid var(--bila-obrys);
+      border-radius: 50%;
+      background: var(--bila-vypln);
+      vertical-align: baseline;
+    }
+
+    .stav__strana--cerna {
+      border-color: var(--cerna-obrys);
+      background: var(--cerna-vypln);
+    }
+
+    .stav--konec { color: var(--accent); font-weight: 600; }
+    .stav--sach  { color: var(--danger); }
+    .stav--ai    { color: var(--text-dim); }
+
+    /* ---------------------------------------------------------------
+       Přepínače nastavení. Táž skupina jako u ostatních her ve sbírce:
+       skupina má role="radiogroup", tlačítka role="radio" a aria-checked,
+       tabulátorem se vstupuje na zvolenou položku a šipkami se přepíná. */
+    .nastaveni {
+      width: 100%;
+      margin-top: 0.4rem;
+    }
+
+    .nastaveni__popis {
+      display: block;
+      margin-bottom: 0.25rem;
+      color: var(--text-dim);
+      font-size: 0.68rem;
+      font-weight: 600;
+      text-transform: uppercase;
+      letter-spacing: 0.08em;
+    }
+
+    .prepinace {
+      display: flex;
+      gap: 0.3rem;
+    }
+
+    .prepinac {
+      flex: 1 1 0;
+      min-width: 0;
+      display: flex;
+      flex-direction: column;
+      align-items: center;
+      gap: 0.05rem;
+      padding: 0.35rem 0.25rem;
+      border: 1px solid var(--border);
+      border-radius: var(--radius-sm);
+      background: var(--bg-elev);
+      color: var(--text-dim);
+      font: inherit;
+      line-height: 1.25;
+      cursor: pointer;
+      transition: background 0.15s ease, border-color 0.15s ease, color 0.15s ease;
+    }
+
+    .prepinac:hover {
+      background: var(--bg-elev-hover);
+      border-color: var(--border-hover);
+      color: var(--text);
+    }
+
+    /* Aktivní volba — jiná barva, rám i výplň, ne jen odstín textu. */
+    .prepinac[aria-checked="true"] {
+      background: var(--accent-soft);
+      border-color: var(--accent);
+      color: var(--accent);
+    }
+
+    .prepinac__nazev {
+      font-size: 0.78rem;
+      font-weight: 600;
+    }
+
+    .prepinac__detail {
+      font-family: var(--font-mono);
+      font-size: 0.66rem;
+      opacity: 0.8;
+    }
+
+    .tlacitka {
+      display: flex;
+      flex-wrap: wrap;
+      justify-content: center;
+      gap: 0.5rem;
+    }
+
+    /* ---------------------------------------------------------------
+       Zápis partie. */
+    .panel {
+      width: 100%;
+      max-width: 260px;
+      display: flex;
+      flex-direction: column;
+      gap: 0.5rem;
+    }
+
+    .panel__nadpis {
+      margin: 0;
+      font-size: 0.85rem;
+      font-weight: 600;
+      letter-spacing: 0.03em;
+      text-transform: uppercase;
+      color: var(--text-dim);
+    }
+
+    .zapis {
+      display: grid;
+      grid-template-columns: 2.2rem 1fr 1fr;
+      align-content: start;
+      gap: 0.15rem 0.2rem;
+      max-height: 8rem;
+      overflow-y: auto;
+      padding: 0.5rem;
+      border: 1px solid var(--border);
+      border-radius: var(--radius-sm);
+      background: var(--bg-elev);
+      font-family: var(--font-mono);
+      font-size: 0.9rem;
+    }
+
+    @media (min-width: 820px) {
+      .zapis { max-height: 60vh; }
+    }
+
+    .zapis__cislo {
+      color: var(--text-dim);
+      text-align: right;
+      padding-top: 0.15rem;
+    }
+
+    .zapis__tah {
+      padding: 0.15rem 0.35rem;
+      border: 0;
+      border-radius: 4px;
+      background: none;
+      color: var(--text);
+      font: inherit;
+      text-align: left;
+      cursor: pointer;
+    }
+
+    .zapis__tah:hover,
+    .zapis__tah:focus-visible {
+      background: var(--bg-elev-hover);
+      outline: none;
+    }
+
+    .zapis__tah--aktivni {
+      background: var(--accent-soft);
+      color: var(--accent);
+    }
+
+    .zapis__prazdno {
+      grid-column: 1 / -1;
+      color: var(--text-dim);
+      font-family: var(--font);
+      font-size: 0.85rem;
+    }
+
+    /* Název varianty v zápisu. Přes celý řádek, ne vedle tahu: sloupce
+       zápisu jsou úzké a jméno by je roztáhlo tak, že by se čísla tahů
+       přestala krýt. Píše se jen tam, kde se varianta mění — u každého
+       tahu by z toho byl seznam jmen, ne zápis partie. */
+    .zapis__varianta {
+      grid-column: 1 / -1;
+      margin-top: 0.3rem;
+      color: var(--accent);
+      font-family: var(--font);
+      font-size: 0.75rem;
+    }
+
+    .zapis__varianta:first-child { margin-top: 0; }
+
+    /* Mezera, kterou se po celořádkovém názvu doskáče zpět do sloupce
+       černého. Bez ní by tah černého spadl pod čísla tahů. */
+    .zapis__mezera { grid-column: span 2; }
+
+    /* Stav otvírací knihy. Dokud v ní soupeř je, hraje z hlavy
+       a nepočítá — a je potřeba vidět, kdy z ní vypadl, protože od té
+       chvíle se chová jinak (a začne mu to trvat). */
+    .kniha {
+      margin: 0;
+      display: flex;
+      align-items: center;
+      gap: 0.4rem;
+      font-size: 0.8rem;
+      color: var(--text-dim);
+    }
+
+    .kniha::before {
+      content: '';
+      flex: none;
+      width: 0.45rem;
+      height: 0.45rem;
+      border-radius: 50%;
+      background: currentColor;
+    }
+
+    .kniha--v { color: var(--accent); }
+
+    /* ---------------------------------------------------------------
+       Rozbor partie.
+
+       Barvy jdou od zelené k červené a jsou to tytéž tři, kterými
+       mluví zbytek stránky: zelená je v pořádku, žlutá pozor, červená
+       chyba. Značka je vedle tahu drobná, takže samotný odstín ji
+       neunese — proto má každá kategorie i vlastní znak (★ · ?! ? ??)
+       a nespoléhá se jen na barvu. */
+    :root {
+      --rozbor-nejlepsi:   #4ade80;
+      --rozbor-nepresnost: #eab308;
+      --rozbor-chyba:      #f59e5b;
+      --rozbor-hrubka:     #e0533d;
+      --rozbor-kniha:      #7dd3fc;
+    }
+
+    .rozbor {
+      display: flex;
+      flex-direction: column;
+      gap: 0.5rem;
+      margin-top: 0.5rem;
+    }
+
+    .rozbor__pas {
+      height: 0.4rem;
+      border-radius: 999px;
+      background: var(--bg-elev);
+      border: 1px solid var(--border);
+      overflow: hidden;
+    }
+
+    .rozbor__pas span {
+      display: block;
+      width: 0;
+      height: 100%;
+      background: var(--accent);
+      transition: width 120ms linear;
+    }
+
+    .rozbor__popis {
+      margin: 0.35rem 0 0;
+      font-size: 0.8rem;
+      color: var(--text-dim);
+    }
+
+    .souhrn {
+      display: grid;
+      grid-template-columns: 1fr max-content max-content;
+      gap: 0.2rem 0.6rem;
+      padding: 0.5rem;
+      border: 1px solid var(--border);
+      border-radius: var(--radius-sm);
+      background: var(--bg-elev);
+      font-size: 0.8rem;
+    }
+
+    .souhrn__hlava  { color: var(--text-dim); text-align: right; }
+    .souhrn__cislo  { text-align: right; font-family: var(--font-mono); }
+    .souhrn__nazev  { color: var(--text-dim); }
+
+    .souhrn__prumer {
+      margin-top: 0.3rem;
+      padding-top: 0.3rem;
+      border-top: 1px solid var(--border);
+      color: var(--text);
+    }
+
+    /* Značka kategorie u tahu v zápisu. */
+    .znacka {
+      margin-left: 0.15rem;
+      font-size: 0.85em;
+    }
+
+    .znacka--nejlepsi   { color: var(--rozbor-nejlepsi); }
+    .znacka--dobry      { color: var(--text-dim); }
+    .znacka--nepresnost { color: var(--rozbor-nepresnost); }
+    .znacka--chyba      { color: var(--rozbor-chyba); }
+    .znacka--hrubka     { color: var(--rozbor-hrubka); font-weight: 700; }
+    .znacka--kniha      { color: var(--rozbor-kniha); }
+    .znacka--rozhodnuto { color: var(--text-dim); }
+
+    /* Lepší tah pod tahem, který ho zasloužil. Přes celý řádek ze
+       stejného důvodu jako název varianty: do úzkého sloupce zápisu se
+       nevejde. */
+    .zapis__lepsi {
+      grid-column: 1 / -1;
+      color: var(--text-dim);
+      font-family: var(--font);
+      font-size: 0.75rem;
+      padding-left: 2.4rem;
+    }
+
+
+    /* Prohlížení starší pozice. Deska je v tu chvíli jen obrázek —
+       odbočit se z ní nedá, tak to musí být vidět. */
+    .prohlizeni {
+      display: flex;
+      align-items: center;
+      justify-content: space-between;
+      gap: 0.5rem;
+      padding: 0.4rem 0.6rem;
+      border: 1px solid var(--border);
+      border-radius: var(--radius-sm);
+      background: var(--bg-elev);
+      font-size: 0.85rem;
+      color: var(--text-dim);
+    }
+
+    /* Nabídka rozehrané partie z minula. */
+    .obnova {
+      display: flex;
+      flex-wrap: wrap;
+      align-items: center;
+      justify-content: center;
+      gap: 0.5rem 0.8rem;
+      margin-bottom: 1rem;
+      padding: 0.7rem 0.9rem;
+      border: 1px solid var(--border);
+      border-radius: var(--radius-sm);
+      background: var(--bg-elev);
+      font-size: 0.9rem;
+    }
+
+    .ovladani {
+      display: grid;
+      grid-template-columns: max-content 1fr;
+      gap: 0.35rem 0.9rem;
+      margin: 1.5rem 0 0;
+      font-size: 0.9rem;
+      color: var(--text-dim);
+    }
+
+    .ovladani dt { font-weight: 400; }
+    .ovladani dd { margin: 0; }
+
+    kbd {
+      display: inline-block;
+      padding: 0.1rem 0.4rem;
+      border: 1px solid var(--border);
+      border-bottom-width: 2px;
+      border-radius: 5px;
+      background: var(--bg-elev);
+      font-family: var(--font-mono);
+      font-size: 0.85em;
+      color: var(--text);
+    }
+  </style>
+</head>
+<body>
+  <div class="wrap">
+
+    <a class="back-link" href="../">← Zpět na rozcestník</a>
+
+    <header class="site-header">
+      <h1>Šachy</h1>
+      <p>Partie proti počítači ve třech silách, nebo pro dva u jednoho
+         zařízení. Klepnutím na figuru se ukáže, kam smí, druhé
+         klepnutí tah provede; myší se dá figura i přetáhnout. Zápis
+         vedle desky je proklikávací — kliknutím na tah se deska
+         přepne do té pozice.</p>
+    </header>
+
+    <!-- Nabídka rozehrané partie z minula. Zobrazí ji JS jen tehdy,
+         když v úložišti něco je. -->
+    <div class="obnova" id="obnova" hidden>
+      <span id="obnova-popis">Z minula je rozehraná partie.</span>
+      <button class="btn btn--primary" id="btn-pokracovat" type="button">Pokračovat</button>
+      <button class="btn" id="btn-zahodit" type="button">Začít novou</button>
+    </div>
+
+    <main>
+      <div class="hra">
+
+        <div class="sloupec-desky">
+          <p class="stav" id="stav" aria-live="polite"></p>
+
+          <!-- Deska i popisky staví JS, ať je stavba a obsluha na
+               jednom místě. Panel proměny leží uvnitř obalu, protože
+               se umisťuje nad desku. -->
+          <div class="deska-obal" id="deska-obal">
+            <div class="deska-ramec" id="deska-ramec">
+              <div class="popisky popisky--rady" id="popisky-rady"></div>
+              <div class="deska" id="deska" role="group" aria-label="Šachovnice"></div>
+              <div class="popisky popisky--sloupce" id="popisky-sloupce"></div>
+            </div>
+            <div class="promena" id="promena" hidden>
+              <div class="promena__panel">
+                <p class="promena__popis">Na co pěšce proměnit?</p>
+                <div class="promena__volby" id="promena-volby"></div>
+                <button class="btn" id="btn-promena-zrus" type="button">Zrušit tah</button>
+              </div>
+            </div>
+          </div>
+
+          <div class="tlacitka">
+            <button class="btn btn--primary" id="btn-nova" type="button">Nová partie</button>
+            <button class="btn" id="btn-zpet" type="button">Krok zpět</button>
+            <button class="btn" id="btn-otocit" type="button">Otočit desku</button>
+          </div>
+
+          <!-- Přepínače staví JS ze seznamu voleb, ať je popis
+               nastavení jen na jednom místě. -->
+          <div class="nastaveni">
+            <span class="nastaveni__popis" id="popis-soupere">Soupeř</span>
+            <div class="prepinace" role="radiogroup" aria-labelledby="popis-soupere" id="volba-soupere"></div>
+          </div>
+
+          <!-- Za koho hráč hraje. Ve hře dvou lidí to nedává smysl,
+               tak se to tam schová. -->
+          <div class="nastaveni" id="nastaveni-barva" hidden>
+            <span class="nastaveni__popis" id="popis-barva">Hraješ za</span>
+            <div class="prepinace" role="radiogroup" aria-labelledby="popis-barva" id="volba-barva"></div>
+          </div>
+        </div>
+
+        <div class="panel">
+          <h2 class="panel__nadpis">Zápis partie</h2>
+          <p class="kniha" id="kniha" aria-live="polite" hidden></p>
+          <div class="zapis" id="zapis"></div>
+          <div class="prohlizeni" id="prohlizeni" hidden>
+            <span>Prohlížíš starší pozici.</span>
+            <button class="btn" id="btn-na-konec" type="button">Zpět na partii</button>
+          </div>
+
+          <!-- Rozbor. Ukáže se až s koncem partie a spouští se
+               tlačítkem — je to desítky sekund počítání a nikdo o ně
+               nestojí pokaždé, když domatuje. -->
+          <div class="rozbor" id="rozbor" hidden>
+            <h2 class="panel__nadpis">Rozbor partie</h2>
+            <button class="btn" id="btn-rozbor" type="button">Rozebrat partii</button>
+            <div class="rozbor__prubeh" id="rozbor-prubeh" role="progressbar"
+                 aria-valuemin="0" aria-valuemax="100" aria-label="Průběh rozboru" hidden>
+              <div class="rozbor__pas"><span id="rozbor-pas"></span></div>
+              <p class="rozbor__popis" id="rozbor-popis"></p>
+            </div>
+            <div class="souhrn" id="rozbor-souhrn" hidden></div>
+          </div>
+        </div>
+
+      </div>
+
+      <dl class="ovladani">
+        <dt><kbd>klik</kbd></dt>
+        <dd>vybere figuru a ukáže její tahy, druhý klik tah provede</dd>
+        <dt><kbd>tažení</kbd></dt>
+        <dd>přesune figuru myší rovnou na cílové pole</dd>
+        <dt><kbd>Z</kbd></dt>
+        <dd>vezme poslední tah zpět, i opakovaně</dd>
+        <dt><kbd>Esc</kbd></dt>
+        <dd>zruší výběr figury</dd>
+      </dl>
+    </main>
+
+  </div>
+
+  <!-- Sada figur. Tvary jsou kreslené, ne psané unicode znaky: ty se
+       na každém systému vykreslí jiným fontem, na některých je bílá
+       figura obrys bez výplně a splyne se světlým polem. Kresba drží
+       obrys i výplň pod kontrolou a nezávisí na tom, co má systém
+       nainstalované.
+
+       Symboly se používají přes <use>. Do jeho stínového stromu se
+       pravidly z dokumentu sáhnout nedá, takže výplň a obrys se dovnitř
+       dostávají dědičností (fill, stroke, color) — a detaily, které mají
+       mít barvu obrysu, si o ni říkají přes currentColor. -->
+  <svg style="position:absolute;width:0;height:0;overflow:hidden" aria-hidden="true" focusable="false">
+    <!-- Pěšec: hlava, krk a zvonovité tělo. -->
+    <symbol id="f-p" viewBox="0 0 45 45">
+      <path d="M22.5 10.5c-2.4 0-4.3 1.9-4.3 4.3 0 1 .3 1.9.9 2.6-2.2 1.2-3.7 3.5-3.7 6.2 0
+               2.6 1.4 4.9 3.6 6.2-3 1.6-5.3 4.4-6.4 7.8-.3.9-.5 1.8-.6 2.9h21c-.1-1.1-.3-2-.6-2.9-1.1-3.4-3.4-6.2-6.4-7.8
+               2.2-1.3 3.6-3.6 3.6-6.2 0-2.7-1.5-5-3.7-6.2.6-.7.9-1.6.9-2.6 0-2.4-1.9-4.3-4.3-4.3z"/>
+    </symbol>
+
+    <!-- Věž: podstavec, dřík a cimbuří se třemi stínkami. -->
+    <symbol id="f-r" viewBox="0 0 45 45">
+      <path d="M9.5 39.5h26V36h-26z"/>
+      <path d="M12.5 36v-2.5h20V36z"/>
+      <path d="M14.5 33.5V22h16v11.5z"/>
+      <path d="M11.5 22v-8.5H16v3h4v-3h5v3h4v-3h4.5V22z"/>
+    </symbol>
+
+    <!-- Jezdec: koňská hlava na podstavci jako věž a král, aby vedle
+         nich nepůsobil drobně — mohutná lebka, silný krk a základna
+         přes celou šířku figury.
+
+         Kresba kouká doleva; bílý jezdec se zrcadlí v nastavSvg, ať
+         oba koukají směrem k soupeři. Zrcadlí se <use>, ne tahle
+         předloha — jedna kresba, dvě orientace.
+
+         Oko je kolečko v barvě obrysu, jinak by hlava byla placka. -->
+    <symbol id="f-n" viewBox="0 0 45 45">
+      <path d="M34 36C34.2 26.6 32.8 18.4 29.6 13C29 12 29.1 11.3 29.4 10.6L32.2
+               6.4L27 9.2L25 5.8L22.8 11.4C19.2 10.2 15.5 11.7 12.4 15.4C10 18.3
+               8.4 21.5 7.9 24.8C7.6 27 9 28.4 11 27.8C12.8 27.2 14.2 25.8 15.6
+               23.6L18 20C19.8 22.8 20.6 25.4 20.6 27.8C20.6 31.6 17.4 34.2 11.8 36Z"/>
+      <circle cx="14.6" cy="18.6" r="1.6" fill="currentColor" stroke="none"/>
+      <path d="M9.5 39.5h26V36h-26z"/>
+    </symbol>
+
+    <!-- Střelec: úzká mitra se zářezem, knoflík a podstavec.
+
+         Proti králi je schválně o poznání užší (tělo 15–30 místo
+         10–35) a špičatý, ne zaoblený: král a střelec jsou jediné dvě
+         figury, které si můžou splynout, a rozdíl musí být poznat
+         z obrysu, ne až z detailu na vrcholku. -->
+    <symbol id="f-b" viewBox="0 0 45 45">
+      <path d="M11 39.5h23V36H11z"/>
+      <path d="M14.5 36c0-2 1.9-3.4 4.6-4-2.4-1.6-3.8-4-3.8-6.9 0-4.4 2.8-8.4 7.2-12.4
+               4.4 4 7.2 8 7.2 12.4 0 2.9-1.4 5.3-3.8 6.9 2.7.6 4.6 2 4.6 4z"/>
+      <circle cx="22.5" cy="9.4" r="2.4"/>
+      <path d="M19.6 23.8l5.8-6.2" fill="none" stroke-width="1.8"/>
+      <path d="M18.6 32h7.8" fill="none"/>
+    </symbol>
+
+    <!-- Dáma: pět kuliček na hrotech koruny, sukně a podstavec. -->
+    <symbol id="f-q" viewBox="0 0 45 45">
+      <circle cx="7.6" cy="13.6" r="2.4"/>
+      <circle cx="15" cy="10.5" r="2.4"/>
+      <circle cx="22.5" cy="9" r="2.7"/>
+      <circle cx="30" cy="10.5" r="2.4"/>
+      <circle cx="37.4" cy="13.6" r="2.4"/>
+      <path d="M11.5 26L7.8 15.3l5.7 5.7L15 12.9l4.4 8.6 3.1-9.9 3.1 9.9 4.4-8.6
+               1.5 8.1 5.7-5.7L33.5 26z"/>
+      <path d="M11.5 26c-1 3.5-1.3 6.5-1 9h24c.3-2.5 0-5.5-1-9z"/>
+      <path d="M9.5 39.5h26V36h-26z"/>
+    </symbol>
+
+    <!-- Král: vysoký kříž, koruna se třemi hroty, široké tělo
+         a podstavec.
+
+         Koruna a kříž jsou tu proto, aby král nesplynul se střelcem
+         ani s dámou. Kříž je vysoký a tlustý (sahá až k hornímu
+         okraji pole), koruna má zuby jako věž a tělo je nejširší
+         ze všech figur — vedle úzkého střelce je to jiná silueta
+         už na první pohled.
+
+         Kříž je plocha, ne tažená čára. Čára by se obarvila obrysem
+         a u černého krále by nad černým tělem svítil celý bílý kříž
+         jako cizí předmět; jako plocha má výplň i obrys stejné jako
+         zbytek figury. Dolů zajíždí pod hrot koruny, ať z ní
+         vyrůstá a nelevituje. -->
+    <symbol id="f-k" viewBox="0 0 45 45">
+      <path d="M20.6 3.2h3.8v3.4h3.4v3.8h-3.4V17h-3.8v-6.6h-3.4V6.6h3.4z"/>
+      <path d="M12.5 22.5V13.5l5 6 5-7 5 7 5-6v9z"/>
+      <path d="M12.5 22.5c-2.5 2-3.9 4.4-3.9 7.2 0 2.4.7 4.4 2 6.3H34.4c1.3-1.9
+               2-3.9 2-6.3 0-2.8-1.4-5.2-3.9-7.2z"/>
+      <path d="M12 30.5c6.6-2.6 14.4-2.6 21 0" fill="none"/>
+      <path d="M9.5 39.5h26V36h-26z"/>
+    </symbol>
+  </svg>
+
+<script data-engine>
+(function () {
+  'use strict';
+
+  /* Globální objekt prostředí: v okně window, ve web workeru self.
+     Rozbor partie pouští engine ve workeru a bez tohohle by se v něm
+     modul neměl kam vyvěsit. */
+  var GLOB = (typeof window !== 'undefined') ? window
+           : (typeof self !== 'undefined') ? self : null;
+
+  /* ===============================================================
+     ŠACHOVÝ ENGINE — pravidla a generátor tahů
+
+     Etapa jedna: žádné UI. Všechno, co je tu napsané, se dá ověřit
+     z konzole, a taky se to tam na konci souboru ověřuje.
+
+     Deska je pole 64 čísel. Index 0 je a8, index 63 je h1 — tedy
+     stejné pořadí, v jakém se čte FEN i v jakém se deska kreslí
+     shora dolů. Z indexu se řada a sloupec počítají posunem:
+
+         rada(i)    = i >> 3     0 = osmá řada,  7 = první
+         sloupec(i) = i & 7      0 = sloupec a,  7 = sloupec h
+
+     Bílý táhne směrem k osmé řadě, tedy k nižším indexům (-8).
+     --------------------------------------------------------------- */
+
+  /* Figura je jedno číslo: spodní tři bity typ, nad nimi barva.
+     Díky tomu se barva i typ dají vytáhnout jednou maskou a dvě
+     figury se dají porovnat jediným === — což generátor dělá
+     v nejteplejší smyčce. Prázdné pole je nula. */
+  var PRAZDNO = 0;
+
+  var PESEC   = 1;
+  var JEZDEC  = 2;
+  var STRELEC = 3;
+  var VEZ     = 4;
+  var DAMA    = 5;
+  var KRAL    = 6;
+
+  var BILA  = 8;
+  var CERNA = 16;
+
+  var TYP_MASKA   = 7;
+  var BARVA_MASKA = 24;
+
+  function typ(f)   { return f & TYP_MASKA; }
+  function barva(f) { return f & BARVA_MASKA; }
+  function soupere(b) { return b === BILA ? CERNA : BILA; }
+
+  /* Práva na rošádu jako čtyři bity v jednom čísle. Čtyři samostatné
+     příznaky by se musely při každém tahu zvlášť gumovat; takhle je
+     to jedno &= s maskou pole (viz MASKA_ROSAD níž). */
+  var ROSADA_BK = 1;   // bílá krátká (král na g1)
+  var ROSADA_BD = 2;   // bílá dlouhá (král na c1)
+  var ROSADA_CK = 4;   // černá krátká
+  var ROSADA_CD = 8;   // černá dlouhá
+
+  /* Druh tahu. Rozlišit se musí jen ty, které dělají něco navíc:
+     dvojkrok zakládá právo brát mimochodem, braní mimochodem bere
+     figuru z jiného pole, než na které se táhne, a rošáda hýbe
+     zároveň věží. */
+  var TAH_NORMALNI   = 0;
+  var TAH_DVOJKROK   = 1;
+  var TAH_MIMOCHODEM = 2;
+  var TAH_ROSADA     = 3;
+
+  var ZAKLADNI_FEN =
+    'rnbqkbnr/pppppppp/8/8/8/8/PPPPPPPP/RNBQKBNR w KQkq - 0 1';
+
+  /* Pojmenovaná pole, na kterých stojí rošáda. Holá čísla by se četla
+     mizerně a překlep v jednom z nich se hledá dlouho. */
+  var A8 = 0,  E8 = 4,  H8 = 7;
+  var A1 = 56, E1 = 60, H1 = 63;
+
+  /* ---------------------------------------------------------------
+     Souřadnice a názvy polí. */
+
+  function rada(i)    { return i >> 3; }
+  function sloupec(i) { return i & 7; }
+
+  function pole(r, s) { return r * 8 + s; }
+
+  function naDesce(r, s) { return r >= 0 && r < 8 && s >= 0 && s < 8; }
+
+  function jmenoPole(i) {
+    return 'abcdefgh'.charAt(sloupec(i)) + (8 - rada(i));
+  }
+
+  function poleZeJmena(t) {
+    var s = t.charCodeAt(0) - 97;            // 'a'
+    var r = 8 - (t.charCodeAt(1) - 48);      // '1'
+    return naDesce(r, s) ? pole(r, s) : -1;
+  }
+
+  /* ---------------------------------------------------------------
+     Předpočítané tabulky pohybu.
+
+     Skok jezdce a krok krále se dají pro každé pole vyjmenovat
+     dopředu; totéž paprsky dam, věží a střelců. Generátor pak
+     nemusí u každého tahu hlídat, jestli figura nepřeteče přes okraj
+     desky do vedlejší řady — což je klasická chyba mailboxové
+     reprezentace, kde je deska jen jednorozměrné pole.
+
+     Pořadí směrů: 0–3 úhlopříčky, 4–7 svislice a vodorovnice.
+     Střelec bere první čtyři, věž druhé čtyři, dáma všech osm. */
+
+  var SMERY = [
+    [-1, -1], [-1, 1], [1, -1], [1, 1],
+    [-1,  0], [ 1, 0], [0, -1], [0, 1]
+  ];
+  var PRVNI_KOSY = 0, POSLEDNI_KOSY = 3;
+  var PRVNI_PRIMY = 4, POSLEDNI_PRIMY = 7;
+
+  var SKOKY_JEZDCE = [
+    [-2, -1], [-2, 1], [-1, -2], [-1, 2],
+    [ 1, -2], [ 1, 2], [ 2, -1], [ 2, 1]
+  ];
+
+  var TAB_JEZDEC = [];   // TAB_JEZDEC[pole] = pole, kam jezdec doskočí
+  var TAB_KRAL   = [];   // totéž pro krále
+  var PAPRSKY    = [];   // PAPRSKY[pole][směr] = pole v řadě za sebou
+
+  /* Pole, která z daného pole napadá pěšec. Používá se dvakrát:
+     jednou na generování braní, podruhé obráceně při hledání šachu —
+     bílým pěšcem je pole napadené právě tehdy, když na některém
+     z polí, kam by odtud útočil pěšec ČERNÝ, stojí bílý pěšec. */
+  var TAB_UTOK_BILA  = [];
+  var TAB_UTOK_CERNA = [];
+
+  (function predpocitej() {
+    var i, k, r, s, rr, ss, seznam, paprsek, smer;
+
+    for (i = 0; i < 64; i++) {
+      r = rada(i);
+      s = sloupec(i);
+
+      seznam = [];
+      for (k = 0; k < SKOKY_JEZDCE.length; k++) {
+        rr = r + SKOKY_JEZDCE[k][0];
+        ss = s + SKOKY_JEZDCE[k][1];
+        if (naDesce(rr, ss)) { seznam.push(pole(rr, ss)); }
+      }
+      TAB_JEZDEC[i] = seznam;
+
+      seznam = [];
+      for (k = 0; k < SMERY.length; k++) {
+        rr = r + SMERY[k][0];
+        ss = s + SMERY[k][1];
+        if (naDesce(rr, ss)) { seznam.push(pole(rr, ss)); }
+      }
+      TAB_KRAL[i] = seznam;
+
+      PAPRSKY[i] = [];
+      for (k = 0; k < SMERY.length; k++) {
+        smer = SMERY[k];
+        paprsek = [];
+        rr = r + smer[0];
+        ss = s + smer[1];
+        while (naDesce(rr, ss)) {
+          paprsek.push(pole(rr, ss));
+          rr += smer[0];
+          ss += smer[1];
+        }
+        PAPRSKY[i][k] = paprsek;
+      }
+
+      seznam = [];
+      if (naDesce(r - 1, s - 1)) { seznam.push(pole(r - 1, s - 1)); }
+      if (naDesce(r - 1, s + 1)) { seznam.push(pole(r - 1, s + 1)); }
+      TAB_UTOK_BILA[i] = seznam;
+
+      seznam = [];
+      if (naDesce(r + 1, s - 1)) { seznam.push(pole(r + 1, s - 1)); }
+      if (naDesce(r + 1, s + 1)) { seznam.push(pole(r + 1, s + 1)); }
+      TAB_UTOK_CERNA[i] = seznam;
+    }
+  }());
+
+  /* Maska práv na rošádu podle pole, ze kterého se táhne nebo na
+     které se táhne. Král i věž ztrácejí právo tím, že se hnou;
+     obránce ho ale ztrácí i tím, že mu soupeř věž na rohovém poli
+     sebere — a právě na to se v generátorech zapomíná nejčastěji.
+     Proto se maska aplikuje na výchozí i cílové pole každého tahu. */
+  var MASKA_ROSAD = [];
+  (function maskyRosad() {
+    for (var i = 0; i < 64; i++) { MASKA_ROSAD[i] = 15; }
+    MASKA_ROSAD[E1] = 15 & ~(ROSADA_BK | ROSADA_BD);
+    MASKA_ROSAD[H1] = 15 & ~ROSADA_BK;
+    MASKA_ROSAD[A1] = 15 & ~ROSADA_BD;
+    MASKA_ROSAD[E8] = 15 & ~(ROSADA_CK | ROSADA_CD);
+    MASKA_ROSAD[H8] = 15 & ~ROSADA_CK;
+    MASKA_ROSAD[A8] = 15 & ~ROSADA_CD;
+  }());
+
+  /* ---------------------------------------------------------------
+     FEN — čtení a zápis pozice.
+
+     Kromě rozestavení nese FEN i všechen stav navíc: kdo je na tahu,
+     práva na rošádu, pole pro braní mimochodem, počítadlo půltahů
+     a číslo tahu. Bez něj by se pravidla nedala testovat — každá
+     testovací pozice by se musela stavět ručně. */
+
+  var ZNAKY_FIGUR = {
+    p: PESEC, n: JEZDEC, b: STRELEC, r: VEZ, q: DAMA, k: KRAL
+  };
+
+  function znakFigury(f) {
+    var pismeno = ' pnbrqk'.charAt(typ(f));
+    return barva(f) === BILA ? pismeno.toUpperCase() : pismeno;
+  }
+
+  function zFen(fen) {
+    var casti = String(fen).trim().split(/\s+/);
+    var rady  = casti[0].split('/');
+    var deska = [];
+    var i, r, s, k, znak, prazdno;
+
+    for (i = 0; i < 64; i++) { deska[i] = PRAZDNO; }
+
+    if (rady.length !== 8) { throw new Error('FEN: deska nemá osm řad'); }
+
+    for (r = 0; r < 8; r++) {
+      s = 0;
+      for (k = 0; k < rady[r].length; k++) {
+        znak = rady[r].charAt(k);
+        prazdno = parseInt(znak, 10);
+        if (prazdno >= 1 && prazdno <= 8) {
+          s += prazdno;
+        } else {
+          if (!ZNAKY_FIGUR[znak.toLowerCase()]) {
+            throw new Error('FEN: neznámý znak "' + znak + '"');
+          }
+          if (s > 7) { throw new Error('FEN: řada je delší než osm polí'); }
+          deska[pole(r, s)] = ZNAKY_FIGUR[znak.toLowerCase()] |
+                              (znak === znak.toUpperCase() ? BILA : CERNA);
+          s++;
+        }
+      }
+      if (s !== 8) { throw new Error('FEN: řada nemá osm polí'); }
+    }
+
+    var prava = casti[2] || '-';
+    var rosady = 0;
+    if (prava.indexOf('K') >= 0) { rosady |= ROSADA_BK; }
+    if (prava.indexOf('Q') >= 0) { rosady |= ROSADA_BD; }
+    if (prava.indexOf('k') >= 0) { rosady |= ROSADA_CK; }
+    if (prava.indexOf('q') >= 0) { rosady |= ROSADA_CD; }
+
+    /* Poslední dvě čísla ve FEN chybět můžou — testovací pozice se
+       často opisují bez nich. Nula a jednička jsou rozumný výchozí
+       stav a na generování tahů vliv nemají. */
+    var pozice = {
+      deska:      deska,
+      naTahu:     (casti[1] === 'b') ? CERNA : BILA,
+      rosady:     rosady,
+      mimochodem: (casti[3] && casti[3] !== '-') ? poleZeJmena(casti[3]) : -1,
+      pulTahy:    casti[4] !== undefined ? parseInt(casti[4], 10) : 0,
+      tah:        casti[5] !== undefined ? parseInt(casti[5], 10) : 1,
+      kralBila:   -1,
+      kralCerna:  -1,
+      historie:   []
+    };
+
+    /* Pole králů si pozice pamatuje, protože se na ně ptá každý
+       jediný vygenerovaný tah (stojí po něm vlastní král v šachu?).
+       Prohledávat kvůli tomu pokaždé celou desku by perft zpomalilo
+       o řád. */
+    for (i = 0; i < 64; i++) {
+      if (deska[i] === (KRAL | BILA))  { pozice.kralBila = i; }
+      if (deska[i] === (KRAL | CERNA)) { pozice.kralCerna = i; }
+    }
+
+    pozice.historie.push(klic(pozice));
+    return pozice;
+  }
+
+  function doFen(poz) {
+    var casti = [];
+    var radky = [];
+    var r, s, i, prazdno, radek, prava;
+
+    for (r = 0; r < 8; r++) {
+      radek = '';
+      prazdno = 0;
+      for (s = 0; s < 8; s++) {
+        i = pole(r, s);
+        if (poz.deska[i] === PRAZDNO) {
+          prazdno++;
+        } else {
+          if (prazdno) { radek += prazdno; prazdno = 0; }
+          radek += znakFigury(poz.deska[i]);
+        }
+      }
+      if (prazdno) { radek += prazdno; }
+      radky.push(radek);
+    }
+    casti.push(radky.join('/'));
+    casti.push(poz.naTahu === BILA ? 'w' : 'b');
+
+    prava = '';
+    if (poz.rosady & ROSADA_BK) { prava += 'K'; }
+    if (poz.rosady & ROSADA_BD) { prava += 'Q'; }
+    if (poz.rosady & ROSADA_CK) { prava += 'k'; }
+    if (poz.rosady & ROSADA_CD) { prava += 'q'; }
+    casti.push(prava || '-');
+
+    casti.push(poz.mimochodem >= 0 ? jmenoPole(poz.mimochodem) : '-');
+    casti.push(String(poz.pulTahy));
+    casti.push(String(poz.tah));
+
+    return casti.join(' ');
+  }
+
+  function novaPozice() { return zFen(ZAKLADNI_FEN); }
+
+  /* Klíč pozice pro opakování tahů. Pravidlo mluví o stejné pozici se
+     stejnými možnostmi tahu, takže do klíče patří i barva na tahu,
+     práva na rošádu a pole pro braní mimochodem — ale ne počítadla,
+     ta se stejnou pozicí nesouvisejí. Je to prostě FEN bez posledních
+     dvou čísel. */
+  function klic(poz) {
+    return doFen(poz).split(' ').slice(0, 4).join(' ');
+  }
+
+  /* ---------------------------------------------------------------
+     Napadená pole.
+
+     Odpovídá na jedinou otázku: útočí barva `utocnik` na pole `p`?
+     Na tom stojí šach, mat i rošáda. Hledá se od pole ven, ne od
+     figur k poli — je to jedna smyčka místo procházení celé desky. */
+
+  function jeNapadeno(deska, p, utocnik) {
+    var i, k, f, cil, paprsek;
+
+    var jezdec = utocnik | JEZDEC;
+    cil = TAB_JEZDEC[p];
+    for (i = 0; i < cil.length; i++) {
+      if (deska[cil[i]] === jezdec) { return true; }
+    }
+
+    var kral = utocnik | KRAL;
+    cil = TAB_KRAL[p];
+    for (i = 0; i < cil.length; i++) {
+      if (deska[cil[i]] === kral) { return true; }
+    }
+
+    /* Pěšci: bílý pěšec napadá pole odspodu, takže stojí tam, kam by
+       z toho pole útočil pěšec černý. Odtud ta prohozená tabulka. */
+    var pesec = utocnik | PESEC;
+    cil = (utocnik === BILA) ? TAB_UTOK_CERNA[p] : TAB_UTOK_BILA[p];
+    for (i = 0; i < cil.length; i++) {
+      if (deska[cil[i]] === pesec) { return true; }
+    }
+
+    var dama = utocnik | DAMA;
+
+    var strelec = utocnik | STRELEC;
+    for (k = PRVNI_KOSY; k <= POSLEDNI_KOSY; k++) {
+      paprsek = PAPRSKY[p][k];
+      for (i = 0; i < paprsek.length; i++) {
+        f = deska[paprsek[i]];
+        if (f !== PRAZDNO) {
+          if (f === strelec || f === dama) { return true; }
+          break;
+        }
+      }
+    }
+
+    var vez = utocnik | VEZ;
+    for (k = PRVNI_PRIMY; k <= POSLEDNI_PRIMY; k++) {
+      paprsek = PAPRSKY[p][k];
+      for (i = 0; i < paprsek.length; i++) {
+        f = deska[paprsek[i]];
+        if (f !== PRAZDNO) {
+          if (f === vez || f === dama) { return true; }
+          break;
+        }
+      }
+    }
+
+    return false;
+  }
+
+  function poleKrale(poz, b) {
+    return (b === BILA) ? poz.kralBila : poz.kralCerna;
+  }
+
+  function jeVSachu(poz, b) {
+    return jeNapadeno(poz.deska, poleKrale(poz, b), soupere(b));
+  }
+
+  /* ---------------------------------------------------------------
+     Tahy. */
+
+  function novyTah(z, na, figura, brana, povyseni, priznak) {
+    return {
+      z: z,
+      na: na,
+      figura: figura,
+      brana: brana,
+      povyseni: povyseni,
+      priznak: priznak
+    };
+  }
+
+  /* Dlouhá algebraická notace, e2e4 a e7e8q. Krátká notace se sem
+     zatím neplete: na testy a na výpis rozdílů v perftu je tahle
+     jednoznačná a nemusí se kvůli ní řešit rozlišování figur. */
+  function zapisTah(t) {
+    return jmenoPole(t.z) + jmenoPole(t.na) +
+           (t.povyseni ? ' pnbrqk'.charAt(t.povyseni) : '');
+  }
+
+  var POVYSENI = [DAMA, VEZ, STRELEC, JEZDEC];
+
+  /* Algebraická notace, tedy to, co se píše do zápisu partie: Nf3,
+     exd5, O-O, e8=Q+, Rae1. Počítá se z pozice PŘED tahem, protože
+     potřebuje vědět, které další figury mohly na totéž pole — a hned
+     potom z pozice PO tahu, aby doplnila šach nebo mat.
+
+     Rozlišovací znak (to „a“ v Rae1) je jediné ošidné místo: nestačí,
+     že na pole může víc figur téhož druhu. Když se liší sloupcem, píše
+     se sloupec; když sloupec sdílejí, píše se řada; a teprve když se
+     shodují v obojím — což potkáš u tří dam z proměn — píše se celé
+     pole. Bere se přitom v úvahu jen tah legální: vázaná věž na pole
+     nemůže, takže se kvůli ní nic nerozlišuje. */
+  function zapisSan(poz, t) {
+    var s;
+    var tf = typ(t.figura);
+    var zpet, sach, mat;
+
+    if (t.priznak === TAH_ROSADA) {
+      s = (sloupec(t.na) === 6) ? 'O-O' : 'O-O-O';
+    } else if (tf === PESEC) {
+      s = '';
+      if (t.brana !== PRAZDNO || t.priznak === TAH_MIMOCHODEM) {
+        s += 'abcdefgh'.charAt(sloupec(t.z)) + 'x';
+      }
+      s += jmenoPole(t.na);
+      if (t.povyseni) { s += '=' + ' PNBRQK'.charAt(t.povyseni); }
+    } else {
+      s = ' PNBRQK'.charAt(tf);
+
+      var jine = [];
+      var ostatni = legalniTahy(poz);
+      var i, x;
+      for (i = 0; i < ostatni.length; i++) {
+        x = ostatni[i];
+        if (x.na === t.na && x.z !== t.z && typ(x.figura) === tf) { jine.push(x); }
+      }
+      if (jine.length) {
+        var sloupecStaci = true, radaStaci = true;
+        for (i = 0; i < jine.length; i++) {
+          if (sloupec(jine[i].z) === sloupec(t.z)) { sloupecStaci = false; }
+          if (rada(jine[i].z) === rada(t.z))       { radaStaci = false; }
+        }
+        if (sloupecStaci)   { s += 'abcdefgh'.charAt(sloupec(t.z)); }
+        else if (radaStaci) { s += String(8 - rada(t.z)); }
+        else                { s += jmenoPole(t.z); }
+      }
+
+      if (t.brana !== PRAZDNO) { s += 'x'; }
+      s += jmenoPole(t.na);
+    }
+
+    zpet = proved(poz, t);
+    sach = jeVSachu(poz, poz.naTahu);
+    mat  = sach && legalniTahy(poz).length === 0;
+    vrat(poz, t, zpet);
+
+    return s + (mat ? '#' : (sach ? '+' : ''));
+  }
+
+  /* ---------------------------------------------------------------
+     Pseudo-legální tahy.
+
+     Pseudo-legální znamená „podle pohybu figury správný, ale ještě se
+     nekoukalo na vlastního krále“. Vázaná figura se tady zahrnout
+     musí — odfiltruje ji až legalniTahy(). */
+
+  function pridejPescovy(seznam, deska, z, na, brana, priznak) {
+    var cilovaRada = rada(na);
+    var i;
+    /* Poslední řada znamená proměnu, a to hned ve čtyřech variantách.
+       Věž a střelec vypadají jako zbytečnost, ale právě jimi se dá
+       vyhnout patu — a v perftu se každá chybějící varianta pozná. */
+    if (cilovaRada === 0 || cilovaRada === 7) {
+      for (i = 0; i < POVYSENI.length; i++) {
+        seznam.push(novyTah(z, na, deska[z], brana, POVYSENI[i], priznak));
+      }
+    } else {
+      seznam.push(novyTah(z, na, deska[z], brana, 0, priznak));
+    }
+  }
+
+  function generujPseudo(poz) {
+    var seznam = [];
+    var deska = poz.deska;
+    var b = poz.naTahu;
+    var soup = soupere(b);
+    var vpred = (b === BILA) ? -8 : 8;
+    var radaStartu = (b === BILA) ? 6 : 1;
+    var i, k, j, f, t, cil, cilovy, paprsek, prvni, posledni;
+
+    for (i = 0; i < 64; i++) {
+      f = deska[i];
+      if (f === PRAZDNO || barva(f) !== b) { continue; }
+      t = typ(f);
+
+      if (t === PESEC) {
+        /* Krok vpřed, a z výchozí řady i dvojkrok. Přes figuru se
+           nepřeskakuje ani prvním, ani druhým polem. */
+        if (deska[i + vpred] === PRAZDNO) {
+          pridejPescovy(seznam, deska, i, i + vpred, PRAZDNO, TAH_NORMALNI);
+          if (rada(i) === radaStartu && deska[i + 2 * vpred] === PRAZDNO) {
+            seznam.push(novyTah(i, i + 2 * vpred, f, PRAZDNO, 0, TAH_DVOJKROK));
+          }
+        }
+        cil = (b === BILA) ? TAB_UTOK_BILA[i] : TAB_UTOK_CERNA[i];
+        for (k = 0; k < cil.length; k++) {
+          cilovy = cil[k];
+          if (deska[cilovy] !== PRAZDNO) {
+            if (barva(deska[cilovy]) === soup) {
+              pridejPescovy(seznam, deska, i, cilovy, deska[cilovy], TAH_NORMALNI);
+            }
+          } else if (cilovy === poz.mimochodem) {
+            /* Braní mimochodem. Braný pěšec nestojí na cílovém poli,
+               ale vedle něj — proto vlastní druh tahu. Právo platí jen
+               teď hned: pole poz.mimochodem zakládá dvojkrok a hned
+               následující tah ho zase ruší. */
+            seznam.push(novyTah(i, cilovy, f, PESEC | soup, 0, TAH_MIMOCHODEM));
+          }
+        }
+        continue;
+      }
+
+      if (t === JEZDEC) {
+        cil = TAB_JEZDEC[i];
+        for (k = 0; k < cil.length; k++) {
+          if (deska[cil[k]] === PRAZDNO || barva(deska[cil[k]]) === soup) {
+            seznam.push(novyTah(i, cil[k], f, deska[cil[k]], 0, TAH_NORMALNI));
+          }
+        }
+        continue;
+      }
+
+      if (t === KRAL) {
+        cil = TAB_KRAL[i];
+        for (k = 0; k < cil.length; k++) {
+          if (deska[cil[k]] === PRAZDNO || barva(deska[cil[k]]) === soup) {
+            seznam.push(novyTah(i, cil[k], f, deska[cil[k]], 0, TAH_NORMALNI));
+          }
+        }
+        continue;
+      }
+
+      /* Dáma, věž a střelec se liší jen tím, které paprsky berou. */
+      prvni    = (t === VEZ)     ? PRVNI_PRIMY   : PRVNI_KOSY;
+      posledni = (t === STRELEC) ? POSLEDNI_KOSY : POSLEDNI_PRIMY;
+      for (k = prvni; k <= posledni; k++) {
+        paprsek = PAPRSKY[i][k];
+        for (j = 0; j < paprsek.length; j++) {
+          cilovy = paprsek[j];
+          if (deska[cilovy] === PRAZDNO) {
+            seznam.push(novyTah(i, cilovy, f, PRAZDNO, 0, TAH_NORMALNI));
+          } else {
+            if (barva(deska[cilovy]) === soup) {
+              seznam.push(novyTah(i, cilovy, f, deska[cilovy], 0, TAH_NORMALNI));
+            }
+            break;      // za figuru se paprsek nedostane
+          }
+        }
+      }
+    }
+
+    generujRosady(seznam, poz);
+    return seznam;
+  }
+
+  /* Rošáda má pět podmínek a každá se dá zapomenout:
+     1. král ani ta věž se ještě nehnuly (drží práva v poz.rosady),
+     2. mezi nimi je volno,
+     3. král nestojí v šachu,
+     4. NEPROCHÁZÍ napadeným polem,
+     5. nekončí v šachu.
+
+     Poslední podmínku by odchytil i společný filtr v legalniTahy(),
+     ale třetí a čtvrtá jsou vlastní jen rošádě — ty se musí ověřit
+     tady. Když jsou splněné všechny, je vygenerovaný tah rovnou
+     legální. */
+  function generujRosady(seznam, poz) {
+    var deska = poz.deska;
+    var b = poz.naTahu;
+    var soup = soupere(b);
+
+    if (b === BILA) {
+      if ((poz.rosady & ROSADA_BK) &&
+          deska[E1] === (KRAL | BILA) && deska[H1] === (VEZ | BILA) &&
+          deska[61] === PRAZDNO && deska[62] === PRAZDNO &&
+          !jeNapadeno(deska, E1, soup) &&
+          !jeNapadeno(deska, 61, soup) &&
+          !jeNapadeno(deska, 62, soup)) {
+        seznam.push(novyTah(E1, 62, KRAL | BILA, PRAZDNO, 0, TAH_ROSADA));
+      }
+      if ((poz.rosady & ROSADA_BD) &&
+          deska[E1] === (KRAL | BILA) && deska[A1] === (VEZ | BILA) &&
+          deska[59] === PRAZDNO && deska[58] === PRAZDNO && deska[57] === PRAZDNO &&
+          !jeNapadeno(deska, E1, soup) &&
+          !jeNapadeno(deska, 59, soup) &&
+          !jeNapadeno(deska, 58, soup)) {
+        /* Pole b1 (57) napadené být smí. Král přes ně nejde, jde přes
+           ně jen věž — a té ohrožení nevadí. */
+        seznam.push(novyTah(E1, 58, KRAL | BILA, PRAZDNO, 0, TAH_ROSADA));
+      }
+    } else {
+      if ((poz.rosady & ROSADA_CK) &&
+          deska[E8] === (KRAL | CERNA) && deska[H8] === (VEZ | CERNA) &&
+          deska[5] === PRAZDNO && deska[6] === PRAZDNO &&
+          !jeNapadeno(deska, E8, soup) &&
+          !jeNapadeno(deska, 5, soup) &&
+          !jeNapadeno(deska, 6, soup)) {
+        seznam.push(novyTah(E8, 6, KRAL | CERNA, PRAZDNO, 0, TAH_ROSADA));
+      }
+      if ((poz.rosady & ROSADA_CD) &&
+          deska[E8] === (KRAL | CERNA) && deska[A8] === (VEZ | CERNA) &&
+          deska[3] === PRAZDNO && deska[2] === PRAZDNO && deska[1] === PRAZDNO &&
+          !jeNapadeno(deska, E8, soup) &&
+          !jeNapadeno(deska, 3, soup) &&
+          !jeNapadeno(deska, 2, soup)) {
+        seznam.push(novyTah(E8, 2, KRAL | CERNA, PRAZDNO, 0, TAH_ROSADA));
+      }
+    }
+  }
+
+  /* ---------------------------------------------------------------
+     Provedení a vrácení tahu.
+
+     Pozice se nekopíruje, mění se na místě — perft do hloubky pět
+     provede skoro pět milionů tahů a kopírovat u každého desku by
+     bylo zbytečné. Návratový záznam nese všechno, co se z pozice
+     zpětně dopočítat nedá. */
+
+  var VEZ_PRI_ROSADE = {};        // cílové pole krále -> [odkud věž, kam věž]
+  VEZ_PRI_ROSADE[62] = [H1, 61];
+  VEZ_PRI_ROSADE[58] = [A1, 59];
+  VEZ_PRI_ROSADE[6]  = [H8, 5];
+  VEZ_PRI_ROSADE[2]  = [A8, 3];
+
+  function proved(poz, t) {
+    var deska = poz.deska;
+    var b = barva(t.figura);
+    var zpet = {
+      rosady:     poz.rosady,
+      mimochodem: poz.mimochodem,
+      pulTahy:    poz.pulTahy,
+      branePole:  -1,
+      brana:      PRAZDNO
+    };
+    var vez, braneP;
+
+    if (t.priznak === TAH_MIMOCHODEM) {
+      braneP = t.na + (b === BILA ? 8 : -8);
+      zpet.branePole = braneP;
+      zpet.brana = deska[braneP];
+      deska[braneP] = PRAZDNO;
+    } else if (deska[t.na] !== PRAZDNO) {
+      zpet.branePole = t.na;
+      zpet.brana = deska[t.na];
+    }
+
+    deska[t.z] = PRAZDNO;
+    deska[t.na] = t.povyseni ? (t.povyseni | b) : t.figura;
+
+    if (t.priznak === TAH_ROSADA) {
+      vez = VEZ_PRI_ROSADE[t.na];
+      deska[vez[1]] = deska[vez[0]];
+      deska[vez[0]] = PRAZDNO;
+    }
+
+    if (typ(t.figura) === KRAL) {
+      if (b === BILA) { poz.kralBila = t.na; } else { poz.kralCerna = t.na; }
+    }
+
+    poz.rosady &= MASKA_ROSAD[t.z] & MASKA_ROSAD[t.na];
+
+    /* Právo brát mimochodem platí jen bezprostředně po dvojkroku —
+       každý jiný tah ho ruší. */
+    poz.mimochodem = (t.priznak === TAH_DVOJKROK)
+      ? t.z + (b === BILA ? -8 : 8)
+      : -1;
+
+    /* Padesát tahů se počítá od posledního braní nebo tahu pěšcem. */
+    poz.pulTahy = (typ(t.figura) === PESEC || zpet.branePole >= 0)
+      ? 0
+      : poz.pulTahy + 1;
+
+    if (b === CERNA) { poz.tah++; }
+    poz.naTahu = soupere(b);
+
+    return zpet;
+  }
+
+  function vrat(poz, t, zpet) {
+    var deska = poz.deska;
+    var b = barva(t.figura);
+    var vez;
+
+    poz.naTahu = b;
+    if (b === CERNA) { poz.tah--; }
+    poz.rosady     = zpet.rosady;
+    poz.mimochodem = zpet.mimochodem;
+    poz.pulTahy    = zpet.pulTahy;
+
+    deska[t.z] = t.figura;
+    deska[t.na] = PRAZDNO;
+
+    /* Nejdřív se cílové pole vyprázdní a teprve pak se vrací braná
+       figura — u braní mimochodem to jsou dvě různá pole a v opačném
+       pořadí by se braný pěšec zase smazal. */
+    if (zpet.branePole >= 0) { deska[zpet.branePole] = zpet.brana; }
+
+    if (t.priznak === TAH_ROSADA) {
+      vez = VEZ_PRI_ROSADE[t.na];
+      deska[vez[0]] = deska[vez[1]];
+      deska[vez[1]] = PRAZDNO;
+    }
+
+    if (typ(t.figura) === KRAL) {
+      if (b === BILA) { poz.kralBila = t.z; } else { poz.kralCerna = t.z; }
+    }
+  }
+
+  /* ---------------------------------------------------------------
+     Legální tahy.
+
+     Filtr je tupý schválně: tah se provede a podívá se, jestli po něm
+     vlastní král není napadený. Vyřeší to jednou ranou vázané figury,
+     útěk krále po linii šachu i ten vzácný případ, kdy braní
+     mimochodem sebere z jedné řady dva pěšce naráz a odkryje šach od
+     věže. Chytřejší generátor by vázání počítal dopředu — a to je
+     přesně místo, kde generátory chybují nejčastěji. */
+
+  function legalniTahy(poz) {
+    var pseudo = generujPseudo(poz);
+    var b = poz.naTahu;
+    var soup = soupere(b);
+    var vysledek = [];
+    var i, zpet;
+
+    for (i = 0; i < pseudo.length; i++) {
+      zpet = proved(poz, pseudo[i]);
+      if (!jeNapadeno(poz.deska, poleKrale(poz, b), soup)) {
+        vysledek.push(pseudo[i]);
+      }
+      vrat(poz, pseudo[i], zpet);
+    }
+    return vysledek;
+  }
+
+  /* Zahraj tah „doopravdy“: kromě desky se posune i historie klíčů,
+     ze které se pozná trojí opakování. Perft tudy nechodí, ten
+     používá proved/vrat napřímo. */
+  function zahraj(poz, t) {
+    proved(poz, t);
+    poz.historie.push(klic(poz));
+  }
+
+  function najdiTah(poz, zapis) {
+    var tahy = legalniTahy(poz);
+    for (var i = 0; i < tahy.length; i++) {
+      if (zapisTah(tahy[i]) === zapis) { return tahy[i]; }
+    }
+    return null;
+  }
+
+  /* ---------------------------------------------------------------
+     Konce partie. */
+
+  function opakovani(poz) {
+    var k = klic(poz);
+    var pocet = 0;
+    for (var i = 0; i < poz.historie.length; i++) {
+      if (poz.historie[i] === k) { pocet++; }
+    }
+    return pocet;
+  }
+
+  /* Nedostatečný materiál v tom smyslu, v jakém ho zná pravidlo:
+     pozice, ve které mat nemůže vzniknout ani při nejhorší možné hře.
+     To jsou král proti králi, král s jedním lehkým kamenem proti
+     králi a dva střelci na polích stejné barvy. Dva jezdci sem
+     nepatří — mat jimi vynutit nejde, ale zapatlanou hrou vzniknout
+     může, a pravidlo mluví o možnosti, ne o vynucení. */
+  function nedostatecnyMaterial(poz) {
+    var lehke = [];
+    var i, f, t, barvaPole0, barvaPole1;
+
+    for (i = 0; i < 64; i++) {
+      f = poz.deska[i];
+      if (f === PRAZDNO) { continue; }
+      t = typ(f);
+      if (t === PESEC || t === VEZ || t === DAMA) { return false; }
+      if (t === STRELEC || t === JEZDEC) { lehke.push(i); }
+    }
+
+    if (lehke.length <= 1) { return true; }
+    if (lehke.length === 2 &&
+        typ(poz.deska[lehke[0]]) === STRELEC &&
+        typ(poz.deska[lehke[1]]) === STRELEC &&
+        barva(poz.deska[lehke[0]]) !== barva(poz.deska[lehke[1]])) {
+      /* Barva pole je sudost součtu řady a sloupce. Střelci na stejné
+         barvě se nikdy nepotkají a mat nedají. */
+      barvaPole0 = (rada(lehke[0]) + sloupec(lehke[0])) & 1;
+      barvaPole1 = (rada(lehke[1]) + sloupec(lehke[1])) & 1;
+      return barvaPole0 === barvaPole1;
+    }
+    return false;
+  }
+
+  function stavPartie(poz) {
+    var tahy = legalniTahy(poz);
+
+    if (tahy.length === 0) {
+      return jeVSachu(poz, poz.naTahu)
+        ? { konec: true, duvod: 'mat', vitez: soupere(poz.naTahu),
+            popis: (poz.naTahu === BILA ? 'Bílý' : 'Černý') + ' je matován' }
+        : { konec: true, duvod: 'pat', vitez: 0, popis: 'Pat — remíza' };
+    }
+    if (poz.pulTahy >= 100) {
+      return { konec: true, duvod: 'padesat', vitez: 0,
+               popis: 'Remíza podle pravidla padesáti tahů' };
+    }
+    if (opakovani(poz) >= 3) {
+      return { konec: true, duvod: 'opakovani', vitez: 0,
+               popis: 'Remíza trojím opakováním pozice' };
+    }
+    if (nedostatecnyMaterial(poz)) {
+      return { konec: true, duvod: 'material', vitez: 0,
+               popis: 'Remíza pro nedostatek materiálu' };
+    }
+    return { konec: false, duvod: '', vitez: 0, popis: '', tahy: tahy };
+  }
+
+  /* ---------------------------------------------------------------
+     Perft — kontrola generátoru.
+
+     Spočítá listy stromu tahů do dané hloubky. Je to jediný test,
+     který u generátoru něco znamená: jedna zapomenutá podmínka
+     rošády nebo braní mimochodem se v číslech okamžitě projeví
+     a známé hodnoty jsou tabulkové.
+
+     Legalita se testuje přímo tady, aby se pozice nestavěla dvakrát:
+     tah se provede, ověří se král a pokračuje se do hloubky. */
+
+  function perft(hloubka, poz) {
+    poz = poz || novaPozice();
+    if (hloubka <= 0) { return 1; }
+
+    var pseudo = generujPseudo(poz);
+    var b = poz.naTahu;
+    var soup = soupere(b);
+    var pocet = 0;
+    var i, zpet;
+
+    for (i = 0; i < pseudo.length; i++) {
+      zpet = proved(poz, pseudo[i]);
+      if (!jeNapadeno(poz.deska, poleKrale(poz, b), soup)) {
+        pocet += (hloubka === 1) ? 1 : perft(hloubka - 1, poz);
+      }
+      vrat(poz, pseudo[i], zpet);
+    }
+    return pocet;
+  }
+
+  /* Rozpad perftu po jednotlivých prvních tazích. Když celkové číslo
+     nesedí, tohle je jediný rozumný způsob, jak chybu najít: porovná
+     se s referenčním rozpadem a pokračuje se do té větve, která se
+     rozchází. */
+  function divide(hloubka, poz) {
+    poz = poz || novaPozice();
+    var tahy = legalniTahy(poz);
+    var vysledek = {};
+    var celkem = 0;
+    var i, zpet, n;
+
+    tahy.sort(function (a, b) {
+      return zapisTah(a) < zapisTah(b) ? -1 : 1;
+    });
+
+    for (i = 0; i < tahy.length; i++) {
+      zpet = proved(poz, tahy[i]);
+      n = (hloubka <= 1) ? 1 : perft(hloubka - 1, poz);
+      vrat(poz, tahy[i], zpet);
+      vysledek[zapisTah(tahy[i])] = n;
+      celkem += n;
+    }
+    vysledek.celkem = celkem;
+    return vysledek;
+  }
+
+  /* ---------------------------------------------------------------
+     Testy v konzoli.
+
+     Známé hodnoty perftu ze základní pozice a z pozice Kiwipete — ta
+     je na testování oblíbená právě proto, že je v ní všechno, co se
+     dá zkazit: rošády na obě strany pro obě barvy, vázané figury,
+     braní mimochodem i povýšení na dosah. */
+
+  var TESTY = [
+    {
+      nazev: 'Základní pozice',
+      fen: ZAKLADNI_FEN,
+      ocekavano: [20, 400, 8902, 197281, 4865609]
+    },
+    {
+      nazev: 'Kiwipete',
+      fen: 'r3k2r/p1ppqpb1/bn2pnp1/3PN3/1p2P3/2N2Q1p/PPPBBPPP/R3K2R w KQkq -',
+      ocekavano: [48, 2039, 97862]
+    }
+  ];
+
+  function ted() {
+    return (typeof performance !== 'undefined' ? performance : Date).now();
+  }
+
+  function vypisDivide(fen, hloubka) {
+    var rozpad = divide(hloubka, zFen(fen));
+    var celkem = rozpad.celkem;
+    delete rozpad.celkem;
+
+    console.log('Rozpad po jednotlivých prvních tazích (hloubka ' +
+                hloubka + '), celkem ' + celkem + ':');
+    if (console.table) { console.table(rozpad); } else { console.log(rozpad); }
+    console.log('Porovnej s referenčním rozpadem téže pozice (Stockfish: ' +
+                '"position fen ' + fen + '", pak "go perft ' + hloubka +
+                '"). Tah, u kterého se čísla liší, ukazuje na chybu — ' +
+                'zahraj ho a zopakuj divide o hloubku níž.');
+  }
+
+  /* Testy běží po jednom kroku přes setTimeout. Kdyby se pustily
+     najednou, prohlížeč by na několik sekund zamrznul a v konzoli by
+     se do konce výpočtu neukázal jediný řádek. */
+  function spustTesty() {
+    var ukoly = [];
+    var i, j;
+
+    for (i = 0; i < TESTY.length; i++) {
+      for (j = 0; j < TESTY[i].ocekavano.length; j++) {
+        ukoly.push({ test: TESTY[i], hloubka: j + 1,
+                     ocekavano: TESTY[i].ocekavano[j] });
+      }
+    }
+
+    console.log('Šachy — kontrola generátoru tahů (perft).');
+    var k = 0;
+
+    function dalsi() {
+      var u, zacatek, vysledek, ms, popis;
+
+      if (k >= ukoly.length) {
+        console.log('Hotovo, všechny počty sedí — generátor je v pořádku.');
+        console.log('Engine je v window.Sachy: zFen, doFen, legalniTahy, ' +
+                    'zahraj, stavPartie, perft, divide.');
+        return;
+      }
+
+      u = ukoly[k++];
+      zacatek = ted();
+      vysledek = perft(u.hloubka, zFen(u.test.fen));
+      ms = Math.round(ted() - zacatek);
+      popis = u.test.nazev + ', hloubka ' + u.hloubka + ': ' + vysledek +
+              ' (čekáno ' + u.ocekavano + ', ' + ms + ' ms)';
+
+      if (vysledek === u.ocekavano) {
+        console.log('OK    ' + popis);
+        setTimeout(dalsi, 0);
+      } else {
+        console.error('CHYBA ' + popis + ' — rozdíl ' +
+                      (vysledek - u.ocekavano));
+        console.log('Chyba je v generátoru tahů, dál se nepokračuje.');
+        vypisDivide(u.test.fen, u.hloubka);
+      }
+    }
+
+    setTimeout(dalsi, 0);
+  }
+
+  /* ---------------------------------------------------------------
+     Vývoz. Engine je celý tady, ať se s ním dá z konzole pracovat. */
+
+  var Sachy = {
+    PRAZDNO: PRAZDNO,
+    PESEC: PESEC, JEZDEC: JEZDEC, STRELEC: STRELEC,
+    VEZ: VEZ, DAMA: DAMA, KRAL: KRAL,
+    BILA: BILA, CERNA: CERNA,
+    ROSADA_BK: ROSADA_BK, ROSADA_BD: ROSADA_BD,
+    ROSADA_CK: ROSADA_CK, ROSADA_CD: ROSADA_CD,
+    TAH_NORMALNI: TAH_NORMALNI, TAH_DVOJKROK: TAH_DVOJKROK,
+    TAH_MIMOCHODEM: TAH_MIMOCHODEM, TAH_ROSADA: TAH_ROSADA,
+    ZAKLADNI_FEN: ZAKLADNI_FEN,
+
+    typ: typ, barva: barva, soupere: soupere,
+    rada: rada, sloupec: sloupec,
+    jmenoPole: jmenoPole, poleZeJmena: poleZeJmena,
+
+    novaPozice: novaPozice, zFen: zFen, doFen: doFen, klic: klic,
+    generujPseudo: generujPseudo, legalniTahy: legalniTahy,
+    proved: proved, vrat: vrat, zahraj: zahraj, najdiTah: najdiTah,
+    zapisTah: zapisTah, zapisSan: zapisSan,
+    jeNapadeno: jeNapadeno, jeVSachu: jeVSachu,
+    stavPartie: stavPartie, nedostatecnyMaterial: nedostatecnyMaterial,
+    opakovani: opakovani,
+    perft: perft, divide: divide, spustTesty: spustTesty
+  };
+
+  /* Kam se modul vyvěsí. V okně je to window, ve web workeru self:
+     rozbor partie pouští engine ve workeru a tam by se modul jinak
+     neměl kam zaregistrovat — a `window.Sachy` by rovnou spadlo na
+     nedefinované window. */
+  if (GLOB) {
+    GLOB.Sachy  = Sachy;
+    GLOB.perft  = perft;
+    GLOB.divide = divide;
+  }
+  if (typeof module !== 'undefined' && module.exports) {
+    module.exports = Sachy;      // ať se testy dají pustit i mimo prohlížeč
+  }
+
+  /* Perft se sám nespouští: hloubka pět je pět milionů pozic a hráč,
+     který si přišel zahrát, by čekal na desku. Kontrola je o jedno
+     zavolání dál. */
+  if (typeof console !== 'undefined' && console.log) {
+    console.log('Šachy: kontrola generátoru tahů se spustí přes ' +
+                'Sachy.spustTesty(), kontrola soupeře přes ' +
+                'SachyAI.spustTesty(). Engine je v window.Sachy.');
+  }
+}());
+</script>
+
+<script data-engine>
+(function () {
+  'use strict';
+
+  /* ===============================================================
+     SOUPEŘ
+
+     Ohodnocení pozice a prohledávání. Pravidla si bere z enginu výš
+     (window.Sachy) a nesahá mu do útrob — pracuje jen s tím, co engine
+     nabízí navenek: generuj tahy, proveď, vrať, jsem v šachu.
+     --------------------------------------------------------------- */
+
+  /* Totéž co v enginu: v okně window, ve workeru self. Rozbor partie
+     pouští oba moduly ve workeru. */
+  var GLOB = (typeof window !== 'undefined') ? window
+           : (typeof self !== 'undefined') ? self : null;
+
+  var S = GLOB && GLOB.Sachy;
+  if (!S) { return; }
+
+  function ted() {
+    return (typeof performance !== 'undefined' ? performance : Date).now();
+  }
+
+  /* ---------------------------------------------------------------
+     Hodnoty figur.
+
+     Setina pěšce je jednotka, ve které se počítá všechno ostatní.
+     Střelec je o deset víc než jezdec — drobný rozdíl, který ale
+     stačí, aby engine při rovné výměně nechal na desce raději
+     střelce, a s bonusem za dvojici střelců to dává dohromady známé
+     pravidlo, že dvojice střelců za jezdce a střelce něco stojí. */
+  var HODNOTA = [0, 100, 320, 330, 500, 900, 0];
+
+  var MAT = 100000;         // hodnota matu; od ní se odečítá vzdálenost
+  var MAT_PRAH = 90000;     // co je nad tím, je vynucený mat
+  var NEKONECNO = 1000000;
+
+  /* ---------------------------------------------------------------
+     Tabulky hodnot polí.
+
+     Ke každé figuře jeden příplatek podle toho, kde stojí. Tabulky
+     jsou psané z pohledu bílého a v tomtéž pořadí jako deska (první
+     číslo = a8), takže se pro bílého indexují přímo. Pro černého se
+     překlopí řada: index ^ 56 obrátí trojici bitů, ve které je řada,
+     a sloupec nechá být.
+
+     Čísla jsou známá „zjednodušená" sada: jezdec do středu, střelec
+     na dlouhé diagonály, věž na sedmou řadu, pěšec tím cennější, čím
+     blíž je proměně. Dvě řady u pěšců stojí za komentář: záporná
+     čísla před vlastním králem (d2, e2) drží pěšce doma, protože
+     jejich vytažení otevírá krále, a plus u b2/g2 odměňuje fianchetto. */
+  var PST = [];
+
+  PST[S.PESEC] = [
+      0,  0,  0,  0,  0,  0,  0,  0,
+     50, 50, 50, 50, 50, 50, 50, 50,
+     10, 10, 20, 30, 30, 20, 10, 10,
+      5,  5, 10, 25, 25, 10,  5,  5,
+      0,  0,  0, 20, 20,  0,  0,  0,
+      5, -5,-10,  0,  0,-10, -5,  5,
+      5, 10, 10,-20,-20, 10, 10,  5,
+      0,  0,  0,  0,  0,  0,  0,  0
+  ];
+
+  PST[S.JEZDEC] = [
+    -50,-40,-30,-30,-30,-30,-40,-50,
+    -40,-20,  0,  0,  0,  0,-20,-40,
+    -30,  0, 10, 15, 15, 10,  0,-30,
+    -30,  5, 15, 20, 20, 15,  5,-30,
+    -30,  0, 15, 20, 20, 15,  0,-30,
+    -30,  5, 10, 15, 15, 10,  5,-30,
+    -40,-20,  0,  5,  5,  0,-20,-40,
+    -50,-40,-30,-30,-30,-30,-40,-50
+  ];
+
+  PST[S.STRELEC] = [
+    -20,-10,-10,-10,-10,-10,-10,-20,
+    -10,  0,  0,  0,  0,  0,  0,-10,
+    -10,  0,  5, 10, 10,  5,  0,-10,
+    -10,  5,  5, 10, 10,  5,  5,-10,
+    -10,  0, 10, 10, 10, 10,  0,-10,
+    -10, 10, 10, 10, 10, 10, 10,-10,
+    -10,  5,  0,  0,  0,  0,  5,-10,
+    -20,-10,-10,-10,-10,-10,-10,-20
+  ];
+
+  PST[S.VEZ] = [
+      0,  0,  0,  0,  0,  0,  0,  0,
+      5, 10, 10, 10, 10, 10, 10,  5,
+     -5,  0,  0,  0,  0,  0,  0, -5,
+     -5,  0,  0,  0,  0,  0,  0, -5,
+     -5,  0,  0,  0,  0,  0,  0, -5,
+     -5,  0,  0,  0,  0,  0,  0, -5,
+     -5,  0,  0,  0,  0,  0,  0, -5,
+      0,  0,  0,  5,  5,  0,  0,  0
+  ];
+
+  PST[S.DAMA] = [
+    -20,-10,-10, -5, -5,-10,-10,-20,
+    -10,  0,  0,  0,  0,  0,  0,-10,
+    -10,  0,  5,  5,  5,  5,  0,-10,
+     -5,  0,  5,  5,  5,  5,  0, -5,
+      0,  0,  5,  5,  5,  5,  0, -5,
+    -10,  5,  5,  5,  5,  5,  0,-10,
+    -10,  0,  5,  0,  0,  0,  0,-10,
+    -20,-10,-10, -5, -5,-10,-10,-20
+  ];
+
+  /* Král má tabulky dvě, a je to nejdůležitější rozdíl v celém
+     ohodnocení. V zahájení a střední hře patří do rohu za pěšce —
+     proto ta velká plus na g1 a c1 a minusy uprostřed. V koncovce je
+     to obráceně: král je tam silná figura, musí do středu a k pěšcům,
+     a schovaný v rohu jen prohrává tempo. Bez druhé tabulky by engine
+     v koncovce králem nikam nešel. */
+  var PST_KRAL = [
+    -30,-40,-40,-50,-50,-40,-40,-30,
+    -30,-40,-40,-50,-50,-40,-40,-30,
+    -30,-40,-40,-50,-50,-40,-40,-30,
+    -30,-40,-40,-50,-50,-40,-40,-30,
+    -20,-30,-30,-40,-40,-30,-30,-20,
+    -10,-20,-20,-20,-20,-20,-20,-10,
+     20, 20,  0,  0,  0,  0, 20, 20,
+     20, 30, 10,  0,  0, 10, 30, 20
+  ];
+
+  var PST_KRAL_KONCOVKA = [
+    -50,-40,-30,-20,-20,-30,-40,-50,
+    -30,-20,-10,  0,  0,-10,-20,-30,
+    -30,-10, 20, 30, 30, 20,-10,-30,
+    -30,-10, 30, 40, 40, 30,-10,-30,
+    -30,-10, 30, 40, 40, 30,-10,-30,
+    -30,-10, 20, 30, 30, 20,-10,-30,
+    -30,-30,  0,  0,  0,  0,-30,-30,
+    -50,-30,-30,-30,-30,-30,-30,-50
+  ];
+
+  /* Kdy je koncovka. Sečte se materiál obou stran bez pěšců a králů;
+     když klesne pod dvě věže a dva střelce, přepne se králova tabulka.
+     Hrubé měřítko, ale postihne to, na čem záleží: dokud jsou na desce
+     dámy, král se schovává. */
+  var PRAH_KONCOVKY = 2 * HODNOTA[S.VEZ] + 2 * HODNOTA[S.STRELEC];
+
+  var DVOJICE_STRELCU = 30;
+  var VEZ_OTEVRENY    = 15;   // na sloupci není žádný pěšec
+  var VEZ_POLOOTEVRENY = 7;   // není tam vlastní pěšec, soupeřův ano
+  var ZDVOJENY_PESEC  = -15;
+  var IZOLOVANY_PESEC = -15;
+
+  /* ---------------------------------------------------------------
+     Ohodnocení pozice.
+
+     Vrací se vždycky z pohledu strany na tahu — negamax jinou dohodu
+     nepřipouští, protože v každé hloubce jen otáčí znaménko. */
+
+  function bonusVeze(sloupec, vlastniPesci, cizPesci) {
+    if (vlastniPesci[sloupec]) { return 0; }
+    return cizPesci[sloupec] ? VEZ_POLOOTEVRENY : VEZ_OTEVRENY;
+  }
+
+  /* Zdvojení a izolovanost se počítají jen ze součtů po sloupcích —
+     na to, kde přesně pěšec stojí, se ptá tabulka polí. */
+  function strukturaPescu(pesci) {
+    var postih = 0;
+    for (var s = 0; s < 8; s++) {
+      if (!pesci[s]) { continue; }
+      if (pesci[s] > 1) { postih += ZDVOJENY_PESEC * (pesci[s] - 1); }
+      var vedle = (s > 0 && pesci[s - 1]) || (s < 7 && pesci[s + 1]);
+      if (!vedle) { postih += IZOLOVANY_PESEC * pesci[s]; }
+    }
+    return postih;
+  }
+
+  function hodnot(poz) {
+    var d = poz.deska;
+    var skore = 0;
+    var pesciB = [0, 0, 0, 0, 0, 0, 0, 0];
+    var pesciC = [0, 0, 0, 0, 0, 0, 0, 0];
+    var vezeB = [], vezeC = [];
+    var strelcuB = 0, strelcuC = 0;
+    var kralB = -1, kralC = -1;
+    var tezkeB = 0, tezkeC = 0;
+    var i, f, t, b, s, hodnota;
+
+    for (i = 0; i < 64; i++) {
+      f = d[i];
+      if (f === S.PRAZDNO) { continue; }
+      t = S.typ(f);
+      b = S.barva(f);
+
+      if (t === S.KRAL) {
+        if (b === S.BILA) { kralB = i; } else { kralC = i; }
+        continue;
+      }
+
+      hodnota = HODNOTA[t] + PST[t][b === S.BILA ? i : i ^ 56];
+      skore += (b === S.BILA) ? hodnota : -hodnota;
+
+      s = S.sloupec(i);
+      if (t === S.PESEC) {
+        if (b === S.BILA) { pesciB[s]++; } else { pesciC[s]++; }
+      } else {
+        if (b === S.BILA) { tezkeB += HODNOTA[t]; } else { tezkeC += HODNOTA[t]; }
+        if (t === S.STRELEC) {
+          if (b === S.BILA) { strelcuB++; } else { strelcuC++; }
+        } else if (t === S.VEZ) {
+          (b === S.BILA ? vezeB : vezeC).push(s);
+        }
+      }
+    }
+
+    var koncovka = (tezkeB + tezkeC) <= PRAH_KONCOVKY;
+    var tabulkaKrale = koncovka ? PST_KRAL_KONCOVKA : PST_KRAL;
+    if (kralB >= 0) { skore += tabulkaKrale[kralB]; }
+    if (kralC >= 0) { skore -= tabulkaKrale[kralC ^ 56]; }
+
+    if (strelcuB >= 2) { skore += DVOJICE_STRELCU; }
+    if (strelcuC >= 2) { skore -= DVOJICE_STRELCU; }
+
+    for (i = 0; i < vezeB.length; i++) { skore += bonusVeze(vezeB[i], pesciB, pesciC); }
+    for (i = 0; i < vezeC.length; i++) { skore -= bonusVeze(vezeC[i], pesciC, pesciB); }
+
+    skore += strukturaPescu(pesciB) - strukturaPescu(pesciC);
+
+    return (poz.naTahu === S.BILA) ? skore : -skore;
+  }
+
+  /* ---------------------------------------------------------------
+     Zobristův haš a transpoziční tabulka.
+
+     Táž pozice vznikne různým pořadím tahů (Nf3 e5 d4 je totéž co
+     d4 e5 Nf3) a bez tabulky by se počítala tolikrát, kolika cestami
+     se k ní strom dostane.
+
+     JS umí bezpečně XORovat jen 32 bitů, a to je na haš málo — při
+     statisících pozic by kolize nebyly vzácné. Držíme proto dvě
+     nezávislé půlky: první adresuje řádek tabulky, druhá se v něm
+     ukládá jako kontrola, že řádek patří opravdu téhle pozici.
+
+     Haš se počítá z celé desky při každém uzlu. Průběžná aktualizace
+     uvnitř proved/vrat by byla rychlejší, ale znamenala by sáhnout
+     enginu do útrob a podruhé tam popsat pravidla o rošádě a braní
+     mimochodem — a chyba v druhé kopii pravidel se hledá nejhůř. */
+
+  var ZOB1 = new Int32Array(24 * 64);
+  var ZOB2 = new Int32Array(24 * 64);
+  var ZOB_ROSADY1 = new Int32Array(16);
+  var ZOB_ROSADY2 = new Int32Array(16);
+  var ZOB_MIMO1 = new Int32Array(8);
+  var ZOB_MIMO2 = new Int32Array(8);
+  var ZOB_TAH1 = 0, ZOB_TAH2 = 0;
+
+  (function nasypNahodna() {
+    /* Vlastní generátor, ne Math.random: haše musí vyjít při každém
+       načtení stejné, jinak by se stejná partie pokaždé počítala jinak
+       a chyba by nešla zopakovat. */
+    var stav = 0x1a2b3c4d;
+    function dalsi() {
+      stav ^= stav << 13; stav |= 0;
+      stav ^= stav >>> 17;
+      stav ^= stav << 5;  stav |= 0;
+      return stav;
+    }
+    var i;
+    for (i = 0; i < ZOB1.length; i++) { ZOB1[i] = dalsi(); ZOB2[i] = dalsi(); }
+    for (i = 0; i < 16; i++) { ZOB_ROSADY1[i] = dalsi(); ZOB_ROSADY2[i] = dalsi(); }
+    for (i = 0; i < 8; i++) { ZOB_MIMO1[i] = dalsi(); ZOB_MIMO2[i] = dalsi(); }
+    ZOB_TAH1 = dalsi();
+    ZOB_TAH2 = dalsi();
+  }());
+
+  var hasH1 = 0, hasH2 = 0;
+
+  /* Postih za tah do pozice, která v partii už byla. Padesát setin
+     pěšce je dost na to, aby engine dal přednost jinému tahu stejné
+     hodnoty, a málo na to, aby kvůli tomu obětoval materiál. */
+  var POSTIH_OPAKOVANI = 50;
+
+  function spocitejHas(poz) {
+    var h1 = 0, h2 = 0, i, f, k;
+    for (i = 0; i < 64; i++) {
+      f = poz.deska[i];
+      if (f !== S.PRAZDNO) {
+        k = f * 64 + i;
+        h1 ^= ZOB1[k];
+        h2 ^= ZOB2[k];
+      }
+    }
+    h1 ^= ZOB_ROSADY1[poz.rosady];
+    h2 ^= ZOB_ROSADY2[poz.rosady];
+    if (poz.mimochodem >= 0) {
+      h1 ^= ZOB_MIMO1[S.sloupec(poz.mimochodem)];
+      h2 ^= ZOB_MIMO2[S.sloupec(poz.mimochodem)];
+    }
+    if (poz.naTahu === S.CERNA) { h1 ^= ZOB_TAH1; h2 ^= ZOB_TAH2; }
+    hasH1 = h1;
+    hasH2 = h2;
+  }
+
+  /* Haš pozice navenek. Je to řetězec, ne číslo: obě půlky dohromady
+     dávají 64 bitů a tolik se do jednoho čísla v JS bezpečně nevejde.
+     Volající s ním nic nepočítá, jen ho porovnává. */
+  function has(poz) {
+    spocitejHas(poz);
+    return hasH1 + ':' + hasH2;
+  }
+
+  function sadaHasu(seznam) {
+    if (!seznam || !seznam.length) { return null; }
+    var sada = {};
+    for (var i = 0; i < seznam.length; i++) { sada[seznam[i]] = true; }
+    return sada;
+  }
+
+  var TT_BITY  = 18;                    // 262 144 řádků, kolem 4 MB
+  var TT_MASKA = (1 << TT_BITY) - 1;
+  var ttKontrola = new Int32Array(1 << TT_BITY);
+  var ttHloubka  = new Int32Array(1 << TT_BITY);
+  var ttSkore    = new Int32Array(1 << TT_BITY);
+  var ttTyp      = new Int32Array(1 << TT_BITY);
+  var ttTah      = new Int32Array(1 << TT_BITY);
+
+  var TT_PRESNE = 0, TT_DOLNI = 1, TT_HORNI = 2;
+
+  function vyprazdniTT() {
+    /* Hloubka -1 znamená prázdný řádek. Kontrolní půlka haše může být
+       legitimně nula, takže na rozpoznání prázdna nestačí. */
+    ttHloubka.fill(-1);
+  }
+
+  /* Tah v tabulce zabírá jedno číslo: odkud, kam a případná proměna. */
+  function kodTahu(t) {
+    return t.z | (t.na << 6) | ((t.povyseni || 0) << 12);
+  }
+
+  /* Vzdálenost matu se ukládá od aktuálního uzlu, ne od kořene —
+     jinak by se stejný záznam v jiné hloubce četl jako mat o několik
+     tahů dřív nebo později, než ve skutečnosti je. */
+  function doTT(skore, hloubkaVeStromu) {
+    if (skore >  MAT_PRAH) { return skore + hloubkaVeStromu; }
+    if (skore < -MAT_PRAH) { return skore - hloubkaVeStromu; }
+    return skore;
+  }
+
+  function zTT(skore, hloubkaVeStromu) {
+    if (skore >  MAT_PRAH) { return skore - hloubkaVeStromu; }
+    if (skore < -MAT_PRAH) { return skore + hloubkaVeStromu; }
+    return skore;
+  }
+
+  /* ---------------------------------------------------------------
+     Řazení tahů.
+
+     Na řazení stojí alfa-beta víc než na hloubce: ořezat větev jde
+     jedině tehdy, když se dobrý tah zkusí brzy. Pořadí je proto
+     napevno dané:
+
+     1. tah z transpoziční tabulky — ten už se v téhle pozici jednou
+        osvědčil,
+     2. braní podle MVV-LVA (ber cennou figuru tou nejlevnější):
+        vzít dámu pěšcem je skoro vždycky lepší začátek než vzít pěšce
+        dámou,
+     3. proměny,
+     4. všechno ostatní. */
+
+  function poradiTahu(t, tahZTT) {
+    if (tahZTT && kodTahu(t) === tahZTT) { return 1000000; }
+    if (t.brana !== S.PRAZDNO) {
+      return 100000 + 10 * HODNOTA[S.typ(t.brana)] - HODNOTA[S.typ(t.figura)];
+    }
+    if (t.povyseni) { return 90000 + HODNOTA[t.povyseni]; }
+    return 0;
+  }
+
+  function serad(tahy, tahZTT) {
+    var i;
+    for (i = 0; i < tahy.length; i++) { tahy[i].poradi = poradiTahu(tahy[i], tahZTT); }
+    tahy.sort(function (a, b) { return b.poradi - a.poradi; });
+  }
+
+  /* ---------------------------------------------------------------
+     Klidové prohledávání.
+
+     Bez něj engine na poslední hloubce vezme figuru, spočítá si plus
+     a nevidí, že ji soupeř bere zpátky. Proto se v listech pokračuje
+     dál, ale jen braními (a proměnami), dokud pozice není klidná.
+
+     Dvě věci, na kterých to stojí:
+
+     „Stání na místě" (stand pat) je hodnota pozice bez dalšího braní.
+     Strana na tahu brát nemusí, takže je to spodní odhad její hodnoty
+     — a když už tak stačí na beta ořez, dál se nehledá.
+
+     V šachu se ale stát na místě nedá: král se musí řešit. Tam se
+     proto berou všechny tahy, ne jen braní, a stand pat se přeskočí.
+     Jinak by engine odhadl pozici, ze které vede jediná cesta ven. */
+
+  function klidove(poz, alfa, beta, hloubkaVeStromu, ctx) {
+    ctx.uzly++;
+    if ((ctx.uzly & 1023) === 0 && ted() > ctx.konec) { ctx.stop = true; return 0; }
+
+    var b = poz.naTahu;
+    var vSachu = S.jeVSachu(poz, b);
+    var i, t, zpet, skore, legalnich = 0;
+
+    if (!vSachu) {
+      skore = hodnot(poz);
+      if (skore >= beta) { return skore; }
+      if (skore > alfa) { alfa = skore; }
+    }
+
+    var tahy = S.generujPseudo(poz);
+    serad(tahy, 0);
+
+    for (i = 0; i < tahy.length; i++) {
+      t = tahy[i];
+      if (!vSachu && t.brana === S.PRAZDNO && !t.povyseni) { continue; }
+
+      zpet = S.proved(poz, t);
+      if (S.jeVSachu(poz, b)) { S.vrat(poz, t, zpet); continue; }
+      legalnich++;
+      skore = -klidove(poz, -beta, -alfa, hloubkaVeStromu + 1, ctx);
+      S.vrat(poz, t, zpet);
+
+      if (ctx.stop) { return 0; }
+      if (skore >= beta) { return skore; }
+      if (skore > alfa) { alfa = skore; }
+    }
+
+    /* Mat se pozná jen v šachu — když se nebralo, protože nebylo co,
+       je to klidná pozice, ne pat. */
+    if (vSachu && legalnich === 0) { return -(MAT - hloubkaVeStromu); }
+
+    return alfa;
+  }
+
+  /* ---------------------------------------------------------------
+     Negamax s alfa-beta.
+
+     Negamax je minimax bez druhé větve: hodnota se vrací z pohledu
+     strany na tahu, takže se v každé hloubce jen otočí znaménko
+     a prohodí okno. */
+
+  function negamax(poz, hloubka, alfa, beta, hloubkaVeStromu, ctx) {
+    ctx.uzly++;
+    if ((ctx.uzly & 1023) === 0 && ted() > ctx.konec) { ctx.stop = true; return 0; }
+
+    /* Padesát tahů bez braní a bez pěšce je remíza, ať je pozice
+       jakkoliv vyhraná. Opakování pozic uvnitř stromu se nehlídá:
+       vyžadovalo by to nést historii partie do prohledávání a na téhle
+       úrovni síly se to nevyplatí. */
+    if (poz.pulTahy >= 100) { return 0; }
+
+    var alfaPuvodni = alfa;
+    var tahZTT = 0;
+    var index;
+
+    spocitejHas(poz);
+    index = hasH1 & TT_MASKA;
+    if (ttHloubka[index] >= 0 && ttKontrola[index] === hasH2) {
+      tahZTT = ttTah[index];
+      if (ttHloubka[index] >= hloubka) {
+        var ulozene = zTT(ttSkore[index], hloubkaVeStromu);
+        if (ttTyp[index] === TT_PRESNE) { return ulozene; }
+        if (ttTyp[index] === TT_DOLNI && ulozene > alfa) { alfa = ulozene; }
+        else if (ttTyp[index] === TT_HORNI && ulozene < beta) { beta = ulozene; }
+        if (alfa >= beta) { return ulozene; }
+      }
+    }
+
+    if (hloubka <= 0) {
+      return ctx.klid ? klidove(poz, alfa, beta, hloubkaVeStromu, ctx) : hodnot(poz);
+    }
+
+    var b = poz.naTahu;
+    var tahy = S.generujPseudo(poz);
+    serad(tahy, tahZTT);
+
+    var nejlepsi = -NEKONECNO;
+    var nejlepsiKod = 0;
+    var legalnich = 0;
+    var i, t, zpet, skore;
+
+    for (i = 0; i < tahy.length; i++) {
+      t = tahy[i];
+      zpet = S.proved(poz, t);
+      if (S.jeVSachu(poz, b)) { S.vrat(poz, t, zpet); continue; }
+      legalnich++;
+      skore = -negamax(poz, hloubka - 1, -beta, -alfa, hloubkaVeStromu + 1, ctx);
+      S.vrat(poz, t, zpet);
+
+      if (ctx.stop) { return 0; }
+
+      if (skore > nejlepsi) {
+        nejlepsi = skore;
+        nejlepsiKod = kodTahu(t);
+      }
+      if (skore > alfa) { alfa = skore; }
+      if (alfa >= beta) { break; }
+    }
+
+    /* Žádný legální tah: v šachu je to mat, jinak pat. Mat se počítá
+       se vzdáleností od kořene, aby engine dával přednost matu za dva
+       tahy před matem za čtyři — a bránil se tomu vzdálenějšímu. */
+    if (legalnich === 0) {
+      return S.jeVSachu(poz, b) ? -(MAT - hloubkaVeStromu) : 0;
+    }
+
+    spocitejHas(poz);
+    index = hasH1 & TT_MASKA;
+    ttKontrola[index] = hasH2;
+    ttHloubka[index]  = hloubka;
+    ttSkore[index]    = doTT(nejlepsi, hloubkaVeStromu);
+    ttTyp[index]      = (nejlepsi <= alfaPuvodni) ? TT_HORNI
+                      : (nejlepsi >= beta)        ? TT_DOLNI
+                      : TT_PRESNE;
+    ttTah[index]      = nejlepsiKod;
+
+    return nejlepsi;
+  }
+
+  /* ---------------------------------------------------------------
+     Kořen.
+
+     Vrací všechny tahy se skóre, seřazené od nejlepšího — slabá
+     obtížnost z nich bere druhý v pořadí a iterativní prohlubování
+     jimi řadí další iteraci.
+
+     plneOkno: s alfa-beta má smysl jen skóre nejlepšího tahu, ostatní
+     jsou horní odhady. Slabé obtížnosti to nestačí, ta z pořadí bere
+     druhý tah a potřebuje ho mít změřený doopravdy — a v hloubce dva
+     je to laciné.
+
+     opakovane: haše pozic, které v partii už nastaly. Tah, který do
+     některé z nich vede, dostane postih — bez něj engine ve vyhrané
+     pozici přehazoval figury sem a tam, protože všechny ty tahy měly
+     stejnou hodnotu, a partie končila remízou opakováním.
+
+     Hlídá se to jenom tady v kořeni. Do celého stromu by se musel
+     nést zápis partie a v každém uzlu porovnávat — stálo by to víc,
+     než to přinese, a rozhoduje stejně první tah.
+
+     A jen tehdy, když engine stojí líp. Kdo prohrává, ten opakování
+     naopak chce: remíza je pořád lepší než prohra, a postih by ho
+     hnal do prohrané pozice. */
+  function korenovaIterace(poz, hloubka, ctx, predchozi, plneOkno, opakovane) {
+    var tahy = S.legalniTahy(poz);
+    var vysledky = [];
+    var alfa = -NEKONECNO;
+    var stojimeLip = opakovane ? hodnot(poz) > 0 : false;
+    var i, j, t, zpet, skore, opakuje;
+
+    if (predchozi && predchozi.length) {
+      /* Pořadí z minulé iterace. Nejlepší tah se tak zkusí první
+         a ořezávání má hned od začátku o co se opřít. */
+      var poradi = {};
+      for (i = 0; i < predchozi.length; i++) {
+        poradi[kodTahu(predchozi[i].tah)] = predchozi.length - i;
+      }
+      for (i = 0; i < tahy.length; i++) {
+        tahy[i].poradi = poradi[kodTahu(tahy[i])] || poradiTahu(tahy[i], 0) / 1000;
+      }
+      tahy.sort(function (a, b) { return b.poradi - a.poradi; });
+    } else {
+      serad(tahy, 0);
+    }
+
+    for (i = 0; i < tahy.length; i++) {
+      t = tahy[i];
+      zpet = S.proved(poz, t);
+
+      /* Haš se musí vzít teď, dokud je tah proveden — a před
+         prohledáváním, protože to si počítadlo haše přepisuje. */
+      opakuje = stojimeLip && opakovane[has(poz)];
+
+      skore = -negamax(poz, hloubka - 1, -NEKONECNO, plneOkno ? NEKONECNO : -alfa,
+                       1, ctx);
+      S.vrat(poz, t, zpet);
+
+      if (ctx.stop) { return null; }
+
+      if (opakuje) { skore -= POSTIH_OPAKOVANI; }
+
+      vysledky.push({ tah: t, skore: skore });
+      if (skore > alfa) { alfa = skore; }
+    }
+
+    vysledky.sort(function (a, b) { return b.skore - a.skore; });
+    return vysledky;
+  }
+
+  /* ---------------------------------------------------------------
+     Otvírací kniha.
+
+     V zahájení nemá prohledávání co objevovat: prvních pár tahů je
+     prošlapaných staletími a engine s hloubkou tři je stejně
+     nedopočítá. Kniha mu je dá zadarmo a hlavně různě — bez ní hraje
+     počítač pořád tutéž partii, protože ze stejné pozice mu vyjde
+     stejný tah.
+
+     Uložená podoba je objekt: klíč je Zobristův haš pozice (týž
+     řetězec, jaký vrací has()), hodnota je pole tahů s vahou a názvem
+     varianty. Přesně to, co se při hledání potřebuje — jedno sáhnutí
+     do objektu a je hotovo.
+
+     Zdrojem ale nejsou haše: ty se ručně napsat nedají a při změně
+     Zobristových čísel by tiše přestaly sedět. Ručně se píšou
+     varianty v algebraické notaci a tabulka se z nich postaví při
+     prvním použití tím, že se každá varianta přehraje na desce
+     a u každé pozice se spočítá haš. Kniha tak nemůže obsahovat
+     nelegální tah ani haš, který by neodpovídal enginu.
+
+     Haš bere v úvahu i práva na rošádu a pole pro braní mimochodem
+     (spocitejHas výš XORuje ZOB_ROSADY a ZOB_MIMO). Je to tady
+     podstatnější než v transpoziční tabulce: kniha se ptá na pozice
+     ze začátku partie, kde se rošádová práva teprve ztrácejí a kde po
+     každém dvojkroku pěšcem vzniká pole pro braní mimochodem. Bez nich
+     by pozice po 1.e4 splynula s toutéž deskou bez práva brát
+     mimochodem a kniha by nabídla tah do pozice, ve které ta varianta
+     vůbec nevznikla. Hlídá to testKniha() v konzoli. */
+
+  /* Varianty. Zápis je algebraický, tak jak se čte v knihách; značka
+     šachu (+/#) se smí vynechat. Za dvojtečkou je váha tahu, výchozí
+     je jedna — losuje se jí mezi tahy, které kniha v téže pozici zná.
+
+     Název varianty se tahu přiřadí od chvíle, kdy ho poprvé zavede
+     některý řádek seznamu. Proto jdou obecné čáry před podrobnými:
+     1.e4 c5 pojmenuje „Sicilská obrana“ a teprve 5...a6 v pozdějším
+     řádku z ní udělá najdorfovu. Obráceně by hra hlásila najdorfovu
+     už po druhém tahu.
+
+     Hloubka je osm půltahů, u sicilské deset — tam se jméno varianty
+     rozhoduje až pátým tahem a mělčí kniha by uměla jen „sicilská“. */
+
+  var KNIHA_VARIANTY = [
+    /* --- 1.e4 ------------------------------------------------- */
+    { nazev: 'Zahájení královským pěšcem', tahy: 'e4:3' },
+
+    /* 1.e4 e5 */
+    { nazev: 'Otevřená hra',
+      tahy: 'e4 e5:3 Nf3 Nc6' },
+    { nazev: 'Italská hra',
+      tahy: 'e4 e5 Nf3 Nc6 Bc4:2 Bc5:2 c3 Nf6' },
+    { nazev: 'Italská hra, Evansův gambit',
+      tahy: 'e4 e5 Nf3 Nc6 Bc4 Bc5 b4 Bxb4' },
+    { nazev: 'Obrana dvou jezdců',
+      tahy: 'e4 e5 Nf3 Nc6 Bc4 Nf6 Ng5 d5' },
+    { nazev: 'Španělská hra',
+      tahy: 'e4 e5 Nf3 Nc6 Bb5:2 a6:3 Ba4:2 Nf6' },
+    { nazev: 'Španělská hra, berlínská obrana',
+      tahy: 'e4 e5 Nf3 Nc6 Bb5 Nf6 O-O Nxe4' },
+    { nazev: 'Španělská hra, vyměněná varianta',
+      tahy: 'e4 e5 Nf3 Nc6 Bb5 a6 Bxc6 dxc6' },
+
+    /* 1.e4 c5 — otevřená sicilská */
+    { nazev: 'Sicilská obrana',
+      tahy: 'e4 c5:4 Nf3 d6:2 d4 cxd4 Nxd4 Nf6 Nc3' },
+    { nazev: 'Sicilská obrana',
+      tahy: 'e4 c5 Nf3 e6:2 d4 cxd4 Nxd4' },
+    { nazev: 'Sicilská obrana',
+      tahy: 'e4 c5 Nf3 Nc6 d4 cxd4 Nxd4' },
+    { nazev: 'Sicilská obrana, najdorfova varianta',
+      tahy: 'e4 c5 Nf3 d6 d4 cxd4 Nxd4 Nf6 Nc3 a6:2' },
+    { nazev: 'Sicilská obrana, dračí varianta',
+      tahy: 'e4 c5 Nf3 d6 d4 cxd4 Nxd4 Nf6 Nc3 g6' },
+    { nazev: 'Sicilská obrana, scheveningenská varianta',
+      tahy: 'e4 c5 Nf3 e6 d4 cxd4 Nxd4 Nf6 Nc3 d6' },
+    { nazev: 'Sicilská obrana, taimanovova varianta',
+      tahy: 'e4 c5 Nf3 e6 d4 cxd4 Nxd4 Nc6 Nc3 Qc7' },
+    { nazev: 'Sicilská obrana, sveshnikovova varianta',
+      tahy: 'e4 c5 Nf3 Nc6 d4 cxd4 Nxd4 Nf6 Nc3 e5' },
+
+    /* 1.e4 e6 */
+    { nazev: 'Francouzská obrana',
+      tahy: 'e4 e6:2 d4 d5' },
+    { nazev: 'Francouzská obrana, winawerova varianta',
+      tahy: 'e4 e6 d4 d5 Nc3:2 Bb4:2 e5 c5' },
+    { nazev: 'Francouzská obrana, klasická varianta',
+      tahy: 'e4 e6 d4 d5 Nc3 Nf6 Bg5 Be7' },
+    { nazev: 'Francouzská obrana, tarraschova varianta',
+      tahy: 'e4 e6 d4 d5 Nd2 c5 exd5 exd5' },
+    { nazev: 'Francouzská obrana, postupová varianta',
+      tahy: 'e4 e6 d4 d5 e5 c5 c3 Nc6' },
+    { nazev: 'Francouzská obrana, vyměněná varianta',
+      tahy: 'e4 e6 d4 d5 exd5 exd5 Nf3 Nf6' },
+
+    /* --- 1.d4 ------------------------------------------------- */
+    { nazev: 'Zahájení dámským pěšcem', tahy: 'd4:3' },
+
+    /* 1.d4 d5 */
+    { nazev: 'Dámský gambit',
+      tahy: 'd4 d5:3 c4' },
+    { nazev: 'Dámský gambit odmítnutý',
+      tahy: 'd4 d5 c4 e6:2 Nc3:2 Nf6 Bg5:2 Be7' },
+    { nazev: 'Dámský gambit odmítnutý, vyměněná varianta',
+      tahy: 'd4 d5 c4 e6 Nc3 Nf6 cxd5 exd5' },
+    { nazev: 'Dámský gambit přijatý',
+      tahy: 'd4 d5 c4 dxc4 Nf3 Nf6 e3 e6' },
+    { nazev: 'Slovanská obrana',
+      tahy: 'd4 d5 c4 c6:2 Nf3 Nf6 Nc3 dxc4' },
+
+    /* 1.d4 Jf6 */
+    { nazev: 'Indická obrana',
+      tahy: 'd4 Nf6:3 c4 e6:2' },
+    { nazev: 'Indická obrana',
+      tahy: 'd4 Nf6 c4 g6:2 Nc3' },
+    { nazev: 'Nimcovičova indická',
+      tahy: 'd4 Nf6 c4 e6 Nc3:2 Bb4 e3 O-O' },
+    { nazev: 'Dámská indická',
+      tahy: 'd4 Nf6 c4 e6 Nf3 b6 g3 Ba6' },
+    { nazev: 'Královská indická',
+      tahy: 'd4 Nf6 c4 g6 Nc3 Bg7 e4 d6' },
+    { nazev: 'Grünfeldova indická',
+      tahy: 'd4 Nf6 c4 g6 Nc3 d5 cxd5 Nxd5' }
+  ];
+
+  var kniha = null;          // haš pozice -> pole tahů; staví se líně
+  var knihaChyby = [];       // varianty, které se nepodařilo přehrát
+
+  /* Zápis tahu v knize: „a6“, nebo „a6:3“ s vahou. */
+  function rozeberZapis(kus) {
+    var dvojtecka = kus.indexOf(':');
+    if (dvojtecka < 0) { return { san: kus, vaha: 1 }; }
+    return { san: kus.slice(0, dvojtecka),
+             vaha: parseFloat(kus.slice(dvojtecka + 1)) || 1 };
+  }
+
+  /* Notace se nerozebírá, ale porovnává: pro každý legální tah si
+     necháme enginem napsat jeho zápis a hledáme shodu. Je to o řád
+     pomalejší než pořádný rozbor, ale kniha se staví jednou — a odpadá
+     tím druhá kopie pravidel notace, což je věc, jejíž chyba se hledá
+     nejhůř. */
+  function bezSachu(zapis) {
+    return zapis.replace(/[+#]$/, '');
+  }
+
+  function tahPodleSan(poz, san) {
+    var tahy = S.legalniTahy(poz);
+    var cil = bezSachu(san);
+    for (var i = 0; i < tahy.length; i++) {
+      if (bezSachu(S.zapisSan(poz, tahy[i])) === cil) { return tahy[i]; }
+    }
+    return null;
+  }
+
+  function pridejDoKnihy(mapa, poz, t, vaha, nazev) {
+    var klic = has(poz);
+    var radek = mapa[klic];
+    var i;
+
+    if (!radek) { radek = mapa[klic] = []; }
+
+    for (i = 0; i < radek.length; i++) {
+      if (radek[i].z === t.z && radek[i].na === t.na &&
+          radek[i].povyseni === (t.povyseni || 0)) {
+        /* Týž tah zavedený znovu pozdější variantou. Váhy se
+           nesčítají, bere se vyšší: sčítáním by přidání jediné
+           podvarianty potichu překlopilo losování o několik půltahů
+           výš, kde s ní nemá co dělat. Název zůstává první, tedy ten
+           obecnější. */
+        if (vaha > radek[i].vaha) { radek[i].vaha = vaha; }
+        return;
+      }
+    }
+
+    radek.push({ z: t.z, na: t.na, povyseni: t.povyseni || 0,
+                 vaha: vaha, nazev: nazev });
+  }
+
+  function postavKnihu() {
+    var mapa = {};
+    var chyby = [];
+    var i, k, varianta, kusy, rozbor, tah, poz;
+
+    for (i = 0; i < KNIHA_VARIANTY.length; i++) {
+      varianta = KNIHA_VARIANTY[i];
+      poz = S.novaPozice();
+      kusy = varianta.tahy.split(/\s+/);
+
+      for (k = 0; k < kusy.length; k++) {
+        if (!kusy[k]) { continue; }
+        rozbor = rozeberZapis(kusy[k]);
+        tah = tahPodleSan(poz, rozbor.san);
+        if (!tah) {
+          chyby.push(varianta.nazev + ': tah „' + rozbor.san + '“ po ' +
+                     k + ' půltazích není legální');
+          break;
+        }
+        pridejDoKnihy(mapa, poz, tah, rozbor.vaha, varianta.nazev);
+        S.zahraj(poz, tah);
+      }
+    }
+
+    kniha = mapa;
+    knihaChyby = chyby;
+    return mapa;
+  }
+
+  /* Kniha se staví až při prvním dotazu. Postavit ji při načtení
+     stránky by stálo pár milisekund navíc i tomu, kdo si přišel zahrát
+     dva na jednom zařízení a soupeře nikdy nezapne. */
+  function knihaMapa() {
+    return kniha || postavKnihu();
+  }
+
+  /* Co kniha v téhle pozici zná. null znamená „pozice v knize není“ —
+     tím se pozná, že engine z knihy vypadl. */
+  function knihaTahy(poz) {
+    return knihaMapa()[has(poz)] || null;
+  }
+
+  /* Kolikátý půltah se z pozice hraje. Bere se z čísla tahu, ne
+     z délky zápisu: hledání dostává jen pozici, partii nezná. */
+  function pultahuOdZacatku(poz) {
+    return (poz.tah - 1) * 2 + (poz.naTahu === S.CERNA ? 1 : 0);
+  }
+
+  /* Co by z knihy vzala tahle obtížnost, tedy včetně jejího stropu na
+     počet půltahů. Ptát se takhle, a ne jen na pozici, je důležité pro
+     ukazatel u desky: slabá obtížnost přestane knihu číst dřív, než
+     pozice z knihy vyjde, a „soupeř je v knize“ by od té chvíle lhalo.
+
+     Přijímá i nastavení obtížnosti, ne jen její jméno — hledání ho už
+     má rozbalené a dohledávat ho podruhé je zbytečné. */
+  function knihaProObtiznost(poz, obtiznost) {
+    var nast = (typeof obtiznost === 'string')
+      ? (OBTIZNOSTI[obtiznost] || OBTIZNOSTI.stredni)
+      : (obtiznost || OBTIZNOSTI.stredni);
+    var strop = nast.kniha || 0;
+    if (!strop || pultahuOdZacatku(poz) >= strop) { return null; }
+    return knihaTahy(poz);
+  }
+
+  /* Losování podle vah. Ne nejlepší tah, ale náhodný podle vah — o to
+     v knize jde: aby počítač nehrál pokaždé tutéž partii. */
+  function losujZKnihy(radek) {
+    var soucet = 0, los, i;
+    for (i = 0; i < radek.length; i++) { soucet += radek[i].vaha; }
+    los = Math.random() * soucet;
+    for (i = 0; i < radek.length; i++) {
+      los -= radek[i].vaha;
+      if (los < 0) { return radek[i]; }
+    }
+    return radek[radek.length - 1];
+  }
+
+  /* Odpověď z knihy ve stejném tvaru, jaký vrací hledej(). Volající
+     tak nemusí rozlišovat, odkud tah přišel — až na pole kniha, podle
+     kterého se dá napsat název varianty. */
+  function zKnihy(poz, nast) {
+    var radek = knihaProObtiznost(poz, nast);
+    if (!radek || !radek.length) { return null; }
+
+    var zvoleny = losujZKnihy(radek);
+    return {
+      tah: { z: zvoleny.z, na: zvoleny.na, povyseni: zvoleny.povyseni },
+      skore: 0,
+      hloubka: 0,
+      uzly: 0,
+      ms: 0,
+      kniha: zvoleny.nazev,
+      kandidati: radek.map(function (r) {
+        return { tah: { z: r.z, na: r.na, povyseni: r.povyseni }, skore: 0 };
+      })
+    };
+  }
+
+  /* ---------------------------------------------------------------
+     Obtížnosti. */
+
+  /* Kolik půltahů od začátku partie smí obtížnost brát tahy z knihy.
+     Slabá jen čtyři: má vypadat jako hráč, který zahájení odněkud zná,
+     ale hlavní varianty nedrží — po druhém tahu si musí poradit sama,
+     a právě tam se pozná, že hloubka dva je hloubka dva. Ostatní
+     dohrají knihu do konce; hlubší než šestnáct půltahů stejně není,
+     takže strop je jen zaokrouhlené „celou“. */
+  var KNIHA_CELA = 99;
+
+  var OBTIZNOSTI = {
+    slaba:   { id: 'slaba',   hloubka: 2, klid: false, nahoda: 0.2,
+               plneOkno: true, kniha: 4 },
+    stredni: { id: 'stredni', hloubka: 3, klid: true, kniha: KNIHA_CELA },
+    silna:   { id: 'silna',   klid: true, cas: 2000, maxHloubka: 24,
+               kniha: KNIHA_CELA },
+
+    /* Nastavení pro rozbor dohrané partie. Není to soupeř — v nabídce
+       se neobjevuje, hraje se podle něj jen zpětně.
+
+       Hloubka čtyři je strop, ne volba: rozbor prochází každou pozici
+       partie a při hloubce čtyři to na střední hře vychází kolem
+       třetiny sekundy na pozici, tedy u padesátitahové partie na půl
+       minuty. Hloubka šest je řádově víc a rozbor by trval minuty,
+       které nikdo nevydrží.
+
+       Kniha je vypnutá schválně: rozbor má pozici ohodnotit, ne
+       vytáhnout tah z knihy. Knižní tahy pozná zápis partie sám
+       a rozbor je nehodnotí. */
+    rozbor:  { id: 'rozbor',  klid: true, hloubka: 4, kniha: 0 }
+  };
+
+  var STROP_PEVNE_HLOUBKY = 5000;   // pojistka proti zaseknutí
+
+  function novyKontext(nast, prepisCasu) {
+    var limit = prepisCasu || nast.cas || STROP_PEVNE_HLOUBKY;
+    return { uzly: 0, stop: false, klid: !!nast.klid, konec: ted() + limit };
+  }
+
+  function jeMatoveSkore(skore) {
+    return skore > MAT_PRAH || skore < -MAT_PRAH;
+  }
+
+  /* Z kandidátů se vybere tah, který se opravdu zahraje. Slabá
+     obtížnost tu s pravděpodobností 20 % sáhne po druhém nejlepším —
+     ne po náhodném: náhodný tah vypadá jako porucha, kdežto druhý
+     nejlepší vypadá jako hráč, který něco přehlédl. */
+  function vyberZKandidatu(kandidati, nast) {
+    if (nast.nahoda && kandidati.length > 1 && Math.random() < nast.nahoda) {
+      return kandidati[1];
+    }
+    return kandidati[0];
+  }
+
+  /* Popis tahu, ne tah sám: objekt tahu patří ke kopii pozice, se
+     kterou soupeř počítal. Volající si podle popisu najde svůj
+     vlastní, rovnocenný tah ve své pozici. */
+  function popisTahu(t) {
+    return { z: t.z, na: t.na, povyseni: t.povyseni || 0 };
+  }
+
+  /* Synchronní hledání — pro testy a pro pevné hloubky. Vrací
+     { tah, skore, hloubka, uzly, ms, kandidati }.
+
+     zahrane je seznam hašů pozic, které v partii už nastaly; smí
+     chybět, pak se opakování neřeší. */
+  function hledej(poz, obtiznostId, prepisCasu, zahrane) {
+    var nast = OBTIZNOSTI[obtiznostId] || OBTIZNOSTI.stredni;
+    var kopie = S.zFen(S.doFen(poz));
+
+    /* Kniha se ptá první. Když pozici zná, prohledávání se vůbec
+       nespustí — proto je dotaz tady a ne až mezi kandidáty. */
+    var zKnizky = zKnihy(kopie, nast);
+    if (zKnizky) { return zKnizky; }
+
+    var ctx = novyKontext(nast, prepisCasu);
+    var opakovane = sadaHasu(zahrane);
+    var zacatek = ted();
+    var kandidati = null, hloubka = 0, vysledek;
+
+    vyprazdniTT();
+
+    if (nast.cas || prepisCasu) {
+      for (var h = 1; h <= (nast.maxHloubka || 24); h++) {
+        vysledek = korenovaIterace(kopie, h, ctx, kandidati, false, opakovane);
+        if (!vysledek) { break; }          // došel čas uprostřed iterace
+        kandidati = vysledek;
+        hloubka = h;
+        if (ted() >= ctx.konec || jeMatoveSkore(kandidati[0].skore)) { break; }
+      }
+    } else {
+      kandidati = korenovaIterace(kopie, nast.hloubka, ctx, null,
+                                  !!nast.plneOkno, opakovane);
+      hloubka = nast.hloubka;
+    }
+
+    if (!kandidati || !kandidati.length) { return null; }
+
+    var zvoleny = vyberZKandidatu(kandidati, nast);
+    return {
+      tah: popisTahu(zvoleny.tah),
+      skore: zvoleny.skore,
+      hloubka: hloubka,
+      uzly: ctx.uzly,
+      ms: Math.round(ted() - zacatek),
+      kniha: null,
+      kandidati: kandidati.map(function (k) {
+        return { tah: popisTahu(k.tah), skore: k.skore };
+      })
+    };
+  }
+
+  /* Ohodnocení jedné pozice pro rozbor dohrané partie: skóre pohledem
+     toho, kdo je v ní na tahu, a tah, který engine považuje za
+     nejlepší.
+
+     Pozice bez tahů se neprohledává — hledej() na ní vrací null,
+     protože není z čeho vybírat. Její hodnota ale plyne přímo
+     z pravidel: mat je prohra toho, kdo je na tahu, pat nula. Bez
+     tohohle by poslední tah partie vyšel proti nule a mat by se
+     v rozboru ztratil.
+
+     Rozbor běží ve web workeru i na hlavním vlákně (když worker
+     nejde vyrobit) a obě cesty musí počítat stejně, proto je to
+     jedna funkce a ne dvě kopie. */
+  function rozeberPozici(poz) {
+    var v = hledej(poz, 'rozbor');
+    if (v) { return { skore: v.skore, tah: v.tah }; }
+    return { skore: (S.stavPartie(poz).duvod === 'mat') ? -MAT : 0, tah: null };
+  }
+
+  /* Asynchronní hledání pro hru.
+
+     Každá iterace prohlubování běží ve vlastním tiku, takže mezi nimi
+     stránka překreslí (a stihne ukázat dosaženou hloubku). Uvnitř
+     iterace se nepřerušuje — na to by prohledávání muselo umět
+     pokračovat z půlky, což je v rekurzi drahá věc. Iteraci proto
+     hlídá čas: když jí dojde, výsledek se zahodí a hraje se ten
+     z poslední dokončené.
+
+     Kdyby to na slabším zařízení trhalo, další krok je přesunout
+     tenhle díl do web workeru — proto si nesahá na DOM. */
+  function hledejAsync(poz, obtiznostId, zahrane, zpetne) {
+    var nast = OBTIZNOSTI[obtiznostId] || OBTIZNOSTI.stredni;
+    var kopie = S.zFen(S.doFen(poz));
+
+    /* Tah z knihy je hotový hned, ale ohlásit se musí až z dalšího
+       tiku. Volající si před zavoláním nastavuje „počítám“ a překresluje
+       — kdyby odpověď přišla ještě uvnitř toho volání, zahrál by se tah
+       zevnitř rozmýšlení a další tah by se rozjel po nedokončeném
+       předchozím. */
+    var zKnizky = zKnihy(kopie, nast);
+    if (zKnizky) {
+      setTimeout(function () {
+        if (zpetne.zruseno && zpetne.zruseno()) { return; }
+        zpetne.hotovo(zKnizky);
+      }, 0);
+      return;
+    }
+
+    var ctx = novyKontext(nast);
+    var opakovane = sadaHasu(zahrane);
+    var zacatek = ted();
+    var kandidati = null;
+    var hloubka = 0;
+    var dalsiHloubka = 1;
+
+    vyprazdniTT();
+
+    function hotovo() {
+      if (!kandidati || !kandidati.length) { zpetne.hotovo(null); return; }
+      var zvoleny = vyberZKandidatu(kandidati, nast);
+      zpetne.hotovo({
+        tah: popisTahu(zvoleny.tah),
+        skore: zvoleny.skore,
+        hloubka: hloubka,
+        uzly: ctx.uzly,
+        ms: Math.round(ted() - zacatek),
+        kniha: null
+      });
+    }
+
+    function krok() {
+      if (zpetne.zruseno && zpetne.zruseno()) { return; }
+
+      if (!nast.cas) {
+        kandidati = korenovaIterace(kopie, nast.hloubka, ctx, null,
+                                    !!nast.plneOkno, opakovane);
+        hloubka = nast.hloubka;
+        hotovo();
+        return;
+      }
+
+      var vysledek = korenovaIterace(kopie, dalsiHloubka, ctx, kandidati,
+                                     false, opakovane);
+      if (vysledek) {
+        kandidati = vysledek;
+        hloubka = dalsiHloubka;
+        if (zpetne.naHloubku) { zpetne.naHloubku(hloubka, kandidati[0].skore); }
+      }
+
+      dalsiHloubka++;
+      if (!vysledek || ted() >= ctx.konec ||
+          dalsiHloubka > (nast.maxHloubka || 24) ||
+          jeMatoveSkore(kandidati[0].skore)) {
+        hotovo();
+        return;
+      }
+      setTimeout(krok, 0);
+    }
+
+    setTimeout(krok, 0);
+  }
+
+  /* ---------------------------------------------------------------
+     Testy v konzoli. */
+
+  var MATY_JEDNIM_TAHEM = [
+    { nazev: 'věž na poslední řadě',  fen: '6k1/5ppp/8/8/8/8/8/R6K w - -' },
+    { nazev: 'věž, na tahu černý',    fen: 'r6k/8/8/8/8/8/5PPP/6K1 b - -' },
+    { nazev: 'dáma s podporou krále', fen: 'k7/8/1K6/8/8/8/8/7Q w - -' },
+    { nazev: 'dusivý mat jezdcem',    fen: '6rk/6pp/8/6N1/8/8/8/6K1 w - -' }
+  ];
+
+  var STREDNI_HRA = [
+    'r3k2r/p1ppqpb1/bn2pnp1/3PN3/1p2P3/2N2Q1p/PPPBBPPP/R3K2R w KQkq -',
+    'r1bqkb1r/pp3ppp/2n1pn2/2pp4/3P1B2/2N1PN2/PPP2PPP/R2QKB1R w KQkq -',
+    'r2q1rk1/pp2ppbp/2np1np1/2p5/2P1P3/2NP1N1P/PP2BPP1/R1BQ1RK1 b - -',
+    'r1b1k2r/ppppqppp/2n2n2/2b5/2B1P3/2N2N2/PPPP1PPP/R1BQ1RK1 w kq -'
+  ];
+
+  var POSTUPNE = ['slaba', 'stredni', 'silna'];
+
+  function zapisPopisu(popis) {
+    return S.jmenoPole(popis.z) + S.jmenoPole(popis.na) +
+           (popis.povyseni ? ' pnbrqk'.charAt(popis.povyseni) : '');
+  }
+
+  /* Najde v pozici tah odpovídající popisu; vrátí null, když takový
+     legální tah není. Slouží zároveň jako kontrola legality. */
+  function tahPodlePopisu(poz, popis) {
+    var legalni = S.legalniTahy(poz);
+    for (var i = 0; i < legalni.length; i++) {
+      if (legalni[i].z === popis.z && legalni[i].na === popis.na &&
+          (legalni[i].povyseni || 0) === (popis.povyseni || 0)) {
+        return legalni[i];
+      }
+    }
+    return null;
+  }
+
+  function testMaty() {
+    var chyb = 0;
+    console.log('1) Mat jedním tahem');
+    MATY_JEDNIM_TAHEM.forEach(function (m) {
+      POSTUPNE.forEach(function (id) {
+        var poz = S.zFen(m.fen);
+        var v = hledej(poz, id);
+
+        /* Kontroluje se nejlepší tah, ne zahraný: slabá obtížnost
+           schválně jednou z pěti sáhne po druhém v pořadí, takže by
+           test jinak náhodně padal. Že je mat v pořadí první, je
+           přesně to, co se testuje.
+
+           A netestuje se konkrétní tah — matů jedním tahem bývá
+           v pozici několik a všechny jsou správně. Ptáme se rovnou
+           desky: zahraj ten tah a je mat? */
+        var popis = v.kandidati[0].tah;
+        var tah = tahPodlePopisu(poz, popis);
+        var maty = false;
+        if (tah) {
+          S.zahraj(poz, tah);
+          maty = S.stavPartie(poz).duvod === 'mat';
+        }
+        var sedi = maty && v.kandidati[0].skore > MAT_PRAH;
+        if (!sedi) { chyb++; }
+        console.log('   ' + (sedi ? 'OK   ' : 'CHYBA') + ' ' + id + ' — ' +
+                    m.nazev + ': ' + zapisPopisu(popis) +
+                    (maty ? ' je mat' : ' NENÍ mat') +
+                    ' (skóre ' + v.kandidati[0].skore + ')');
+      });
+    });
+    return chyb;
+  }
+
+  function testCasy() {
+    console.log('2) Nejhorší čas tahu ve střední hře');
+    POSTUPNE.forEach(function (id) {
+      var nejhorsi = 0, uzly = 0, hloubka = 0;
+      STREDNI_HRA.forEach(function (fen) {
+        var v = hledej(S.zFen(fen), id);
+        if (v.ms > nejhorsi) { nejhorsi = v.ms; }
+        uzly += v.uzly;
+        hloubka = Math.max(hloubka, v.hloubka);
+      });
+      console.log('   ' + id + ': nejhůř ' + nejhorsi + ' ms, celkem ' +
+                  uzly + ' uzlů, nejhlouběji ' + hloubka);
+    });
+    return 0;
+  }
+
+  /* Partie sama proti sobě. Nejde o to, jak hraje, ale že hraje:
+     každý tah musí být v seznamu legálních tahů a partie musí
+     regulérně skončit, ne se zaseknout.
+
+     Výchozí limit je kratší než v nastavení hry — plný dvousekundový
+     limit projde stejným kódem, jen by test běžel minuty. Kdo chce
+     ověřit i ten, zavolá SachyAI.testPartie(2000). */
+  function testPartie(limitNaTah) {
+    var limit = limitNaTah || 250;
+    var poz = S.novaPozice();
+    var chyb = 0, pultahu = 0, zacatek = ted();
+    var stav = S.stavPartie(poz);
+    var nejdelsi = 0;
+
+    /* Haše všech pozic partie. Právě tohle dostane soupeř, aby
+       ve vyhrané pozici nezačal opakovat tahy — a tenhle test je
+       kontrola, že to funguje. */
+    var zahrane = [has(poz)];
+
+    console.log('3) Silná AI sama proti sobě (limit ' + limit + ' ms na tah)');
+
+    while (!stav.konec && pultahu < 400) {
+      var v = hledej(poz, 'silna', limit, zahrane);
+      if (!v) { console.log('   CHYBA: soupeř nevrátil tah'); chyb++; break; }
+      if (v.ms > nejdelsi) { nejdelsi = v.ms; }
+
+      var nalezeny = tahPodlePopisu(poz, v.tah);
+      if (!nalezeny) {
+        console.log('   CHYBA: nelegální tah ' + zapisPopisu(v.tah) +
+                    ' v pozici ' + S.doFen(poz));
+        chyb++;
+        break;
+      }
+
+      S.zahraj(poz, nalezeny);
+      zahrane.push(has(poz));
+      pultahu++;
+      stav = S.stavPartie(poz);
+    }
+
+    if (!stav.konec) {
+      console.log('   CHYBA: partie neskončila ani po ' + pultahu + ' půltazích');
+      chyb++;
+    } else {
+      console.log('   OK    ' + pultahu + ' půltahů, konec: ' + stav.popis +
+                  ' (' + stav.duvod + '), nejdelší tah ' + nejdelsi + ' ms, ' +
+                  'celkem ' + Math.round((ted() - zacatek) / 1000) + ' s');
+      console.log('   ' + S.doFen(poz));
+    }
+    return chyb;
+  }
+
+  /* Kontrola otvírací knihy a haše, na kterém stojí.
+
+     Dvě věci se musí ověřit zvlášť, protože selhávají tiše. První je,
+     že se všechny varianty daly přehrát — překlep v zápisu variantu
+     jen zkrátí a hra běží dál, jen kniha mlčí. Druhá je, že haš
+     odlišuje pozice, které se liší jen právem na rošádu nebo polem pro
+     braní mimochodem: kdyby ne, kniha by v pozici po 1.e4 mohla vrátit
+     tah patřící jiné pozici s touž deskou. */
+  function testKniha() {
+    var chyb = 0;
+    var mapa = knihaMapa();
+    var klice = Object.keys(mapa);
+    var pocetTahu = 0, i;
+
+    console.log('4) Otvírací kniha');
+
+    for (i = 0; i < klice.length; i++) { pocetTahu += mapa[klice[i]].length; }
+
+    if (knihaChyby.length) {
+      chyb += knihaChyby.length;
+      for (i = 0; i < knihaChyby.length; i++) {
+        console.log('   CHYBA ' + knihaChyby[i]);
+      }
+    } else {
+      console.log('   OK    ' + KNIHA_VARIANTY.length + ' variant se přehrálo, ' +
+                  klice.length + ' pozic a ' + pocetTahu + ' tahů v knize');
+    }
+
+    /* Haš musí rozlišit pozice, které se liší jen právy a polem pro
+       braní mimochodem. Deska je v každé dvojici tatáž. */
+    var dvojice = [
+      { co: 'práva na rošádu',
+        a: '4k2r/8/8/8/8/8/8/R3K3 w Qk - 0 1',
+        b: '4k2r/8/8/8/8/8/8/R3K3 w - - 0 1' },
+      { co: 'pole pro braní mimochodem',
+        a: 'rnbqkbnr/ppp1pppp/8/3pP3/8/8/PPPP1PPP/RNBQKBNR w KQkq d6 0 3',
+        b: 'rnbqkbnr/ppp1pppp/8/3pP3/8/8/PPPP1PPP/RNBQKBNR w KQkq - 0 3' },
+      { co: 'sloupec pole pro braní mimochodem',
+        a: 'rnbqkbnr/pp1ppppp/8/2pP4/8/8/PPP1PPPP/RNBQKBNR w KQkq c6 0 3',
+        b: 'rnbqkbnr/pp1ppppp/8/2pP4/8/8/PPP1PPPP/RNBQKBNR w KQkq - 0 3' }
+    ];
+
+    for (i = 0; i < dvojice.length; i++) {
+      var h1 = has(S.zFen(dvojice[i].a));
+      var h2 = has(S.zFen(dvojice[i].b));
+      if (h1 === h2) {
+        chyb++;
+        console.log('   CHYBA haš nerozliší ' + dvojice[i].co);
+      } else {
+        console.log('   OK    haš rozlišuje ' + dvojice[i].co);
+      }
+    }
+
+    /* A totéž na skutečné partii: po 1.e4 vzniká pole e3 pro braní
+       mimochodem a haš té pozice se nesmí rovnat haši téže desky bez
+       něj. Kdyby se rovnal, kniha by po 1.e4 sáhla do řádku, který
+       patří pozici, jaká v partii vůbec nenastala. */
+    var poz = S.novaPozice();
+    S.zahraj(poz, tahPodleSan(poz, 'e4'));
+    var sMimo = has(poz);
+    var fen = S.doFen(poz).split(' ');
+    fen[3] = '-';
+    if (sMimo === has(S.zFen(fen.join(' ')))) {
+      chyb++;
+      console.log('   CHYBA pozice po 1.e4 má týž haš jako bez práva brát mimochodem');
+    } else {
+      console.log('   OK    pozice po 1.e4 nese ve haši i pole e3');
+    }
+
+    /* Každý tah v knize musí být v své pozici legální. Pozice se
+       k haši nepamatuje, takže se kontroluje přehráním variant znovu —
+       tentokrát se u každého půltahu ptáme knihy. */
+    var nelegalnich = 0, neznamych = 0;
+    for (i = 0; i < KNIHA_VARIANTY.length; i++) {
+      var p = S.novaPozice();
+      var kusy = KNIHA_VARIANTY[i].tahy.split(/\s+/);
+      for (var k = 0; k < kusy.length; k++) {
+        if (!kusy[k]) { continue; }
+        var radek = knihaTahy(p);
+        if (!radek) { neznamych++; break; }
+        for (var j = 0; j < radek.length; j++) {
+          if (!najdiPodleKnihy(p, radek[j])) { nelegalnich++; }
+        }
+        var t = tahPodleSan(p, rozeberZapis(kusy[k]).san);
+        if (!t) { break; }
+        S.zahraj(p, t);
+      }
+    }
+
+    if (nelegalnich || neznamych) {
+      chyb += nelegalnich + neznamych;
+      console.log('   CHYBA ' + nelegalnich + ' nelegálních tahů, ' +
+                  neznamych + ' pozic kniha nezná');
+    } else {
+      console.log('   OK    všechny tahy v knize jsou ve své pozici legální');
+    }
+
+    return chyb;
+  }
+
+  function najdiPodleKnihy(poz, zaznam) {
+    var tahy = S.legalniTahy(poz);
+    for (var i = 0; i < tahy.length; i++) {
+      if (tahy[i].z === zaznam.z && tahy[i].na === zaznam.na &&
+          (tahy[i].povyseni || 0) === zaznam.povyseni) { return tahy[i]; }
+    }
+    return null;
+  }
+
+  /* Testy běží po částech přes setTimeout, ať se výpis v konzoli
+     objevuje průběžně a prohlížeč mezi nimi dýchá. */
+  function spustTesty(limitNaTah) {
+    var chyb = 0;
+    console.log('Šachy — kontrola soupeře.');
+    setTimeout(function () {
+      chyb += testMaty();
+      setTimeout(function () {
+        chyb += testCasy();
+        setTimeout(function () {
+          chyb += testKniha();
+          setTimeout(function () {
+            chyb += testPartie(limitNaTah);
+            console.log(chyb ? chyb + ' chyb.' : 'Hotovo, všechno sedí.');
+          }, 0);
+        }, 0);
+      }, 0);
+    }, 0);
+  }
+
+  var AI = {
+    OBTIZNOSTI: OBTIZNOSTI,
+    hodnot: hodnot,
+    has: has,
+    hledej: hledej,
+    hledejAsync: hledejAsync,
+    MAT_PRAH: MAT_PRAH,
+    PESEC: HODNOTA[S.PESEC],
+    rozeberPozici: rozeberPozici,
+    knihaTahy: knihaTahy,
+    knihaProObtiznost: knihaProObtiznost,
+    knihaVarianty: KNIHA_VARIANTY,
+    spustTesty: spustTesty,
+    testKniha: testKniha,
+    testPartie: testPartie
+  };
+
+  if (GLOB) { GLOB.SachyAI = AI; }
+  if (typeof module !== 'undefined' && module.exports) {
+    module.exports = AI;       // ať se testy dají pustit i mimo prohlížeč
+  }
+}());
+</script>
+
+<script>
+(function () {
+  'use strict';
+
+  /* ===============================================================
+     DESKA A OVLÁDÁNÍ
+
+     Pravidla umí engine výš (window.Sachy), tenhle díl je jen o tom,
+     co hráč vidí a čeho se dotkne. Partie pro dva u jednoho zařízení;
+     počítač jako soupeř přijde později.
+     --------------------------------------------------------------- */
+
+  var S = window.Sachy;
+  if (!S) { return; }
+
+  /* Zlom, za kterým stojí zápis vedle desky. Musí sedět s média
+     dotazem v CSS: JS ho potřebuje kvůli rozpočtu šířky, protože
+     vedle sebe si zápis ukrojí svůj sloupec a desce zbude méně. */
+  var DOTAZ_VEDLE    = '(min-width: 820px)';
+  var SIRKA_PANELU   = 260;   // = .panel max-width
+  var MEZERA_SLOUPCU = 16;    // = gap v .hra
+
+  var OKRAJ_OKNA  = 16;       // ať se deska nelepí na boky okna
+  var REZERVA     = 20;       // ani na jeho spodek
+  var PODIL_VYSKY = 0.62;     // podlaha výškového rozpočtu desky
+
+  /* Meze pole jsou v CSS (--pole-min, --pole-max), protože je rozlišuje
+     média dotaz (pointer: coarse). Tyhle hodnoty se použijí jen tehdy,
+     když se proměnná nedá přečíst. */
+  var POLE_MIN_ZALOHA = 40;
+  var POLE_MAX_ZALOHA = 96;
+
+  var PRAH_TAZENI = 5;        // px, než se ze stisku stane tažení
+
+  var KLIC_PARTIE    = 'wh-sachy-partie';
+  var KLIC_NASTAVENI = 'wh-sachy-nastaveni';
+
+  /* Volby soupeře. id 'dva' znamená dva lidi u jednoho zařízení,
+     ostatní id jsou zároveň klíče do SachyAI.OBTIZNOSTI — kdyby se
+     rozešly, hra by po přepnutí hledala neexistující obtížnost.
+     Detail pod názvem říká, co ta volba znamená v čase a síle;
+     bez něj se „střední" a „silná" liší jen slovem. */
+  var SOUPERI = [
+    { id: 'dva',     nazev: 'Dva hráči',  detail: 'u zařízení' },
+    { id: 'slaba',   nazev: 'AI slabá',   detail: 'hloubka 2' },
+    { id: 'stredni', nazev: 'AI střední', detail: 'hloubka 3' },
+    { id: 'silna',   nazev: 'AI silná',   detail: '2 s na tah' }
+  ];
+
+  var BARVY = [
+    { id: 'bila',  nazev: 'Bílého', detail: 'táhneš první' },
+    { id: 'cerna', nazev: 'Černého', detail: 'AI začíná' }
+  ];
+
+  var SVG_NS   = 'http://www.w3.org/2000/svg';
+  var XLINK_NS = 'http://www.w3.org/1999/xlink';
+
+  var SYMBOL = {};
+  SYMBOL[S.PESEC]   = 'f-p';
+  SYMBOL[S.JEZDEC]  = 'f-n';
+  SYMBOL[S.STRELEC] = 'f-b';
+  SYMBOL[S.VEZ]     = 'f-r';
+  SYMBOL[S.DAMA]    = 'f-q';
+  SYMBOL[S.KRAL]    = 'f-k';
+
+  var JMENO_FIGURY = {};
+  JMENO_FIGURY[S.PESEC]   = 'pěšec';
+  JMENO_FIGURY[S.JEZDEC]  = 'jezdec';
+  JMENO_FIGURY[S.STRELEC] = 'střelec';
+  JMENO_FIGURY[S.VEZ]     = 'věž';
+  JMENO_FIGURY[S.DAMA]    = 'dáma';
+  JMENO_FIGURY[S.KRAL]    = 'král';
+
+  /* ---------------------------------------------------------------
+     Prvky stránky. */
+
+  var elObal      = document.getElementById('deska-obal');
+  var elRamec     = document.getElementById('deska-ramec');
+  var elDeska     = document.getElementById('deska');
+  var elPopisRady = document.getElementById('popisky-rady');
+  var elPopisSl   = document.getElementById('popisky-sloupce');
+  var elSloupec   = elObal.parentNode;
+  var elStav      = document.getElementById('stav');
+  var elZapis     = document.getElementById('zapis');
+  var elKniha     = document.getElementById('kniha');
+  var elProhlizeni = document.getElementById('prohlizeni');
+  var elRozbor       = document.getElementById('rozbor');
+  var elRozborSpust  = document.getElementById('btn-rozbor');
+  var elRozborPrubeh = document.getElementById('rozbor-prubeh');
+  var elRozborPas    = document.getElementById('rozbor-pas');
+  var elRozborPopis  = document.getElementById('rozbor-popis');
+  var elRozborSouhrn = document.getElementById('rozbor-souhrn');
+  var elPromena   = document.getElementById('promena');
+  var elPromenaVolby = document.getElementById('promena-volby');
+  var elObnova    = document.getElementById('obnova');
+  var elObnovaPopis = document.getElementById('obnova-popis');
+
+  var elNova    = document.getElementById('btn-nova');
+  var elZpet    = document.getElementById('btn-zpet');
+  var elOtocit  = document.getElementById('btn-otocit');
+  var elNaKonec = document.getElementById('btn-na-konec');
+  var elZrusPromenu = document.getElementById('btn-promena-zrus');
+  var elPokracovat  = document.getElementById('btn-pokracovat');
+  var elZahodit     = document.getElementById('btn-zahodit');
+  var elVolbaSoupere   = document.getElementById('volba-soupere');
+  var elVolbaBarva     = document.getElementById('volba-barva');
+  var elNastaveniBarva = document.getElementById('nastaveni-barva');
+
+  /* ---------------------------------------------------------------
+     Stav.
+
+     partie      zápis od začátku: seznam tahů a výchozí pozice.
+                 Tohle je jediná pravda o partii — poziceZive se z ní
+                 dá kdykoliv přehrát, a taky se přehrává po každém
+                 kroku zpět. Kdyby se stav držel jen v pozici, muselo
+                 by se pro krok zpět pamatovat, co který tah sebral
+                 a jaká práva zrušil.
+     poziceZive  pozice po všech odehraných tazích
+     prohlizeny  -1 = deska ukazuje živou pozici; jinak počet tahů,
+                 po kterých se hráč dívá (prohlížení zápisu)
+     vyber       vybrané pole, -1 = nic
+     cile        cílové pole -> tahy, které tam vedou (proměna jich má
+                 čtyři, ostatní tahy jeden) */
+
+  var partie = { zacatek: S.ZAKLADNI_FEN, tahy: [] };
+  var poziceZive = S.zFen(partie.zacatek);
+  var prohlizeny = -1;
+  var otoceno = false;
+  var vyber = -1;
+  var cile = {};
+  var stavHry = null;
+  var tazeni = null;
+  var cekaPromena = null;
+  var promenaBezAnimace = false;
+  var polePodTazenim = -1;
+
+  var pola = [];          // 64 tlačítek desky; staví se jednou
+  var popisRady = [];
+  var popisSloupce = [];
+  var velikostPole = 48;
+
+  /* Soupeř a barva hráče. Drží se odděleně od partie: přepnutí
+     soupeře uprostřed hry je legitimní (chci si dohrát sám za oba)
+     a partii to nesmí zahodit. */
+  var nastaveni = nactiNastaveni();
+
+  var aiPremysli = false;
+  var aiHloubka  = 0;
+
+  /* Lístek běžícího hledání. Každý zásah do partie ho zvýší, a když
+     se počítač dopočítá s lístkem, který už neplatí, svůj tah zahodí
+     — jinak by po kroku zpět nebo po nové partii dopadl tah do úplně
+     jiné pozice. */
+  var aiTiket = 0;
+
+  /* ---------------------------------------------------------------
+     Úložiště.
+
+     Volání jsou v try/catch: v privátním okně a při zakázaném úložišti
+     vyhazuje localStorage výjimku už při čtení. Hra pak běží dál, jen
+     si partii nepamatuje. */
+
+  function uloz() {
+    try {
+      if (!partie.tahy.length) {
+        localStorage.removeItem(KLIC_PARTIE);
+        return;
+      }
+      var lehke = [];
+      for (var i = 0; i < partie.tahy.length; i++) {
+        lehke.push({
+          z:  partie.tahy[i].z,
+          na: partie.tahy[i].na,
+          p:  partie.tahy[i].povyseni || 0
+        });
+      }
+      localStorage.setItem(KLIC_PARTIE, JSON.stringify({
+        verze: 1, zacatek: partie.zacatek, tahy: lehke, otoceno: otoceno
+      }));
+    } catch (e) {
+      /* nevadí, partie vydrží jen do konce sezení */
+    }
+  }
+
+  function nactiUlozenou() {
+    var data;
+    try {
+      data = JSON.parse(localStorage.getItem(KLIC_PARTIE));
+    } catch (e) {
+      return null;
+    }
+    /* Ručně upravený nebo starý záznam nesmí hru shodit. Kontroluje se
+       tvar; jestli tahy dávají smysl, se pozná až při přehrávání a
+       nesmyslné se tam useknou. */
+    if (!data || data.verze !== 1 || !data.tahy || !data.tahy.length) { return null; }
+    if (typeof data.zacatek !== 'string') { return null; }
+    return data;
+  }
+
+  function najdiVolbu(seznam, id) {
+    for (var i = 0; i < seznam.length; i++) {
+      if (seznam[i].id === id) { return seznam[i]; }
+    }
+    return null;
+  }
+
+  function nactiNastaveni() {
+    try {
+      var d = JSON.parse(localStorage.getItem(KLIC_NASTAVENI));
+      /* Bereme jen to, co odpovídá nabídce — ručně upravený záznam by
+         jinak nastavil soupeře, kterého hra nezná. */
+      if (d && najdiVolbu(SOUPERI, d.soupere) && najdiVolbu(BARVY, d.barva)) {
+        return { soupere: d.soupere, barva: d.barva };
+      }
+    } catch (e) {
+      /* nepřístupné úložiště — jedeme na výchozím */
+    }
+    return { soupere: 'dva', barva: 'bila' };
+  }
+
+  function ulozNastaveni() {
+    try {
+      localStorage.setItem(KLIC_NASTAVENI, JSON.stringify(nastaveni));
+    } catch (e) {
+      /* nevadí, volba vydrží jen do konce sezení */
+    }
+  }
+
+  /* ---------------------------------------------------------------
+     Partie: přehrání, tah, krok zpět. */
+
+  function najdiVSeznamu(poz, zapis) {
+    var tahy = S.legalniTahy(poz);
+    for (var i = 0; i < tahy.length; i++) {
+      if (tahy[i].z === zapis.z && tahy[i].na === zapis.na &&
+          (tahy[i].povyseni || 0) === (zapis.povyseni || 0)) {
+        return tahy[i];
+      }
+    }
+    return null;
+  }
+
+  /* ---------------------------------------------------------------
+     Otvírací kniha z pohledu desky.
+
+     Kniha patří soupeři, ale zajímá i hráče: chce vědět, co hraje za
+     zahájení, a hlavně kdy soupeř přestal hrát z hlavy a začal počítat.
+     Ptáme se na to pozice, ne na tom, kdo tah zahrál — do knihy se
+     trefí i hráč sám a varianta se pak jmenuje stejně.
+
+     Jméno varianty se u tahu nedrží v úložišti: ukládá se jen odkud
+     a kam, jako u zápisu partie, a stejně jako zápis se dopočítá při
+     přehrání. Jinak by po obnovení partie z minula byla jména pryč. */
+
+  function knihaVPozici(poz) {
+    return window.SachyAI ? window.SachyAI.knihaTahy(poz) : null;
+  }
+
+  /* Název varianty, pod kterou kniha vede tenhle tah v téhle pozici;
+     null, když pozici nebo tah nezná. Počítá se PŘED zahráním tahu. */
+  function knihaNazev(poz, t) {
+    var radek = knihaVPozici(poz);
+    if (!radek) { return null; }
+    for (var i = 0; i < radek.length; i++) {
+      if (radek[i].z === t.z && radek[i].na === t.na &&
+          (radek[i].povyseni || 0) === (t.povyseni || 0)) {
+        return radek[i].nazev;
+      }
+    }
+    return null;
+  }
+
+  /* Poslední jméno, které v partii padlo. Po vypadnutí z knihy se pod
+     ním dohraje zbytek partie — hráč chce vědět, co hrál, ne jen že
+     kniha skončila. */
+  function posledniVarianta() {
+    for (var i = partie.tahy.length - 1; i >= 0; i--) {
+      if (partie.tahy[i].kniha) { return partie.tahy[i].kniha; }
+    }
+    return null;
+  }
+
+  /* Přehraje partii od začátku. Zápis se přitom dopočítává znovu —
+     algebraická notace závisí na pozici (rozlišení figur, šach, mat),
+     takže se nedá jen tak přenést z uloženého záznamu. */
+  function prehraj() {
+    /* Rozbor patří ke konkrétnímu seznamu tahů. Jakmile se ten mění,
+       jsou jeho značky o jiné partii a musí pryč — i rozpočítaný. */
+    zrusRozbor();
+    poziceZive = S.zFen(partie.zacatek);
+    var platne = [];
+    for (var i = 0; i < partie.tahy.length; i++) {
+      var t = najdiVSeznamu(poziceZive, partie.tahy[i]);
+      if (!t) { break; }        // poškozený záznam: dál se nepokračuje
+      platne.push({ z: t.z, na: t.na, povyseni: t.povyseni,
+                    san: S.zapisSan(poziceZive, t),
+                    kniha: knihaNazev(poziceZive, t) });
+      S.zahraj(poziceZive, t);
+    }
+    partie.tahy = platne;
+  }
+
+  function pozicePo(pocet) {
+    var poz = S.zFen(partie.zacatek);
+    for (var i = 0; i < pocet && i < partie.tahy.length; i++) {
+      var t = najdiVSeznamu(poz, partie.tahy[i]);
+      if (!t) { break; }
+      S.zahraj(poz, t);
+    }
+    return poz;
+  }
+
+  function zobrazenaPozice() {
+    return (prohlizeny < 0) ? poziceZive : pozicePo(prohlizeny);
+  }
+
+  function pocetZobrazenych() {
+    return (prohlizeny < 0) ? partie.tahy.length : prohlizeny;
+  }
+
+  /* bezAnimace: tah dotažený tažením myši. Figura už na cíli jednou
+     byla — pod kurzorem — a rozjet ji podruhé od výchozího pole
+     vypadá, jako by se tah odehrál dvakrát. */
+  function zahrajTah(t, bezAnimace) {
+    dokonciPresun();
+    zrusAI();
+    zrusRozbor();
+
+    var plan = bezAnimace ? null : pripravPresun(t);
+
+    partie.tahy.push({ z: t.z, na: t.na, povyseni: t.povyseni,
+                       san: S.zapisSan(poziceZive, t),
+                       kniha: knihaNazev(poziceZive, t) });
+    S.zahraj(poziceZive, t);
+    /* Kdo začal hrát, rozhodl se o nabídce z minula tím, že si jí
+       nevšímal — a hlavně ji už přepsal v úložišti. */
+    elObnova.hidden = true;
+    vyber = -1;
+    cile = {};
+    prohlizeny = -1;
+    uloz();
+    prekresli();
+    spustPresun(plan);
+    rozmysliSiAI();
+  }
+
+  /* Krok zpět ani proklikávání zápisu se neanimuje: neodehrává se tam
+     tah, ale skáče se po pozicích, a rozjetá figura by mátla — hlavně
+     když se skáče o několik tahů naráz. */
+  function krokZpet() {
+    if (!partie.tahy.length) { return; }
+    dokonciPresun();
+    zrusAI();
+    partie.tahy.pop();
+    prehraj();
+
+    /* Proti počítači se vrací oba tahy naráz. Vrátit jen ten poslední
+       by dalo pozici, ve které je zase na tahu počítač — ten by
+       okamžitě zahrál totéž a hráč by měl pocit, že tlačítko nefunguje. */
+    if (souperAI() && partie.tahy.length && poziceZive.naTahu === barvaAI()) {
+      partie.tahy.pop();
+      prehraj();
+    }
+
+    vyber = -1;
+    cile = {};
+    prohlizeny = -1;
+    zavriPromenu();
+    uloz();
+    prekresli();
+  }
+
+  function novaPartie() {
+    dokonciPresun();
+    zrusAI();
+    zrusRozbor();
+    partie = { zacatek: S.ZAKLADNI_FEN, tahy: [] };
+    poziceZive = S.zFen(partie.zacatek);
+    vyber = -1;
+    cile = {};
+    prohlizeny = -1;
+    zavriPromenu();
+    uloz();
+    prekresli();
+    prizpusob();
+    rozmysliSiAI();
+  }
+
+  /* ---------------------------------------------------------------
+     Soupeř.
+
+     Hledání běží v SachyAI a vrací jen popis tahu (odkud, kam,
+     proměna). Tah se pak dohledá mezi legálními tahy živé pozice —
+     počítač počítal nad vlastní kopií a jeho objekt tahu do téhle
+     pozice nepatří. Je to zároveň poslední kontrola: co není legální,
+     se nezahraje. */
+
+  function souperAI() {
+    return nastaveni.soupere !== 'dva' && window.SachyAI;
+  }
+
+  function barvaHrace() {
+    return nastaveni.barva === 'cerna' ? S.CERNA : S.BILA;
+  }
+
+  function barvaAI() {
+    return S.soupere(barvaHrace());
+  }
+
+  function naTahuAI() {
+    return souperAI() && !stavHry.konec && prohlizeny < 0 &&
+           poziceZive.naTahu === barvaAI();
+  }
+
+  function zrusAI() {
+    aiTiket++;
+    aiPremysli = false;
+    aiHloubka = 0;
+  }
+
+  /* Haše všech pozic, které v partii nastaly. Soupeř podle nich pozná,
+     že by tah vedl do pozice, kterou už jednou měl na desce, a ve
+     vyhrané pozici ji nezopakuje.
+
+     Počítá se to při každém tahu znovu z celého zápisu — je to pár
+     desítek pozic, tedy nic, a odpadá tím další stav, který by se
+     musel držet v souběhu s partií a po kroku zpět rozcházet. */
+  function zahraneHase() {
+    if (!window.SachyAI) { return null; }
+
+    var poz = S.zFen(partie.zacatek);
+    var hase = [window.SachyAI.has(poz)];
+    var i, t;
+
+    for (i = 0; i < partie.tahy.length; i++) {
+      t = najdiVSeznamu(poz, partie.tahy[i]);
+      if (!t) { break; }
+      S.zahraj(poz, t);
+      hase.push(window.SachyAI.has(poz));
+    }
+    return hase;
+  }
+
+  function rozmysliSiAI() {
+    if (!naTahuAI() || cekaPromena) { return; }
+
+    var muj = ++aiTiket;
+    aiPremysli = true;
+    aiHloubka = 0;
+    prekresli();
+
+    window.SachyAI.hledejAsync(poziceZive, nastaveni.soupere, zahraneHase(), {
+      zruseno: function () { return muj !== aiTiket; },
+      naHloubku: function (hloubka) {
+        if (muj !== aiTiket) { return; }
+        aiHloubka = hloubka;
+        prekresli();
+      },
+      hotovo: function (vysledek) {
+        if (muj !== aiTiket) { return; }
+        aiPremysli = false;
+        aiHloubka = 0;
+
+        var t = vysledek ? najdiVSeznamu(poziceZive, vysledek.tah) : null;
+        if (!t) { prekresli(); return; }
+        zahrajTah(t);
+      }
+    });
+  }
+
+  /* ---------------------------------------------------------------
+     Rozbor dohrané partie.
+
+     Projde všechny pozice partie, každou nechá enginem ohodnotit a
+     z rozdílu dvou sousedních hodnocení spočítá, kolik hráč tím tahem
+     ztratil. Pouští se tlačítkem, ne sám: je to desítky sekund práce
+     a nikdo o ni nestojí pokaždé, když domatuje.
+
+     Znaménka jsou tu jediné ošidné místo. Hledání vrací skóre vždycky
+     pohledem toho, kdo je v pozici na tahu — takže hodnocení PO tahu
+     patří soupeři a musí se otočit, než se od hodnocení PŘED tahem
+     odečte. Bez toho by se chyby přiřazovaly nesprávné straně a rozbor
+     by vypadal, že oba hráči hrají skvěle a přitom pořád ztrácejí.
+
+         ztráta = hodnocení[k] + hodnocení[k+1]
+
+     (druhý sčítanec je otočené hodnocení po tahu, proto plus).
+
+     Počítá se ve web workeru. Hloubka čtyři vychází na střední hře
+     kolem třetiny sekundy na pozici a nejhorší pozice přes vteřinu —
+     na hlavním vlákně by to stránku zaseklo v sekundových kusech
+     a ukazatel průběhu by se ani nestihl překreslit. Worker se skládá
+     z týchž <script data-engine> bloků, které běží ve stránce, takže
+     engine je v obou místech jeden a týž kód. Kdyby worker nešel
+     vyrobit (zakázaný blob, staré prostředí), spočítá se to po
+     jednotlivých pozicích na hlavním vlákně — trhaně, ale spočítá. */
+
+  var ROZBOR_PRAH_ROZHODNUTO = 1000;   // setin pěšce; nad tím je po partii
+
+  /* Meze kategorií v setinách pěšce, tak jak se čtou v rozborech:
+     do tří desetin je to dobrý tah, do devíti nepřesnost, do dvou
+     pěšců chyba, výš hrubka. */
+  var ROZBOR_MEZE = [
+    { do: 30,   druh: 'dobry' },
+    { do: 90,   druh: 'nepresnost' },
+    { do: 200,  druh: 'chyba' },
+    { do: Infinity, druh: 'hrubka' }
+  ];
+
+  /* Pořadí je zároveň pořadím řádků v souhrnu. */
+  var ROZBOR_DRUHY = [
+    { id: 'nejlepsi',   znacka: '★',  popis: 'Nejlepší' },
+    { id: 'dobry',      znacka: '·',  popis: 'Dobrý' },
+    { id: 'nepresnost', znacka: '?!', popis: 'Nepřesnost' },
+    { id: 'chyba',      znacka: '?',  popis: 'Chyba' },
+    { id: 'hrubka',     znacka: '??', popis: 'Hrubka' },
+    { id: 'kniha',      znacka: 'k',  popis: 'Z knihy' },
+    { id: 'rozhodnuto', znacka: '—',  popis: 'Rozhodnuto' }
+  ];
+
+  var rozbor = null;
+  var rozborTiket = 0;
+
+  /* Obsluha uvnitř workeru. Je to jediné místo, které v něm přibude
+     navíc k enginu: přijmi FEN, vrať hodnocení a nejlepší tah. */
+  var ROZBOR_OBSLUHA = [
+    'self.onmessage = function (ev) {',
+    '  var v = self.SachyAI.rozeberPozici(self.Sachy.zFen(ev.data.fen));',
+    '  self.postMessage({ i: ev.data.i, skore: v.skore, tah: v.tah });',
+    '};'
+  ].join('\n');
+
+  function zdrojWorkeru() {
+    var casti = [];
+    var skripty = document.querySelectorAll('script[data-engine]');
+    for (var i = 0; i < skripty.length; i++) { casti.push(skripty[i].textContent); }
+    casti.push(ROZBOR_OBSLUHA);
+    return casti.join('\n;\n');
+  }
+
+  function vyrobWorker(naZpravu, naChybu) {
+    if (typeof Worker === 'undefined' || typeof Blob === 'undefined' ||
+        !window.URL || !window.URL.createObjectURL) { return null; }
+    try {
+      var url = URL.createObjectURL(
+        new Blob([zdrojWorkeru()], { type: 'text/javascript' }));
+      var w = new Worker(url);
+      w.onmessage = naZpravu;
+      w.onerror = naChybu;
+      w.__url = url;      // uklidí se až s workerem, ne hned po startu
+      return w;
+    } catch (e) {
+      return null;
+    }
+  }
+
+  function zrusRozbor() {
+    rozborTiket++;
+    if (rozbor && rozbor.worker) {
+      rozbor.worker.terminate();
+      if (rozbor.worker.__url) { URL.revokeObjectURL(rozbor.worker.__url); }
+    }
+    rozbor = null;
+  }
+
+  /* FEN každé pozice partie, od výchozí po koncovou. Je jich o jednu
+     víc než tahů — poslední tah potřebuje hodnocení pozice, do které
+     vede. */
+  function fenyPartie() {
+    var poz = S.zFen(partie.zacatek);
+    var feny = [S.doFen(poz)];
+    for (var i = 0; i < partie.tahy.length; i++) {
+      var t = najdiVSeznamu(poz, partie.tahy[i]);
+      if (!t) { break; }
+      S.zahraj(poz, t);
+      feny.push(S.doFen(poz));
+    }
+    return feny;
+  }
+
+  function lzeRozebrat() {
+    return !!(window.SachyAI && stavHry && stavHry.konec && partie.tahy.length);
+  }
+
+  function spustRozbor() {
+    if (!lzeRozebrat()) { return; }
+
+    zrusRozbor();
+
+    var feny = fenyPartie();
+    rozbor = {
+      tiket: ++rozborTiket,
+      bezi: true,
+      hotovo: 0,
+      celkem: feny.length,
+      feny: feny,
+      skore: [],
+      nejlepsi: [],
+      kroky: null,
+      souhrn: null,
+      worker: null
+    };
+
+    var muj = rozbor.tiket;
+
+    rozbor.worker = vyrobWorker(
+      function (ev) {
+        if (!rozbor || rozbor.tiket !== muj) { return; }
+        prijmiPozici(ev.data);
+      },
+      function () {
+        /* Worker se nerozběhl (nebo cestou spadl). Dopočítá se to na
+           hlavním vlákně — pomalu a trhaně, ale rozbor je hotový. */
+        if (!rozbor || rozbor.tiket !== muj) { return; }
+        rozbor.worker.terminate();
+        if (rozbor.worker.__url) { URL.revokeObjectURL(rozbor.worker.__url); }
+        rozbor.worker = null;
+        dalsiPozici();
+      });
+
+    vykresliRozbor();
+    dalsiPozici();
+  }
+
+  function dalsiPozici() {
+    if (!rozbor || !rozbor.bezi) { return; }
+
+    var i = rozbor.hotovo;
+    if (i >= rozbor.celkem) { dokonciRozbor(); return; }
+
+    if (rozbor.worker) {
+      rozbor.worker.postMessage({ i: i, fen: rozbor.feny[i] });
+      return;
+    }
+
+    /* Náhradní cesta bez workeru: jedna pozice na tik, ať se mezi nimi
+       stránka aspoň překreslí. */
+    var muj = rozbor.tiket;
+    setTimeout(function () {
+      if (!rozbor || rozbor.tiket !== muj || !rozbor.bezi) { return; }
+      var v = window.SachyAI.rozeberPozici(S.zFen(rozbor.feny[i]));
+      prijmiPozici({ i: i, skore: v.skore, tah: v.tah });
+    }, 0);
+  }
+
+  function prijmiPozici(d) {
+    if (!rozbor || !rozbor.bezi || d.i !== rozbor.hotovo) { return; }
+    rozbor.skore[d.i] = d.skore;
+    rozbor.nejlepsi[d.i] = d.tah;
+    rozbor.hotovo++;
+    vykresliRozbor();          // jen ukazatel, zápis se překreslí až na konci
+    dalsiPozici();
+  }
+
+  function jeMatove(skore) {
+    return skore > window.SachyAI.MAT_PRAH || skore < -window.SachyAI.MAT_PRAH;
+  }
+
+  /* Zařazení jednoho tahu. pred i po jsou setiny pěšce POHLEDEM TOHO,
+     KDO TÁHL — otočení skóre po tahu se dělá o kus výš, aby tahle
+     funkce už s pohledy nemusela počítat. */
+  function zarazTah(tah, pred, po, shodnySNejlepsim) {
+    if (tah.kniha) { return { druh: 'kniha', ztrata: null }; }
+    if (shodnySNejlepsim) { return { druh: 'nejlepsi', ztrata: 0 }; }
+
+    /* Matová hodnocení se neodečítají. Mat je sto tisíc setin pěšce
+       a rozdíl proti běžnému hodnocení by z každého matu udělal
+       tisícipěšcovou hrubku pro toho, kdo ho dostal. */
+    if (jeMatove(pred)) { return { druh: 'rozhodnuto', ztrata: null }; }
+    if (jeMatove(po)) {
+      /* Vešel z živé pozice do matu. Ztráta se nedá odečíst, ale
+         vynechat ji z průměru taky nejde — hráč by měl za partii
+         s jedním matovým přehlédnutím lepší průměr než za partii
+         s jednou nepřesností. Píše se proto strop, za kterým je
+         pozice stejně rozhodnutá: „aspoň deset pěšců“. */
+      return (po > 0)
+        ? { druh: 'dobry', ztrata: 0 }        // matí, jen jinou cestou než engine
+        : { druh: 'hrubka', ztrata: ROZBOR_PRAH_ROZHODNUTO };
+    }
+
+    /* V rozhodnuté pozici je jedno, co se hraje: kdo je o deset pěšců
+       napřed, ten vyhraje i po nepřesnosti, a kdo je vzadu, tomu už
+       nejlepší tah nepomůže. Hodnotit to jako chyby by rozbor zaplnilo
+       hrubkami z dohrávky. */
+    if (Math.abs(pred) > ROZBOR_PRAH_ROZHODNUTO) {
+      return { druh: 'rozhodnuto', ztrata: null };
+    }
+
+    var ztrata = pred - po;
+    for (var i = 0; i < ROZBOR_MEZE.length; i++) {
+      if (ztrata < ROZBOR_MEZE[i].do) {
+        return { druh: ROZBOR_MEZE[i].druh, ztrata: ztrata };
+      }
+    }
+    return { druh: 'hrubka', ztrata: ztrata };
+  }
+
+  function dokonciRozbor() {
+    var kroky = [];
+    var poz = S.zFen(partie.zacatek);
+    var i, t, nej, krok, lepsiTah;
+
+    for (i = 0; i < partie.tahy.length; i++) {
+      t = najdiVSeznamu(poz, partie.tahy[i]);
+      if (!t) { break; }
+
+      nej = rozbor.nejlepsi[i];
+      krok = zarazTah(
+        partie.tahy[i],
+        rozbor.skore[i],
+        -rozbor.skore[i + 1],
+        !!nej && nej.z === t.z && nej.na === t.na &&
+          (nej.povyseni || 0) === (t.povyseni || 0));
+
+      /* Lepší tah se ukazuje jen tam, kde je co zlepšovat. Zapisuje se
+         algebraicky, a ta se počítá z pozice před tahem — proto se to
+         dělá až tady, při průchodu partií. */
+      krok.lepsi = null;
+      if (nej && (krok.druh === 'nepresnost' || krok.druh === 'chyba' ||
+                  krok.druh === 'hrubka')) {
+        lepsiTah = najdiVSeznamu(poz, nej);
+        if (lepsiTah) { krok.lepsi = S.zapisSan(poz, lepsiTah); }
+      }
+
+      kroky.push(krok);
+      S.zahraj(poz, t);
+    }
+
+    rozbor.kroky = kroky;
+    rozbor.souhrn = spocitejSouhrn(kroky);
+    rozbor.bezi = false;
+
+    if (rozbor.worker) {
+      rozbor.worker.terminate();
+      if (rozbor.worker.__url) { URL.revokeObjectURL(rozbor.worker.__url); }
+      rozbor.worker = null;
+    }
+
+    prekresli();
+  }
+
+  function prazdnyStranu() {
+    var s = { pocty: {}, ztrata: 0, hodnoceno: 0 };
+    for (var i = 0; i < ROZBOR_DRUHY.length; i++) { s.pocty[ROZBOR_DRUHY[i].id] = 0; }
+    return s;
+  }
+
+  function spocitejSouhrn(kroky) {
+    var souhrn = { bila: prazdnyStranu(), cerna: prazdnyStranu() };
+    for (var i = 0; i < kroky.length; i++) {
+      var s = (i % 2 === 0) ? souhrn.bila : souhrn.cerna;
+      s.pocty[kroky[i].druh]++;
+      /* Do průměru jdou jen tahy, u kterých ztráta dává smysl
+         v pěšcích; knižní a rozhodnuté se nepočítají.
+
+         Záporná ztráta se ořízne na nulu. Vzniká běžně — pozice po
+         tahu se prohledává o půltah dál než pozice před ním, takže
+         hodnocení může vyjít lepší — a do průměru ztráty nepatří:
+         je to průměrná ZTRÁTA, ne bilance. Bez oříznutí by pár
+         „ziskových“ tahů umazalo hrubku a hráč s jednou katastrofou
+         by měl lepší číslo než hráč, který jen rovnoměrně nepřesně
+         hraje. */
+      if (kroky[i].ztrata !== null) {
+        s.ztrata += Math.max(0, kroky[i].ztrata);
+        s.hodnoceno++;
+      }
+    }
+    return souhrn;
+  }
+
+  function druhPodleId(id) {
+    for (var i = 0; i < ROZBOR_DRUHY.length; i++) {
+      if (ROZBOR_DRUHY[i].id === id) { return ROZBOR_DRUHY[i]; }
+    }
+    return null;
+  }
+
+  function pescu(setiny) {
+    return (setiny / window.SachyAI.PESEC).toFixed(2);
+  }
+
+  /* ---------------------------------------------------------------
+     Rozbor na obrazovce. */
+
+  function vykresliRozbor() {
+    elRozbor.hidden = !lzeRozebrat();
+    if (elRozbor.hidden) { return; }
+
+    var bezi = !!(rozbor && rozbor.bezi);
+    var hotovo = !!(rozbor && rozbor.kroky);
+
+    elRozborSpust.hidden = bezi || hotovo;
+    elRozborPrubeh.hidden = !bezi;
+    elRozborSouhrn.hidden = !hotovo;
+
+    if (bezi) {
+      var podil = Math.round(100 * rozbor.hotovo / rozbor.celkem);
+      elRozborPas.style.width = podil + '%';
+      elRozborPrubeh.setAttribute('aria-valuenow', String(podil));
+      elRozborPopis.textContent = 'Počítám pozici ' +
+        Math.min(rozbor.hotovo + 1, rozbor.celkem) + ' z ' + rozbor.celkem +
+        (rozbor.worker ? '' : ' (bez workeru, bude to trhat)');
+      return;
+    }
+
+    if (hotovo) { vykresliSouhrn(); }
+  }
+
+  function bunka(text, trida) {
+    var el = document.createElement('span');
+    if (trida) { el.className = trida; }
+    el.textContent = text;
+    return el;
+  }
+
+  function vykresliSouhrn() {
+    var s = rozbor.souhrn;
+    var i, druh;
+
+    elRozborSouhrn.innerHTML = '';
+    elRozborSouhrn.appendChild(bunka('', ''));
+    elRozborSouhrn.appendChild(bunka('bílý', 'souhrn__hlava'));
+    elRozborSouhrn.appendChild(bunka('černý', 'souhrn__hlava'));
+
+    for (i = 0; i < ROZBOR_DRUHY.length; i++) {
+      druh = ROZBOR_DRUHY[i];
+      /* Řádky, které v partii nenastaly, se vynechávají — prázdné nuly
+         jen natahují tabulku. */
+      if (!s.bila.pocty[druh.id] && !s.cerna.pocty[druh.id]) { continue; }
+      elRozborSouhrn.appendChild(
+        bunka(druh.znacka + ' ' + druh.popis, 'souhrn__nazev znacka--' + druh.id));
+      elRozborSouhrn.appendChild(bunka(String(s.bila.pocty[druh.id]), 'souhrn__cislo'));
+      elRozborSouhrn.appendChild(bunka(String(s.cerna.pocty[druh.id]), 'souhrn__cislo'));
+    }
+
+    elRozborSouhrn.appendChild(bunka('průměrná ztráta', 'souhrn__nazev souhrn__prumer'));
+    elRozborSouhrn.appendChild(bunka(
+      s.bila.hodnoceno ? pescu(s.bila.ztrata / s.bila.hodnoceno) : '—',
+      'souhrn__cislo souhrn__prumer'));
+    elRozborSouhrn.appendChild(bunka(
+      s.cerna.hodnoceno ? pescu(s.cerna.ztrata / s.cerna.hodnoceno) : '—',
+      'souhrn__cislo souhrn__prumer'));
+  }
+
+  /* ---------------------------------------------------------------
+     Stavba desky. Pole i popisky vzniknou jednou, dál se jen
+     přebarvují — přestavovat desku po každém tahu by zahodilo
+     zaostření a na dotykových zařízeních i rozjeté klepnutí. */
+
+  function svgFigury(figura) {
+    var svg = document.createElementNS(SVG_NS, 'svg');
+    svg.setAttribute('viewBox', '0 0 45 45');
+    svg.appendChild(document.createElementNS(SVG_NS, 'use'));
+    nastavSvg(svg, figura);
+    return svg;
+  }
+
+  function nastavSvg(svg, figura) {
+    var odkaz = '#' + SYMBOL[S.typ(figura)];
+    var use = svg.firstChild;
+    use.setAttribute('href', odkaz);
+    use.setAttributeNS(XLINK_NS, 'xlink:href', odkaz);   // pro starší prohlížeče
+    svg.setAttribute('class', 'figura figura--' +
+      (S.barva(figura) === S.BILA ? 'bila' : 'cerna'));
+
+    /* Jezdec je jediná figura s tváří, takže jako jediná má směr.
+       Předloha kouká doleva, bílý se zrcadlí — oba pak koukají
+       k soupeři. Zrcadlí se <use>, ne vnější <svg>: tomu transform
+       zabírá animace tahu a tažení myší. */
+    if (S.typ(figura) === S.JEZDEC && S.barva(figura) === S.BILA) {
+      use.setAttribute('transform', 'translate(45,0) scale(-1,1)');
+    } else {
+      use.removeAttribute('transform');
+    }
+  }
+
+  function postavDesku() {
+    var i, el;
+
+    for (i = 0; i < 64; i++) {
+      el = document.createElement('button');
+      el.type = 'button';
+      el.className = 'pole';
+      el.setAttribute('data-i', i);
+      pola.push(el);
+      elDeska.appendChild(el);
+    }
+
+    for (i = 0; i < 8; i++) {
+      el = document.createElement('div');
+      el.className = 'popisek';
+      popisRady.push(el);
+      elPopisRady.appendChild(el);
+
+      el = document.createElement('div');
+      el.className = 'popisek';
+      popisSloupce.push(el);
+      elPopisSl.appendChild(el);
+    }
+
+    rozmisti();
+  }
+
+  /* Otočení desky. Pole zůstávají v DOM ve stejném pořadí a mění se
+     jen jejich místo v mřížce — jinak by se s deskou otáčelo i pořadí
+     při procházení tabulátorem, které má vždycky jít tak, jak hráč
+     desku vidí. */
+  function rozmisti() {
+    var i, r, s;
+    for (i = 0; i < 64; i++) {
+      r = S.rada(i);
+      s = S.sloupec(i);
+      pola[i].style.gridColumn = String(otoceno ? 8 - s : s + 1);
+      pola[i].style.gridRow    = String(otoceno ? 8 - r : r + 1);
+    }
+    for (i = 0; i < 8; i++) {
+      popisRady[i].textContent = String(otoceno ? i + 1 : 8 - i);
+      popisSloupce[i].textContent = 'abcdefgh'.charAt(otoceno ? 7 - i : i);
+    }
+  }
+
+  /* ---------------------------------------------------------------
+     Vykreslení. */
+
+  function poleKrale(poz, b) {
+    for (var i = 0; i < 64; i++) {
+      if (poz.deska[i] === (S.KRAL | b)) { return i; }
+    }
+    return -1;
+  }
+
+  function spocitejCile() {
+    cile = {};
+    if (vyber < 0) { return; }
+    var tahy = S.legalniTahy(poziceZive);
+    for (var i = 0; i < tahy.length; i++) {
+      if (tahy[i].z !== vyber) { continue; }
+      if (!cile[tahy[i].na]) { cile[tahy[i].na] = []; }
+      cile[tahy[i].na].push(tahy[i]);
+    }
+  }
+
+  function popisStavu() {
+    var poz = poziceZive;
+    var naTahu = (poz.naTahu === S.BILA) ? 'bílý' : 'černý';
+
+    /* Že počítač počítá, musí být vidět — jinak vypadá hra zaseknutě.
+       U silné obtížnosti se přidává dosažená hloubka: ta se během
+       přemýšlení zvyšuje, takže je zároveň vidět, že se něco děje. */
+    if (aiPremysli) {
+      return { text: 'AI přemýšlí…' + (aiHloubka ? ' (hloubka ' + aiHloubka + ')' : ''),
+               trida: 'stav--ai' };
+    }
+
+    if (stavHry.konec) {
+      if (stavHry.duvod === 'mat') {
+        return { text: 'Mat — vyhrál ' +
+                       (stavHry.vitez === S.BILA ? 'bílý' : 'černý'),
+                 trida: 'stav--konec' };
+      }
+      if (stavHry.duvod === 'pat') {
+        return { text: 'Pat — remíza, na tahu je ' + naTahu +
+                       ' a nemá tah', trida: 'stav--konec' };
+      }
+      if (stavHry.duvod === 'padesat') {
+        return { text: 'Remíza — padesát tahů bez braní a bez tahu pěšcem',
+                 trida: 'stav--konec' };
+      }
+      if (stavHry.duvod === 'opakovani') {
+        return { text: 'Remíza — stejná pozice potřetí', trida: 'stav--konec' };
+      }
+      return { text: 'Remíza — na mat nezbývá dost materiálu',
+               trida: 'stav--konec' };
+    }
+
+    if (S.jeVSachu(poz, poz.naTahu)) {
+      return { text: 'Šach! Na tahu je ' + naTahu, trida: 'stav--sach' };
+    }
+    return { text: 'Na tahu je ' + naTahu, trida: '' };
+  }
+
+  function prekresli() {
+    var poz = zobrazenaPozice();
+    var zobrazeno = pocetZobrazenych();
+    var posledni = zobrazeno > 0 ? partie.tahy[zobrazeno - 1] : null;
+    var i, f, tridy, jmeno;
+
+    stavHry = S.stavPartie(poziceZive);
+
+    /* Šach se zvýrazňuje v pozici, na kterou se hráč dívá — při
+       prohlížení starších tahů tedy tam, kde byl tehdy. */
+    var sachPole = S.jeVSachu(poz, poz.naTahu)
+      ? poleKrale(poz, poz.naTahu)
+      : -1;
+
+    for (i = 0; i < 64; i++) {
+      tridy = 'pole ' +
+        (((S.rada(i) + S.sloupec(i)) % 2 === 0) ? 'pole--svetle' : 'pole--tmave');
+
+      if (posledni && (i === posledni.z || i === posledni.na)) {
+        tridy += ' pole--posledni';
+      }
+      if (i === vyber && prohlizeny < 0) { tridy += ' pole--vyber'; }
+      if (i === sachPole) { tridy += ' pole--sach'; }
+      if (prohlizeny < 0 && cile[i]) {
+        tridy += (poz.deska[i] !== S.PRAZDNO || cile[i][0].priznak === S.TAH_MIMOCHODEM)
+          ? ' pole--brani'
+          : ' pole--cil';
+      }
+      if (tazeni && tazeni.prvek && i === tazeni.z) { tridy += ' pole--zdroj'; }
+      if (cekajiciPole[i]) { tridy += ' pole--ceka'; }
+      if (i === polePodTazenim) { tridy += ' pole--pod'; }
+      pola[i].className = tridy;
+
+      f = poz.deska[i];
+      if (f === S.PRAZDNO) {
+        if (pola[i].firstChild) { pola[i].removeChild(pola[i].firstChild); }
+        jmeno = 'prázdné pole';
+      } else {
+        if (pola[i].firstChild) { nastavSvg(pola[i].firstChild, f); }
+        else { pola[i].appendChild(svgFigury(f)); }
+        jmeno = (S.barva(f) === S.BILA ? 'bílý ' : 'černý ') +
+                JMENO_FIGURY[S.typ(f)];
+      }
+      pola[i].setAttribute('aria-label', S.jmenoPole(i) + ', ' + jmeno);
+    }
+
+    var stav = popisStavu();
+    elStav.className = 'stav ' + stav.trida;
+    elStav.innerHTML = '';
+    if (!stavHry.konec) {
+      var kolecko = document.createElement('span');
+      kolecko.className = 'stav__strana' +
+        (poziceZive.naTahu === S.CERNA ? ' stav__strana--cerna' : '');
+      elStav.appendChild(kolecko);
+    }
+    elStav.appendChild(document.createTextNode(stav.text));
+
+    vykresliKnihu();
+    vykresliRozbor();
+    vykresliZapis();
+
+    elProhlizeni.hidden = (prohlizeny < 0);
+    elZpet.disabled = !partie.tahy.length;
+  }
+
+  /* Zápis po dvojicích s číslem tahu. Každý tah je tlačítko: kliknutí
+     přepne desku do pozice po něm. Je to jen prohlížení — odbočit
+     jinam se odsud nedá, na to by musel nejdřív přijít krok zpět. */
+  /* Ukazatel knihy. Má smysl jen proti počítači — mezi dvěma lidmi
+     u jednoho zařízení není kdo by z knihy vypadl. Ptá se živé pozice,
+     ne prohlížené: je to stav soupeře teď, ne tehdy. */
+  function vykresliKnihu() {
+    if (!souperAI() || !window.SachyAI) {
+      elKniha.hidden = true;
+      return;
+    }
+
+    /* Ptá se za soupeře, ne jen za pozici: slabá obtížnost knihu po
+       čtyřech půltazích zavře, i když v ní pozice ještě je. */
+    var vKnize = !!window.SachyAI.knihaProObtiznost(poziceZive, nastaveni.soupere);
+    var nazev = posledniVarianta();
+
+    elKniha.hidden = false;
+    elKniha.className = 'kniha' + (vKnize ? ' kniha--v' : '');
+    elKniha.textContent = vKnize
+      ? (nazev ? 'V knize: ' + nazev : 'V knize — zahájení')
+      : (nazev ? 'Mimo knihu (' + nazev + ') — soupeř počítá'
+               : 'Mimo knihu — soupeř počítá');
+  }
+
+  function vykresliZapis() {
+    var i, radek, tlacitko, aktivni = null, nazev, minuly = null;
+    var krok, druh, znacka;
+
+    elZapis.innerHTML = '';
+
+    if (!partie.tahy.length) {
+      radek = document.createElement('p');
+      radek.className = 'zapis__prazdno';
+      radek.textContent = 'Zatím žádný tah.';
+      elZapis.appendChild(radek);
+      return;
+    }
+
+    for (i = 0; i < partie.tahy.length; i++) {
+      /* Název varianty se píše ve chvíli, kdy se změní — tedy tam, kde
+         se zahájení pozná. Řádek je přes celou šířku, takže po něm
+         musí u tahu černého přijít prázdné místo za číslo a za bílého,
+         jinak by tah spadl do prvního sloupce. */
+      nazev = partie.tahy[i].kniha || null;
+      if (nazev && nazev !== minuly) {
+        radek = document.createElement('span');
+        radek.className = 'zapis__varianta';
+        radek.textContent = nazev;
+        elZapis.appendChild(radek);
+        if (i % 2 === 1) {
+          radek = document.createElement('span');
+          radek.className = 'zapis__mezera';
+          elZapis.appendChild(radek);
+        }
+      }
+      if (nazev) { minuly = nazev; }
+
+      if (i % 2 === 0) {
+        radek = document.createElement('span');
+        radek.className = 'zapis__cislo';
+        radek.textContent = (i / 2 + 1) + '.';
+        elZapis.appendChild(radek);
+      }
+      tlacitko = document.createElement('button');
+      tlacitko.type = 'button';
+      tlacitko.className = 'zapis__tah';
+      tlacitko.textContent = partie.tahy[i].san;
+      tlacitko.setAttribute('data-i', i);
+      if (partie.tahy[i].kniha) { tlacitko.title = partie.tahy[i].kniha; }
+      if (i === pocetZobrazenych() - 1) {
+        tlacitko.className += ' zapis__tah--aktivni';
+        aktivni = tlacitko;
+      }
+
+      /* Značka z rozboru. Je uvnitř tlačítka, ať se s tahem zvýrazňuje
+         i proklikává jako jeden celek. */
+      krok = (rozbor && rozbor.kroky) ? rozbor.kroky[i] : null;
+      if (krok) {
+        druh = druhPodleId(krok.druh);
+        znacka = document.createElement('span');
+        znacka.className = 'znacka znacka--' + krok.druh;
+        znacka.textContent = druh.znacka;
+        tlacitko.appendChild(znacka);
+        tlacitko.title = (partie.tahy[i].kniha ? partie.tahy[i].kniha + ' · ' : '') +
+          druh.popis + (krok.ztrata !== null && krok.ztrata > 0
+            ? ' (ztráta ' + pescu(krok.ztrata) + ')' : '');
+      }
+
+      elZapis.appendChild(tlacitko);
+
+      if (krok && krok.lepsi) {
+        radek = document.createElement('span');
+        radek.className = 'zapis__lepsi';
+        radek.textContent = '↳ lépe ' + krok.lepsi;
+        elZapis.appendChild(radek);
+        /* Po celořádkovém odstavci pokračuje mřížka od prvního
+           sloupce. Po tahu bílého tam ale patří tah černého, tedy
+           sloupec třetí — dvě prázdná místa ho tam dostrkají. */
+        if (i % 2 === 0) {
+          radek = document.createElement('span');
+          radek.className = 'zapis__mezera';
+          elZapis.appendChild(radek);
+        }
+      }
+    }
+
+    /* Poslední půltah bílého bez odpovědi černého: prázdné místo, ať
+       sloupce sedí i v dalších řádcích. */
+    if (partie.tahy.length % 2 === 1) {
+      elZapis.appendChild(document.createElement('span'));
+    }
+
+    if (aktivni) {
+      var okno = elZapis.getBoundingClientRect();
+      var kde  = aktivni.getBoundingClientRect();
+      if (kde.top < okno.top || kde.bottom > okno.bottom) {
+        elZapis.scrollTop += (kde.top - okno.top) -
+                             (okno.height - kde.height) / 2;
+      }
+    }
+  }
+
+  /* ---------------------------------------------------------------
+     Velikost desky.
+
+     Stejný postup jako u min: pole se počítá z volného místa v okně,
+     ne z obsahu, a drží se mezi minimem podle způsobu ovládání
+     a stropem. Co se ani při minimu nevejde, doroluje .deska-obal. */
+
+  function mezePole() {
+    var s = getComputedStyle(document.documentElement);
+    var min = Math.ceil(parseFloat(s.getPropertyValue('--pole-min')));
+    var max = Math.floor(parseFloat(s.getPropertyValue('--pole-max')));
+
+    if (!isFinite(min) || min < 1)   { min = POLE_MIN_ZALOHA; }
+    if (!isFinite(max) || max < min) { max = Math.max(min, POLE_MAX_ZALOHA); }
+    return { min: min, max: max };
+  }
+
+  function prizpusob() {
+    /* Letící figura má souřadnice ze staré mřížky — po přeměření by
+       mířila vedle. */
+    dokonciPresun();
+
+    var meze = mezePole();
+    var popis = elPopisRady.getBoundingClientRect().width || 18;
+    var vedle = window.matchMedia(DOTAZ_VEDLE).matches;
+
+    /* Šířka: celé okno bez okrajů, bez pruhu popisků a — když stojí
+       zápis vedle desky — i bez jeho sloupce. */
+    var doOkna = document.documentElement.clientWidth - 2 * OKRAJ_OKNA - popis -
+                 (vedle ? SIRKA_PANELU + MEZERA_SLOUPCU : 0);
+
+    /* Výška: okno bez toho, co je nad deskou, a bez toho, co je pod ní.
+       Hlavička se měří od začátku dokumentu, ne od okraje okna — podle
+       okna by se rozpočet po odrolování nafoukl a deska by rostla sama
+       od sebe.
+
+       Pod PODIL_VYSKY okna rozpočet neklesne: pod deskou jsou tlačítka
+       a legenda ovládání a na nízkém okně by sebraly tolik místa, že
+       by pole vyšlo na minimum i na velkém monitoru. Deska je hlavní
+       obsah stránky, takže si sedmdesát procent okna vezme a zbytek se
+       doroluje. */
+    var hlavicka = elObal.getBoundingClientRect().top -
+                   document.documentElement.getBoundingClientRect().top;
+    var podDeskou = elSloupec.getBoundingClientRect().bottom -
+                    elObal.getBoundingClientRect().bottom;
+    var mereno   = window.innerHeight - hlavicka - podDeskou - REZERVA;
+    var rozpocet = Math.max(mereno, window.innerHeight * PODIL_VYSKY);
+
+    /* Dolů na celé pixely: na zlomku pixelu by mřížka nesedla na
+       obrazovku a hrany polí by se rozmazaly. */
+    var pole = Math.floor(Math.min(doOkna / 8, (rozpocet - popis) / 8));
+
+    if (pole < meze.min) { pole = meze.min; }
+    if (pole > meze.max) { pole = meze.max; }
+
+    velikostPole = pole;
+    elRamec.style.setProperty('--pole', pole + 'px');
+  }
+
+  /* ---------------------------------------------------------------
+     Animace přesunu.
+
+     Model i deska se mění okamžitě — animace je jen vrstva nad
+     hotovou pozicí. Nikdy tedy nezdrží vstup: kdo klikne dřív, než
+     přesun doběhne, ho tím rovnou ukončí (dokonciPresun) a hraje se
+     dál. Kdyby se místo toho čekalo na dojezd, rychlé klikání by se
+     zadrhávalo o vlastní ozdobu.
+
+     Přesouvaná figura je na cílovém poli schovaná a nad deskou letí
+     její kopie; braná figura zůstává na svém poli, dokud přesun
+     neskončí. Rošáda pošle na cestu dvě kopie naráz. */
+
+  var ANIMACE_MS = 150;
+  var ANIMACE_PRUBEH = 'cubic-bezier(0.22, 0.61, 0.36, 1)';
+
+  var cekajiciPole = {};     // pole se schovanou figurou (zrovna letí)
+  var behPresunu = null;     // { prvky: [...], casovac: id }
+
+  function animaceVypnuta() {
+    return !window.matchMedia ||
+           window.matchMedia('(prefers-reduced-motion: reduce)').matches;
+  }
+
+  function dokonciPresun() {
+    if (!behPresunu) { return; }
+
+    var beh = behPresunu;
+    behPresunu = null;              // dřív než prekresli, ať se to nezacyklí
+    clearTimeout(beh.casovac);
+
+    for (var i = 0; i < beh.prvky.length; i++) {
+      if (beh.prvky[i].parentNode) {
+        beh.prvky[i].parentNode.removeChild(beh.prvky[i]);
+      }
+    }
+    cekajiciPole = {};
+    prekresli();
+  }
+
+  /* Sestaví, co se má hýbat. Musí se volat PŘED provedením tahu —
+     bere braný kus a věž z desky, jak vypadá teď. */
+  function pripravPresun(t) {
+    if (animaceVypnuta()) { return null; }
+
+    var d = poziceZive.deska;
+    var plan = { letici: [{ z: t.z, na: t.na, figura: t.figura }], stiny: [] };
+    var kratka, vezZ, vezNa, braneP;
+
+    if (t.priznak === S.TAH_ROSADA) {
+      /* Věž se pozná z cílového pole krále: krátká rošáda končí na
+         sloupci g, dlouhá na c. */
+      kratka = S.sloupec(t.na) === 6;
+      vezZ  = kratka ? t.na + 1 : t.na - 2;
+      vezNa = kratka ? t.na - 1 : t.na + 1;
+      plan.letici.push({ z: vezZ, na: vezNa, figura: d[vezZ] });
+    }
+
+    if (t.priznak === S.TAH_MIMOCHODEM) {
+      braneP = t.na + (S.barva(t.figura) === S.BILA ? 8 : -8);
+      plan.stiny.push({ pole: braneP, figura: d[braneP] });
+    } else if (d[t.na] !== S.PRAZDNO) {
+      plan.stiny.push({ pole: t.na, figura: d[t.na] });
+    }
+
+    return plan;
+  }
+
+  function polozNadPole(svg, pole) {
+    var r = pola[pole].getBoundingClientRect();
+    svg.style.width  = r.width + 'px';
+    svg.style.height = r.height + 'px';
+    svg.style.left   = r.left + 'px';
+    svg.style.top    = r.top + 'px';
+    return r;
+  }
+
+  function spustPresun(plan) {
+    if (!plan) { return; }
+
+    var prvky = [];
+    var i, k, svg, zdroj, cil;
+
+    for (i = 0; i < plan.stiny.length; i++) {
+      /* Braná figura mizí až s dojezdem. Kdyby zmizela hned, vypadalo
+         by to, že se vypařila sama od sebe, a nebylo by vidět, čím se
+         bere. */
+      svg = svgFigury(plan.stiny[i].figura);
+      svg.setAttribute('class', svg.getAttribute('class') + ' stin');
+      polozNadPole(svg, plan.stiny[i].pole);
+      document.body.appendChild(svg);
+      prvky.push(svg);
+    }
+
+    for (i = 0; i < plan.letici.length; i++) {
+      k = plan.letici[i];
+      svg = svgFigury(k.figura);
+      svg.setAttribute('class', svg.getAttribute('class') + ' letici');
+      zdroj = polozNadPole(svg, k.z);
+      cil = pola[k.na].getBoundingClientRect();
+      document.body.appendChild(svg);
+      prvky.push(svg);
+
+      /* Figura na cílovém poli se schová. Do cekajiciPole se to
+         zapisuje taky, aby to přežilo překreslení (a to během animace
+         přijde, třeba když se počítač rozmýšlí). */
+      cekajiciPole[k.na] = true;
+      pola[k.na].classList.add('pole--ceka');
+
+      /* Dva snímky: v prvním prvek jen sedne na výchozí pole, teprve
+         ve druhém dostane cíl. Naráz by prohlížeč neměl z čeho
+         animovat a figura by skočila. */
+      (function (prvek, dx, dy) {
+        requestAnimationFrame(function () {
+          requestAnimationFrame(function () {
+            prvek.style.transition = 'transform ' + ANIMACE_MS + 'ms ' + ANIMACE_PRUBEH;
+            prvek.style.transform = 'translate(' + dx + 'px,' + dy + 'px)';
+          });
+        });
+      }(svg, cil.left - zdroj.left, cil.top - zdroj.top));
+    }
+
+    /* Úklid řídí čas, ne událost konce přechodu: ta nemusí přijít
+       vůbec (skrytá záložka, zrušený přechod) a figury by zůstaly
+       viset nad deskou. Pár milisekund navíc, ať přechod stihne
+       dosednout. */
+    behPresunu = {
+      prvky: prvky,
+      casovac: setTimeout(dokonciPresun, ANIMACE_MS + 20)
+    };
+  }
+
+  var casovacZmeny = null;
+
+  function naZmenuOkna() {
+    /* Změna velikosti okna chodí v salvách (a při tažení za roh
+       nepřetržitě), přepočet by se jinak dělal desetkrát za vteřinu. */
+    clearTimeout(casovacZmeny);
+    casovacZmeny = setTimeout(prizpusob, 120);
+  }
+
+  /* ---------------------------------------------------------------
+     Ovládání: výběr, tah, tažení.
+
+     Klepnutí i tažení vyřizuje jedna dvojice obsluh nad událostmi
+     ukazatele. Tažení se zapíná jen myší — na dotykovém displeji by
+     soupeřilo s posouváním stránky a hraje se tam dvěma klepnutími,
+     která fungují úplně stejně. */
+
+  function poleZPrvku(cil) {
+    while (cil && cil !== document) {
+      if (cil.classList && cil.classList.contains('pole')) {
+        return Number(cil.getAttribute('data-i'));
+      }
+      cil = cil.parentNode;
+    }
+    return -1;
+  }
+
+  function poleZBodu(x, y) {
+    return poleZPrvku(document.elementFromPoint(x, y));
+  }
+
+  function hratelne() {
+    return !cekaPromena && prohlizeny < 0 && !stavHry.konec &&
+           !aiPremysli && !naTahuAI();
+  }
+
+  function zrusVyber() {
+    if (vyber < 0) { return; }
+    vyber = -1;
+    cile = {};
+    prekresli();
+  }
+
+  function naStisk(ev) {
+    if (ev.button !== undefined && ev.button > 0) { return; }
+
+    /* Rozjetý přesun se dopočítá hned, ať vstup na nic nečeká. */
+    dokonciPresun();
+    var i = poleZPrvku(ev.target);
+    if (i < 0 || !hratelne()) { return; }
+
+    /* Druhé klepnutí: cílové pole vybrané figury. Ptá se dřív než na
+       vlastní figuru schválně — na cílovém poli vlastní figura stát
+       nemůže, takže se ty dvě větve nepřekrývají a pořadí jen šetří
+       práci. Klepnutí na jinou vlastní figuru propadne níž a výběr
+       přepne. */
+    if (vyber >= 0 && cile[i]) {
+      provedNaPole(i);
+      return;
+    }
+
+    var f = poziceZive.deska[i];
+    if (f !== S.PRAZDNO && S.barva(f) === poziceZive.naTahu) {
+      vyber = i;
+      spocitejCile();
+      prekresli();
+      if (ev.pointerType !== 'touch' && ev.pointerType !== 'pen') {
+        tazeni = { z: i, x: ev.clientX, y: ev.clientY, prvek: null };
+      }
+      return;
+    }
+
+    zrusVyber();
+  }
+
+  function naPohyb(ev) {
+    if (!tazeni) { return; }
+
+    if (!tazeni.prvek) {
+      if (Math.abs(ev.clientX - tazeni.x) + Math.abs(ev.clientY - tazeni.y) < PRAH_TAZENI) {
+        return;
+      }
+      tazeni.prvek = svgFigury(poziceZive.deska[tazeni.z]);
+      tazeni.prvek.setAttribute('class',
+        tazeni.prvek.getAttribute('class') + ' tazena');
+      tazeni.prvek.style.width  = velikostPole + 'px';
+      tazeni.prvek.style.height = velikostPole + 'px';
+      document.body.appendChild(tazeni.prvek);
+      pola[tazeni.z].classList.add('pole--zdroj');
+    }
+
+    tazeni.prvek.style.left = ev.clientX + 'px';
+    tazeni.prvek.style.top  = ev.clientY + 'px';
+
+    var pod = poleZBodu(ev.clientX, ev.clientY);
+    if (pod !== polePodTazenim) {
+      if (polePodTazenim >= 0) { pola[polePodTazenim].classList.remove('pole--pod'); }
+      polePodTazenim = (pod >= 0 && cile[pod]) ? pod : -1;
+      if (polePodTazenim >= 0) { pola[polePodTazenim].classList.add('pole--pod'); }
+    }
+  }
+
+  function naPusteni(ev) {
+    if (!tazeni) { return; }
+    var t = tazeni;
+    tazeni = null;
+
+    if (polePodTazenim >= 0) {
+      pola[polePodTazenim].classList.remove('pole--pod');
+      polePodTazenim = -1;
+    }
+
+    /* Bez tažení to bylo obyčejné klepnutí — výběr už udělal stisk
+       a pouštění nemá co dodat. */
+    if (!t.prvek) { return; }
+
+    t.prvek.parentNode.removeChild(t.prvek);
+    pola[t.z].classList.remove('pole--zdroj');
+
+    var cil = poleZBodu(ev.clientX, ev.clientY);
+    if (cil >= 0 && cile[cil]) {
+      provedNaPole(cil, true);
+      return;
+    }
+
+    /* Puštěno mimo dosah: figura se vrátí, ale výběr zůstane — hráč
+       zjevně chtěl táhnout právě jí a může cíl doklepnout. */
+    prekresli();
+  }
+
+  /* ---------------------------------------------------------------
+     Proměna pěšce.
+
+     Na cílové pole vede při proměně čtveřice tahů, které se liší jen
+     figurou. Nikdy se nevybírá sama: dáma je sice skoro vždycky
+     správně, ale to „skoro“ je přesně ten okamžik, kdy se partie
+     rozhoduje jezdcem nebo věží. */
+
+  function provedNaPole(i, bezAnimace) {
+    var mozne = cile[i];
+    if (!mozne) { return; }
+    if (mozne.length === 1) { zahrajTah(mozne[0], bezAnimace); return; }
+
+    cekaPromena = mozne;
+    promenaBezAnimace = !!bezAnimace;   // volba figury přijde až za chvíli
+    zobrazPromenu();
+  }
+
+  function zobrazPromenu() {
+    var i, tlacitko, svg;
+
+    elPromenaVolby.innerHTML = '';
+    for (i = 0; i < cekaPromena.length; i++) {
+      tlacitko = document.createElement('button');
+      tlacitko.type = 'button';
+      tlacitko.className = 'promena__volba';
+      tlacitko.setAttribute('data-i', i);
+      tlacitko.setAttribute('aria-label',
+        JMENO_FIGURY[cekaPromena[i].povyseni]);
+      svg = svgFigury(cekaPromena[i].povyseni |
+                      S.barva(cekaPromena[i].figura));
+      tlacitko.appendChild(svg);
+      elPromenaVolby.appendChild(tlacitko);
+    }
+    elPromena.hidden = false;
+    if (elPromenaVolby.firstChild) { elPromenaVolby.firstChild.focus(); }
+  }
+
+  function zavriPromenu() {
+    cekaPromena = null;
+    elPromena.hidden = true;
+  }
+
+  elPromenaVolby.addEventListener('click', function (ev) {
+    var cil = ev.target;
+    while (cil && cil !== elPromenaVolby && !cil.classList.contains('promena__volba')) {
+      cil = cil.parentNode;
+    }
+    if (!cil || cil === elPromenaVolby || !cekaPromena) { return; }
+    var t = cekaPromena[Number(cil.getAttribute('data-i'))];
+    var bezAnimace = promenaBezAnimace;
+    zavriPromenu();
+    zahrajTah(t, bezAnimace);
+  });
+
+  elZrusPromenu.addEventListener('click', function () {
+    zavriPromenu();
+    prekresli();
+  });
+
+  /* ---------------------------------------------------------------
+     Tlačítka a klávesy. */
+
+  elDeska.addEventListener('pointerdown', naStisk);
+  window.addEventListener('pointermove', naPohyb);
+  window.addEventListener('pointerup', naPusteni);
+  window.addEventListener('pointercancel', naPusteni);
+
+  elZapis.addEventListener('click', function (ev) {
+    var cil = ev.target;
+    if (!cil.classList || !cil.classList.contains('zapis__tah')) { return; }
+    dokonciPresun();
+    var i = Number(cil.getAttribute('data-i'));
+    prohlizeny = (i + 1 === partie.tahy.length) ? -1 : i + 1;
+    vyber = -1;
+    cile = {};
+    zavriPromenu();
+    prekresli();
+  });
+
+  elNaKonec.addEventListener('click', function () {
+    dokonciPresun();
+    prohlizeny = -1;
+    prekresli();
+    elNaKonec.blur();
+  });
+
+  elNova.addEventListener('click', function () {
+    novaPartie();
+    elNova.blur();          // ať si tlačítko nebere mezerník
+  });
+
+  elZpet.addEventListener('click', function () {
+    krokZpet();
+    elZpet.blur();
+  });
+
+  elRozborSpust.addEventListener('click', function () {
+    spustRozbor();
+    elRozborSpust.blur();
+  });
+
+  elOtocit.addEventListener('click', function () {
+    dokonciPresun();          // otočením se mřížka přeskládá pod nohama
+    otoceno = !otoceno;
+    rozmisti();
+    uloz();
+    elOtocit.blur();
+  });
+
+  elPokracovat.addEventListener('click', function () {
+    /* Ne z úložiště — to už mohl přepsat tah zahraný na nové desce.
+       Nabízí se právě to, co v něm bylo při načtení stránky. */
+    var data = nabidnuta;
+    elObnova.hidden = true;
+    if (!data) { return; }
+    partie = { zacatek: data.zacatek, tahy: data.tahy.map(function (t) {
+      return { z: t.z, na: t.na, povyseni: t.p || 0, san: '' };
+    }) };
+    otoceno = !!data.otoceno;
+    prehraj();
+    prohlizeny = -1;
+    vyber = -1;
+    cile = {};
+    rozmisti();
+    uloz();               // zápis se po přehrání dopočítal, ať sedí i v úložišti
+    prekresli();
+    prizpusob();
+    rozmysliSiAI();
+  });
+
+  elZahodit.addEventListener('click', function () {
+    elObnova.hidden = true;
+    novaPartie();
+  });
+
+  document.addEventListener('keydown', function (ev) {
+    if (ev.altKey || ev.metaKey) { return; }
+
+    if (ev.key === 'z' || ev.key === 'Z') {
+      ev.preventDefault();
+      krokZpet();
+      return;
+    }
+    if (ev.key === 'Escape') {
+      if (cekaPromena) { zavriPromenu(); prekresli(); }
+      else { zrusVyber(); }
+    }
+  });
+
+  window.addEventListener('resize', naZmenuOkna);
+  window.addEventListener('orientationchange', naZmenuOkna);
+
+  /* ---------------------------------------------------------------
+     Přepínače nastavení.
+
+     Táž skupina jako v ostatních hrách sbírky: role="radiogroup",
+     tlačítka role="radio" a aria-checked, tabulátorem se vstupuje na
+     zvolenou položku (roving tabindex) a šipkami se přepíná. */
+  function postavSkupinu(el, polozky, vyber, naVolbu) {
+    var tlacitka = [];
+
+    polozky.forEach(function (polozka) {
+      var b = document.createElement('button');
+      b.type = 'button';
+      b.className = 'prepinac';
+      b.setAttribute('role', 'radio');
+      b.setAttribute('aria-checked', 'false');
+      b.tabIndex = -1;
+
+      var nazev = document.createElement('span');
+      nazev.className = 'prepinac__nazev';
+      nazev.textContent = polozka.nazev;
+
+      var detail = document.createElement('span');
+      detail.className = 'prepinac__detail';
+      detail.textContent = polozka.detail;
+
+      b.appendChild(nazev);
+      b.appendChild(detail);
+      b.addEventListener('click', function (e) {
+        naVolbu(polozka.id);
+
+        /* Po kliknutí myší fokus pustíme: zaostřený přepínač si bere
+           šipky i mezerník. Klávesnicí (detail === 0) fokus zůstává,
+           jinak by se ve skupině nedalo pohybovat šipkami. */
+        if (e.detail > 0) { b.blur(); }
+      });
+
+      el.appendChild(b);
+      tlacitka.push(b);
+    });
+
+    /* Šipky uvnitř skupiny patří přepínačům. preventDefault tu musí
+       být, jinak stránka odscrolluje. */
+    el.addEventListener('keydown', function (e) {
+      var k = e.key;
+      var posun = (k === 'ArrowRight' || k === 'ArrowDown') ?  1 :
+                  (k === 'ArrowLeft'  || k === 'ArrowUp')   ? -1 : 0;
+      if (!posun && k !== 'Home' && k !== 'End') { return; }
+
+      e.preventDefault();
+
+      var i = tlacitka.indexOf(document.activeElement);
+      if (i < 0) { i = 0; }
+
+      var cil = k === 'Home' ? 0
+              : k === 'End'  ? polozky.length - 1
+              : (i + posun + polozky.length) % polozky.length;
+
+      tlacitka[cil].focus();
+      naVolbu(polozky[cil].id);
+    });
+
+    return {
+      obnov: function () {
+        var vybrane = vyber();
+        for (var i = 0; i < tlacitka.length; i++) {
+          var aktivni = polozky[i].id === vybrane;
+          tlacitka[i].setAttribute('aria-checked', aktivni ? 'true' : 'false');
+          tlacitka[i].tabIndex = aktivni ? 0 : -1;
+        }
+      }
+    };
+  }
+
+  /* Změna soupeře se rozehrané partie nedotkne — jen odteď táhne za
+     druhou stranu někdo jiný. Zahazovat kvůli tomu desku by bylo
+     překvapení: „chci si to dohrát sám" je legitimní důvod k přepnutí. */
+  function zmenSoupere(id) {
+    if (nastaveni.soupere === id) { return; }
+    nastaveni.soupere = id;
+    ulozNastaveni();
+    dokonciPresun();
+    skupinaSoupere.obnov();
+    elNastaveniBarva.hidden = (id === 'dva');
+    zrusAI();
+    vyber = -1;
+    cile = {};
+    prekresli();
+    prizpusob();          // schovaný panel barvy mění výšku pod deskou
+    rozmysliSiAI();
+  }
+
+  function zmenBarvu(id) {
+    if (nastaveni.barva === id) { return; }
+    nastaveni.barva = id;
+    ulozNastaveni();
+    dokonciPresun();
+    skupinaBarva.obnov();
+
+    /* Kdo hraje za černého, dívá se na desku z jeho strany. Otočit se
+       dá pak i ručně, tohle je jen výchozí pohled. */
+    otoceno = (id === 'cerna');
+    rozmisti();
+
+    zrusAI();
+    vyber = -1;
+    cile = {};
+    prekresli();
+    rozmysliSiAI();
+  }
+
+  var skupinaSoupere = postavSkupinu(elVolbaSoupere, SOUPERI,
+    function () { return nastaveni.soupere; }, zmenSoupere);
+
+  var skupinaBarva = postavSkupinu(elVolbaBarva, BARVY,
+    function () { return nastaveni.barva; }, zmenBarvu);
+
+  /* ---------------------------------------------------------------
+     Start. Rozehraná partie se nenačte sama: hráč, který si přišel
+     zahrát znovu, by se octl uprostřed cizí pozice. Deska proto
+     začíná nová a stará partie čeká v nabídce nad ní. */
+
+  var nabidnuta = nactiUlozenou();
+
+  otoceno = (nastaveni.barva === 'cerna');
+  elNastaveniBarva.hidden = (nastaveni.soupere === 'dva');
+  skupinaSoupere.obnov();
+  skupinaBarva.obnov();
+
+  postavDesku();
+  prekresli();
+  prizpusob();
+
+  if (nabidnuta) {
+    var tahu = Math.ceil(nabidnuta.tahy.length / 2);
+    elObnovaPopis.textContent = 'Z minula je rozehraná partie po ' + tahu +
+      (tahu === 1 ? ' tahu.' : ' tazích.');
+    elObnova.hidden = false;
+  } else {
+    /* Počítač začíná jen tehdy, když nad deskou nevisí nabídka
+       rozehrané partie — jinak by ji svým tahem přepsal dřív, než se
+       hráč stihne rozhodnout. */
+    rozmysliSiAI();
+  }
+}());
+</script>
+</body>
+</html>
