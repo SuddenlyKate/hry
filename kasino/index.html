@@ -1,0 +1,3595 @@
+<!DOCTYPE html>
+<html lang="cs">
+<head>
+  <meta charset="utf-8">
+  <meta name="viewport" content="width=device-width, initial-scale=1">
+  <title>Kasino — Hry v prohlížeči</title>
+  <!-- Pojistka pro případ, že se sdílený styl nenačte (jiný server,
+       špatný MIME typ, offline). Stránka pak není holý bílý dokument. -->
+  <style>
+    :root {
+      --bg:   #0f1115;
+      --text: #e6e9ef;
+      --font: system-ui, -apple-system, "Segoe UI", Roboto, "Helvetica Neue", Arial, sans-serif;
+    }
+    html { color-scheme: dark; background: #0f1115; }
+    body {
+      margin: 0;
+      background: var(--bg);
+      color: var(--text);
+      font-family: var(--font);
+    }
+  </style>
+  <link rel="stylesheet" href="../shared/style.css">
+  <style>
+    /* Atribut hidden má jen slabé výchozí display:none a pravidla typu
+       .konec { display: flex } ho přebijí — banner konce hry pak svítil
+       i s plnou pokladnou. */
+    [hidden] { display: none !important; }
+
+    /* Záložka Simulace je kratší než okno; bez rezervy na posuvník
+       by celá stránka při přepnutí poskočila do strany. */
+    html { scrollbar-gutter: stable; }
+
+    /* Barvy, které jsou jen tady. Do sdílené palety nepatří — sukno
+       a červená/černá rulety se nikde jinde ve sbírce nevyskytují. */
+    :root {
+      --sukno:        #0e3a26;
+      --sukno-hrana:  #1d5c3d;
+      --r-cervena:    #c0392b;
+      --r-cerna:      #1c1f26;
+      --r-zelena:     #1f8a4c;
+
+      /* Graf: skutečnost a očekávání. Dva odstíny z ověřené
+         kategorické palety (modrá, oranžová) — prošly kontrolou
+         barvosleposti proti tmavému povrchu. Očekávání je navíc
+         přerušované, takže se řady nerozlišují jen barvou. */
+      --graf-skut:    #3987e5;
+      --graf-ocek:    #d95926;
+
+      /* Výška jednoho symbolu na válci. Válec ukazuje tři: nad linií,
+         na ní a pod ní. */
+      --radek: 72px;
+    }
+
+    .wrap {
+      max-width: 1040px;
+      margin-inline: auto;
+    }
+
+    /* Mobil: všechno, na co se klepe, má aspoň 44 px. */
+    .kasino .btn {
+      min-height: 44px;
+      min-width: 44px;
+      justify-content: center;
+    }
+
+    .kasino :disabled { cursor: not-allowed; }
+
+    /* ---------- Hlavička: zůstatek a záložky ---------- */
+
+    .lista {
+      display: flex;
+      flex-wrap: wrap;
+      align-items: center;
+      justify-content: space-between;
+      gap: 0.75rem 1.5rem;
+      margin-bottom: 1rem;
+    }
+
+    .kasa {
+      color: var(--text-dim);
+      font-size: 0.95rem;
+    }
+
+    .kasa strong {
+      color: var(--text);
+      font-family: var(--font-mono);
+      font-size: 1.6rem;
+      font-variant-numeric: tabular-nums;
+      margin-right: 0.25rem;
+    }
+
+    .zalozky {
+      display: flex;
+      flex-wrap: wrap;
+      gap: 0.4rem;
+    }
+
+    .zalozka[aria-selected="true"] {
+      background: var(--accent-soft);
+      border-color: var(--accent);
+      color: var(--accent);
+      font-weight: 600;
+    }
+
+    .konec {
+      display: flex;
+      flex-wrap: wrap;
+      align-items: center;
+      gap: 0.75rem 1.25rem;
+      margin-bottom: 1rem;
+      padding: 1rem 1.25rem;
+      border: 1px solid var(--danger);
+      border-radius: var(--radius);
+      background: rgba(224, 83, 61, 0.08);
+    }
+
+    .konec p { margin: 0; }
+
+    .panel {
+      padding: 1.25rem;
+      background: var(--bg-elev);
+      border: 1px solid var(--border);
+      border-radius: var(--radius);
+    }
+
+    /* Výsledek kola. Neutrální vzhled je výchozí; zelený rámeček
+       a pulz dostane jen čistý zisk (výplata vyšší než vklad). */
+    .vysledek {
+      /* Na dva řádky (popis + výsledek), aby ovládání pod ním neposkakovalo. */
+      min-height: 4em;
+      margin-top: 0.75rem;
+      padding: 0.5rem 0.75rem;
+      background: var(--board);
+      border: 1px solid var(--border);
+      border-radius: var(--radius-sm);
+      font-weight: 600;
+    }
+
+    .vysledek small {
+      display: block;
+      color: var(--text-dim);
+      font-weight: 400;
+    }
+
+    .vysledek--vyhra {
+      border-color: var(--accent);
+      background: var(--accent-soft);
+      color: var(--accent);
+      animation: vyhra 0.8s ease 2;
+    }
+
+    @keyframes vyhra {
+      50% { box-shadow: 0 0 0 6px var(--accent-soft); transform: scale(1.02); }
+    }
+
+    .hlaska {
+      min-height: 1.4em;
+      margin: 0.5rem 0 0;
+      color: var(--text-dim);
+      font-size: 0.9rem;
+    }
+
+    .ovladani {
+      display: flex;
+      flex-wrap: wrap;
+      align-items: center;
+      gap: 0.5rem;
+      margin-top: 0.75rem;
+    }
+
+    .ovladani__popis {
+      color: var(--text-dim);
+      font-size: 0.9rem;
+      margin-right: 0.25rem;
+    }
+
+    .ovladani__popis strong {
+      color: var(--text);
+      font-family: var(--font-mono);
+    }
+
+    .volba[aria-checked="true"] {
+      background: var(--accent-soft);
+      border-color: var(--accent);
+      color: var(--accent);
+      font-weight: 600;
+    }
+
+    .tocit { margin-left: auto; min-width: 7rem !important; }
+
+    /* ---------- Ruleta ---------- */
+
+    .ruleta__horni {
+      display: grid;
+      grid-template-columns: 240px minmax(0, 1fr);
+      gap: 1.25rem;
+      align-items: start;
+    }
+
+    .kolo-svg {
+      display: block;
+      width: 100%;
+      height: auto;
+    }
+
+    .rotor {
+      transform-box: view-box;
+      transform-origin: 0 0;
+    }
+
+    .historie {
+      display: flex;
+      flex-wrap: wrap;
+      gap: 4px;
+      margin: 0.35rem 0 0;
+      padding: 0;
+      list-style: none;
+      min-height: 28px;
+    }
+
+    .historie li {
+      display: grid;
+      place-items: center;
+      width: 28px;
+      height: 28px;
+      border-radius: 50%;
+      color: #fff;
+      font-family: var(--font-mono);
+      font-size: 0.75rem;
+      font-weight: 700;
+    }
+
+    .historie li:first-child {
+      outline: 2px solid var(--text);
+      outline-offset: 1px;
+    }
+
+    .nadpisek {
+      margin: 0.75rem 0 0;
+      color: var(--text-dim);
+      font-size: 0.8rem;
+    }
+
+    .c-cervena { background: var(--r-cervena); }
+    .c-cerna   { background: var(--r-cerna); box-shadow: inset 0 0 0 1px var(--border-hover); }
+    .c-zelena  { background: var(--r-zelena); }
+
+    /* Žetony k výběru hodnoty. Barvy jako u skutečných žetonů; hodnota
+       je ale vždycky napsaná, barva ji jen doprovází. */
+    .zetony {
+      display: flex;
+      flex-wrap: wrap;
+      gap: 0.5rem;
+    }
+
+    .zeton-volba {
+      width: 48px;
+      height: 48px;
+      padding: 0;
+      border: 3px dashed rgba(255, 255, 255, 0.6);
+      border-radius: 50%;
+      color: #fff;
+      font: inherit;
+      font-weight: 700;
+      cursor: pointer;
+    }
+
+    .zeton-volba[aria-checked="true"] {
+      outline: 3px solid var(--accent);
+      outline-offset: 3px;
+    }
+
+    .zeton-volba:disabled { opacity: 0.5; }
+
+    .z-1   { background: #6b7280; }
+    .z-5   { background: #b91c1c; }
+    .z-10  { background: #1d4ed8; }
+    .z-25  { background: #15803d; }
+    .z-100 { background: #111318; border-color: #d4a72c; }
+
+    /* Sázkový stůl. Všechna pole i body pro dělené sázky se umisťují
+       absolutně v procentech z logické mřížky 14 × 5 jednotek (nula,
+       12 řad čísel, sloupec „2:1“ × tři čísla, tucty, jednoduché
+       šance). Na úzkém displeji JS mřížku jen transponuje na 5 × 14. */
+    .stul {
+      position: relative;
+      width: 100%;
+      aspect-ratio: 14 / 5;
+      margin-top: 1rem;
+      background: var(--sukno);
+      border: 2px solid var(--sukno-hrana);
+      border-radius: var(--radius-sm);
+      touch-action: manipulation;
+      user-select: none;
+      -webkit-user-select: none;
+    }
+
+    .stul--svisle {
+      aspect-ratio: 5 / 14;
+      max-width: 400px;
+      margin-inline: auto;
+    }
+
+    .stul--zamceno { pointer-events: none; }
+
+    .pole {
+      position: absolute;
+      display: grid;
+      place-items: center;
+      padding: 0;
+      border: 1px solid rgba(255, 255, 255, 0.28);
+      background: transparent;
+      color: #fff;
+      font: inherit;
+      font-size: clamp(0.75rem, 1.7vw, 1rem);
+      font-weight: 700;
+      cursor: pointer;
+    }
+
+    .pole--cervena { background: var(--r-cervena); }
+    .pole--cerna   { background: var(--r-cerna); }
+    .pole--zelena  { background: var(--r-zelena); }
+    .pole--bok     { font-size: clamp(0.7rem, 1.4vw, 0.9rem); font-weight: 600; }
+
+    .stul--svisle .pole--bok { writing-mode: vertical-rl; }
+
+    .pole:hover,
+    .pole:focus-visible,
+    .pole--nahled {
+      box-shadow: inset 0 0 0 3px rgba(255, 255, 255, 0.75);
+      outline: none;
+    }
+
+    /* Číslo, které padlo. Neutrální bílá — je to údaj, ne oslava. */
+    .pole--padlo {
+      z-index: 1;
+      box-shadow: inset 0 0 0 4px #fff, 0 0 0 2px #fff;
+    }
+
+    /* Body pro split, street, roh a linii: průhledné kolečko na hraně
+       nebo v rohu mezi čísly. Při najetí se zvýrazní i pokrytá čísla. */
+    .bod {
+      position: absolute;
+      z-index: 2;
+      padding: 0;
+      border: 0;
+      border-radius: 50%;
+      background: transparent;
+      transform: translate(-50%, -50%);
+      cursor: pointer;
+    }
+
+    .bod:hover,
+    .bod:focus-visible {
+      background: rgba(255, 255, 255, 0.4);
+      outline: none;
+    }
+
+    .zeton {
+      position: absolute;
+      z-index: 3;
+      display: grid;
+      place-items: center;
+      width: 30px;
+      height: 30px;
+      border: 2px dashed rgba(255, 255, 255, 0.7);
+      border-radius: 50%;
+      color: #fff;
+      font-family: var(--font-mono);
+      font-size: 0.68rem;
+      font-weight: 800;
+      transform: translate(-50%, -50%);
+      pointer-events: none;
+      box-shadow: 0 2px 4px rgba(0, 0, 0, 0.5);
+    }
+
+    .zeton--vyhral {
+      box-shadow: 0 0 0 3px var(--accent), 0 0 12px var(--accent);
+    }
+
+    /* ---------- Automat ---------- */
+
+    .automat {
+      display: grid;
+      grid-template-columns: minmax(0, 1fr) minmax(250px, 320px);
+      gap: 1.25rem;
+      align-items: start;
+    }
+
+    .valce {
+      position: relative;
+      display: grid;
+      grid-template-columns: repeat(3, 1fr);
+      gap: 8px;
+      padding: 10px;
+      background: var(--board);
+      border: 1px solid var(--border);
+      border-radius: var(--radius);
+    }
+
+    .valec {
+      position: relative;
+      height: calc(var(--radek) * 3);
+      overflow: hidden;
+      background: #f3efe6;
+      border-radius: var(--radius-sm);
+    }
+
+    /* Stín nahoře a dole, ať válec vypadá zakulaceně. Symboly nad
+       a pod linií zůstávají čitelné — jsou to skuteční sousedé na pásu. */
+    .valec::after {
+      content: "";
+      position: absolute;
+      inset: 0;
+      background: linear-gradient(rgba(0, 0, 0, 0.35), transparent 30%, transparent 70%, rgba(0, 0, 0, 0.35));
+      pointer-events: none;
+    }
+
+    .valec__pas { will-change: transform; }
+
+    .symbol {
+      display: grid;
+      place-items: center;
+      height: var(--radek);
+    }
+
+    .linie {
+      position: absolute;
+      left: 4px;
+      right: 4px;
+      top: calc(10px + var(--radek));
+      height: var(--radek);
+      border-top: 2px solid rgba(224, 83, 61, 0.7);
+      border-bottom: 2px solid rgba(224, 83, 61, 0.7);
+      pointer-events: none;
+    }
+
+    .valce--vyhra .linie {
+      border-color: var(--accent);
+      box-shadow: 0 0 14px var(--accent);
+      animation: vyhra 0.8s ease 2;
+    }
+
+    /* Symboly: sedmička a BAR písmem, ovoce a zvonek emoji, švestka
+       vlastní kresbou (emoji pro švestku neexistuje). */
+    .sym {
+      display: inline-grid;
+      place-items: center;
+      line-height: 1;
+      font-size: calc(var(--radek) * 0.55);
+    }
+
+    .sym--sedm {
+      color: #d62828;
+      font-family: Georgia, "Times New Roman", serif;
+      font-weight: 900;
+      font-size: calc(var(--radek) * 0.7);
+    }
+
+    .sym--bar {
+      padding: 0.15em 0.35em;
+      border-radius: 4px;
+      background: #1c1f26;
+      color: #f3efe6;
+      font-family: var(--font);
+      font-weight: 900;
+      font-size: calc(var(--radek) * 0.28);
+      letter-spacing: 0.05em;
+    }
+
+    .sym svg {
+      width: calc(var(--radek) * 0.6);
+      height: calc(var(--radek) * 0.6);
+    }
+
+    .vyplatni { font-size: 0.9rem; }
+
+    .vyplatni h2 {
+      margin: 0 0 0.5rem;
+      font-size: 1rem;
+    }
+
+    .vyplatni table {
+      width: 100%;
+      border-collapse: collapse;
+    }
+
+    .vyplatni th,
+    .vyplatni td {
+      padding: 0.3rem 0.4rem;
+      border-bottom: 1px solid var(--border);
+      text-align: right;
+      font-variant-numeric: tabular-nums;
+    }
+
+    .vyplatni th { color: var(--text-dim); font-weight: 500; font-size: 0.8rem; }
+    .vyplatni th:first-child,
+    .vyplatni td:first-child { text-align: left; }
+
+    /* Symboly v tabulce jsou menší a stojí na tmavém podkladu. */
+    .vyplatni .kombinace {
+      --radek: 30px;
+      display: flex;
+      gap: 4px;
+      align-items: center;
+    }
+
+    .vyplatni .kombinace > span {
+      display: grid;
+      place-items: center;
+      width: 30px;
+      height: 30px;
+      border-radius: 4px;
+      background: #f3efe6;
+    }
+
+    .vyplatni .cokoli {
+      color: #6b7280;
+      font-size: 1rem;
+      font-weight: 700;
+    }
+
+    .radek--vyhra td {
+      background: var(--accent-soft);
+      color: var(--accent);
+    }
+
+    .pozn {
+      margin: 0.6rem 0 0;
+      color: var(--text-dim);
+      font-size: 0.8rem;
+    }
+
+    /* ---------- Kolo štěstí ---------- */
+
+    .stesti {
+      display: grid;
+      grid-template-columns: minmax(0, 380px) minmax(0, 1fr);
+      gap: 1.25rem;
+      align-items: start;
+    }
+
+    .legenda-kola {
+      width: 100%;
+      border-collapse: collapse;
+      font-size: 0.9rem;
+    }
+
+    .legenda-kola th,
+    .legenda-kola td {
+      padding: 0.3rem 0.4rem;
+      border-bottom: 1px solid var(--border);
+      text-align: right;
+      font-variant-numeric: tabular-nums;
+    }
+
+    .legenda-kola th { color: var(--text-dim); font-weight: 500; font-size: 0.8rem; }
+    .legenda-kola td:first-child,
+    .legenda-kola th:first-child { text-align: left; }
+
+    .barvicka {
+      display: inline-block;
+      width: 14px;
+      height: 14px;
+      margin-right: 0.4rem;
+      border-radius: 3px;
+      vertical-align: -2px;
+    }
+
+    /* ---------- Statistiky ---------- */
+
+    .statistiky {
+      display: grid;
+      grid-template-columns: repeat(auto-fit, minmax(300px, 1fr));
+      gap: 1rem;
+      margin-top: 1.5rem;
+    }
+
+    .stat {
+      min-width: 0;
+      padding: 1rem 1.25rem;
+      background: var(--bg-elev);
+      border: 1px solid var(--border);
+      border-radius: var(--radius);
+    }
+
+    .stat h2 {
+      margin: 0 0 0.6rem;
+      font-size: 1rem;
+    }
+
+    .stat dl {
+      display: grid;
+      grid-template-columns: 1fr auto;
+      gap: 0.2rem 1rem;
+      margin: 0;
+      font-size: 0.9rem;
+    }
+
+    .stat dt { color: var(--text-dim); }
+
+    .stat dd {
+      margin: 0;
+      text-align: right;
+      font-family: var(--font-mono);
+      font-variant-numeric: tabular-nums;
+    }
+
+    .stat .oddel { border-top: 1px solid var(--border); padding-top: 0.2rem; }
+
+    .graf {
+      position: relative;
+      margin-top: 0.9rem;
+    }
+
+    .graf svg {
+      display: block;
+      width: 100%;
+      height: 180px;
+      touch-action: pan-y;
+    }
+
+    .graf__legenda {
+      display: flex;
+      flex-wrap: wrap;
+      gap: 0.25rem 1rem;
+      margin-bottom: 0.3rem;
+      color: var(--text-dim);
+      font-size: 0.8rem;
+    }
+
+    .klic {
+      display: inline-block;
+      width: 18px;
+      margin-right: 0.35rem;
+      border-top: 2px solid;
+      vertical-align: middle;
+    }
+
+    .klic--skut { border-color: var(--graf-skut); }
+    .klic--ocek { border-color: var(--graf-ocek); border-top-style: dashed; }
+
+    .tip {
+      position: absolute;
+      top: 1.6rem;
+      z-index: 5;
+      padding: 0.35rem 0.55rem;
+      background: var(--bg);
+      border: 1px solid var(--border-hover);
+      border-radius: 6px;
+      box-shadow: var(--shadow);
+      font-size: 0.78rem;
+      white-space: nowrap;
+      pointer-events: none;
+    }
+
+    .tip div { display: flex; align-items: center; gap: 0.4rem; }
+    .tip strong { font-family: var(--font-mono); }
+    .tip span { color: var(--text-dim); }
+
+    .vyvojari {
+      margin-top: 1.5rem;
+      color: var(--text-dim);
+      font-size: 0.9rem;
+    }
+
+    .vyvojari summary { cursor: pointer; min-height: 44px; display: flex; align-items: center; }
+
+    .vyvojari pre {
+      margin: 0.5rem 0 0;
+      padding: 0.75rem 1rem;
+      background: var(--board);
+      border: 1px solid var(--border);
+      border-radius: var(--radius-sm);
+      font-family: var(--font-mono);
+      font-size: 0.85rem;
+      overflow-x: auto;
+    }
+
+    /* ---------- Simulace ---------- */
+
+    .sim-volby {
+      display: grid;
+      grid-template-columns: repeat(auto-fit, minmax(170px, 1fr));
+      gap: 0.75rem 1rem;
+      align-items: end;
+    }
+
+    .sim-volby label {
+      display: flex;
+      flex-direction: column;
+      gap: 0.25rem;
+      color: var(--text-dim);
+      font-size: 0.85rem;
+    }
+
+    .sim-volby input,
+    .sim-volby select {
+      min-height: 44px;
+      padding: 0 0.6rem;
+      background: var(--board);
+      border: 1px solid var(--border);
+      border-radius: var(--radius-sm);
+      color: var(--text);
+      font: inherit;
+      font-size: 0.95rem;
+    }
+
+    .sim-volby input:focus-visible,
+    .sim-volby select:focus-visible { border-color: var(--accent); }
+
+    .sim-tlacitka {
+      display: flex;
+      flex-wrap: wrap;
+      gap: 0.5rem;
+      margin-top: 0.9rem;
+    }
+
+    .sim-prubeh {
+      height: 6px;
+      margin-top: 0.9rem;
+      overflow: hidden;
+      background: var(--board);
+      border-radius: 3px;
+    }
+
+    .sim-prubeh div {
+      width: 0;
+      height: 100%;
+      background: var(--accent);
+    }
+
+    .sim-vysledky {
+      display: grid;
+      /* Pevně dva sloupce: s auto-fit vznikl na širokém okně třetí,
+         prázdný — graf přes celý řádek mu nedovolí se zhroutit. */
+      grid-template-columns: repeat(2, minmax(0, 1fr));
+      gap: 1rem;
+      margin-top: 1rem;
+    }
+
+    .sim-vysledky:has(> .martingale[hidden]) > .stat { grid-column: 1 / -1; }
+
+    .sim-vysledky .graf { margin-top: 0; }
+    .sim-vysledky .graf svg { height: 300px; }
+
+    .sim-graf-obal { grid-column: 1 / -1; }
+
+    .klic--beh  { border-color: var(--graf-skut); opacity: 0.6; border-top-width: 1px; }
+    .klic--krach {
+      width: auto;
+      border: 0;
+      color: #d03b3b;
+      font-weight: 800;
+    }
+
+    .martingale {
+      padding: 0.9rem 1.1rem;
+      border: 1px solid var(--border-hover);
+      border-left: 3px solid #d03b3b;
+      border-radius: var(--radius-sm);
+      background: var(--board);
+      font-size: 0.92rem;
+    }
+
+    .martingale h3 { margin: 0 0 0.4rem; font-size: 0.95rem; }
+    .martingale p { margin: 0.4rem 0 0; color: var(--text-dim); }
+    .martingale strong { color: var(--text); }
+
+    @media (max-width: 760px) {
+      .automat,
+      .stesti { grid-template-columns: minmax(0, 1fr); }
+      .stesti svg { max-width: 360px; margin-inline: auto; }
+    }
+
+    @media (max-width: 640px) {
+      :root { --radek: 60px; }
+      .ruleta__horni { grid-template-columns: minmax(0, 1fr); }
+      .ruleta__kolo { max-width: 240px; margin-inline: auto; }
+      .panel { padding: 1rem 0.75rem; }
+      .sim-vysledky { grid-template-columns: minmax(0, 1fr); }
+    }
+  </style>
+</head>
+<body>
+  <div class="wrap kasino">
+
+    <a class="back-link" href="../">← Zpět na rozcestník</a>
+
+    <header class="site-header">
+      <h1>Kasino</h1>
+      <p>Ruleta, automat a kolo štěstí se společnou pokladnou. Každá hra
+         ukazuje, kolik by podle matematiky měla vracet, a statistiky pod
+         ní, jestli to zrovna jde líp, nebo hůř.</p>
+    </header>
+
+    <main>
+      <div class="lista">
+        <div class="kasa" aria-live="polite"><strong id="zustatek">1 000</strong> žetonů</div>
+        <div class="zalozky" role="tablist" aria-label="Hry">
+          <button class="btn zalozka" role="tab" id="tab-ruleta" data-hra="ruleta" aria-controls="panel-ruleta">Ruleta</button>
+          <button class="btn zalozka" role="tab" id="tab-automat" data-hra="automat" aria-controls="panel-automat">Automat</button>
+          <button class="btn zalozka" role="tab" id="tab-kolo" data-hra="kolo" aria-controls="panel-kolo">Kolo štěstí</button>
+          <button class="btn zalozka" role="tab" id="tab-simulace" data-hra="simulace" aria-controls="panel-simulace">Simulace</button>
+        </div>
+      </div>
+
+      <div class="konec" id="konec" hidden>
+        <p><strong>Došly žetony — hra skončila.</strong> Statistiky zůstanou
+           vidět, dokud nezačneš znovu.</p>
+        <button class="btn btn--primary" id="znovu">Začít znovu</button>
+      </div>
+
+      <!-- RULETA -->
+      <section class="panel" id="panel-ruleta" role="tabpanel" aria-labelledby="tab-ruleta">
+        <div class="ruleta__horni">
+          <div class="ruleta__kolo">
+            <svg class="kolo-svg" id="ruleta-svg" viewBox="-160 -165 320 325" role="img"
+                 aria-label="Ruletové kolo"></svg>
+          </div>
+          <div>
+            <div class="vysledek" id="ruleta-vysledek" aria-live="polite">Polož žetony na stůl a roztoč kolo.</div>
+            <p class="nadpisek">Posledních 20 čísel (nejnovější vlevo)</p>
+            <ol class="historie" id="ruleta-historie"></ol>
+            <div class="ovladani">
+              <span class="ovladani__popis">Žeton:</span>
+              <div class="zetony" role="radiogroup" aria-label="Hodnota žetonu" id="zetony"></div>
+            </div>
+          </div>
+        </div>
+
+        <div class="stul" id="stul"></div>
+
+        <div class="ovladani">
+          <span class="ovladani__popis">Na stole: <strong id="na-stole">0</strong></span>
+          <button class="btn" id="ruleta-zpet">Zpět</button>
+          <button class="btn" id="ruleta-zrus">Zrušit sázky</button>
+          <button class="btn btn--primary tocit" id="ruleta-toc">Točit</button>
+        </div>
+        <p class="hlaska" id="ruleta-hlaska"></p>
+        <p class="pozn">Klik na číslo = sázka na plné číslo. Klik na hranu mezi
+           dvěma čísly = split, do rohu mezi čtyřmi = roh, na vnější hranu řady
+           = street (3 čísla), na roh vnější hrany = linie (6 čísel). Sázky
+           zůstávají na stole i po zatočení.</p>
+      </section>
+
+      <!-- AUTOMAT -->
+      <section class="panel" id="panel-automat" role="tabpanel" aria-labelledby="tab-automat" hidden>
+        <div class="automat">
+          <div>
+            <div class="valce" id="valce">
+              <div class="linie" aria-hidden="true"></div>
+            </div>
+            <div class="vysledek" id="automat-vysledek" aria-live="polite">Zvol sázku a zatoč.</div>
+            <div class="ovladani">
+              <span class="ovladani__popis">Sázka:</span>
+              <div class="zetony" role="radiogroup" aria-label="Sázka na automatu" id="automat-sazky"></div>
+              <button class="btn btn--primary tocit" id="automat-toc">Točit</button>
+            </div>
+            <p class="hlaska" id="automat-hlaska"></p>
+          </div>
+          <aside class="vyplatni">
+            <h2>Výplatní tabulka</h2>
+            <table>
+              <thead><tr><th>Na linii</th><th>×</th><th>Výhra</th></tr></thead>
+              <tbody id="vyplatni"></tbody>
+            </table>
+            <p class="pozn" id="automat-pozn"></p>
+          </aside>
+        </div>
+      </section>
+
+      <!-- KOLO ŠTĚSTÍ -->
+      <section class="panel" id="panel-kolo" role="tabpanel" aria-labelledby="tab-kolo" hidden>
+        <div class="stesti">
+          <svg class="kolo-svg" id="kolo-svg" viewBox="-160 -165 320 325" role="img"
+               aria-label="Kolo štěstí"></svg>
+          <div>
+            <div class="vysledek" id="kolo-vysledek" aria-live="polite" style="margin-top:0">Zvol sázku a roztoč kolo.</div>
+            <div class="ovladani">
+              <span class="ovladani__popis">Sázka:</span>
+              <div class="zetony" role="radiogroup" aria-label="Sázka na kole" id="kolo-sazky"></div>
+              <button class="btn btn--primary tocit" id="kolo-toc">Točit</button>
+            </div>
+            <p class="hlaska" id="kolo-hlaska"></p>
+            <table class="legenda-kola">
+              <thead><tr><th>Násobek</th><th>Výsečí</th><th>Podíl obvodu = pravděpodobnost</th></tr></thead>
+              <tbody id="kolo-legenda"></tbody>
+            </table>
+            <p class="pozn">Velikost každé výseče odpovídá přesně její
+               pravděpodobnosti. Sázky jsou sudé, aby násobek 0,5 dal vždy
+               celý žeton.</p>
+          </div>
+        </div>
+      </section>
+
+      <!-- SIMULACE — hraje naoko, zůstatku ani statistik se nedotkne -->
+      <section class="panel" id="panel-simulace" role="tabpanel" aria-labelledby="tab-simulace" hidden>
+        <p class="pozn" style="margin-top:0">Simulace nehraje o tvoje žetony: nepoužívá zůstatek
+           ani statistiky. Pustí 50 nezávislých hráčů se stejnou strategií a ukáže,
+           jak dopadli.</p>
+        <form id="sim-form" novalidate>
+          <div class="sim-volby">
+            <label>Hra
+              <select id="sim-hra">
+                <option value="ruleta">Ruleta (červená)</option>
+                <option value="automat">Automat</option>
+                <option value="kolo">Kolo štěstí</option>
+              </select>
+            </label>
+            <label>Strategie
+              <select id="sim-strategie">
+                <option value="plocha">Plochá sázka</option>
+                <option value="martingale">Martingale</option>
+                <option value="dalembert">D'Alembert</option>
+              </select>
+            </label>
+            <label>Počet kol (100–100 000)
+              <input id="sim-kol" type="number" inputmode="numeric" min="100" max="100000" step="1" value="1000">
+            </label>
+            <label>Počáteční kapitál
+              <input id="sim-kapital" type="number" inputmode="numeric" min="1" step="1" value="1000">
+            </label>
+            <label>Základní sázka
+              <input id="sim-sazka" type="number" inputmode="numeric" min="1" step="1" value="10">
+            </label>
+            <label>Semínko
+              <input id="sim-seminko" type="number" inputmode="numeric" min="0" step="1">
+            </label>
+          </div>
+          <div class="sim-tlacitka">
+            <button class="btn btn--primary" type="submit" id="sim-start">Spustit 50 běhů</button>
+            <button class="btn" type="button" id="sim-stop" disabled>Zastavit</button>
+            <button class="btn" type="button" id="sim-nove-seminko">Nové semínko</button>
+          </div>
+        </form>
+        <p class="hlaska" id="sim-hlaska"></p>
+        <p class="pozn" id="sim-popis-strategie"></p>
+        <div class="sim-prubeh" aria-hidden="true"><div id="sim-pruh"></div></div>
+
+        <div class="sim-vysledky" id="sim-vysledky" hidden>
+          <div class="graf sim-graf-obal" id="sim-graf">
+            <div class="graf__legenda">
+              <span><span class="klic klic--beh"></span>jeden běh (50×)</span>
+              <span><span class="klic klic--ocek"></span>očekávaná hodnota</span>
+              <span><span class="klic klic--krach">×</span>krach</span>
+            </div>
+            <svg aria-label="Kapitál padesáti běhů v čase proti očekávané hodnotě"></svg>
+            <div class="tip" hidden></div>
+          </div>
+          <div class="stat">
+            <h2>Souhrn 50 běhů</h2>
+            <dl id="sim-souhrn"></dl>
+            <p class="pozn">Očekávaná hodnota = počáteční kapitál − výhoda podniku × průměrně
+               vsazeno. Platí pro každou strategii, protože každá jednotlivá sázka má
+               stejnou výhodu. U ploché sázky bez krachu je vsazeno pevné a čára je
+               přímka; u progresivních strategií se vsazené bere z těchto 50 běhů,
+               takže je to odhad a nese stejný šum jako běhy samotné.</p>
+          </div>
+          <div class="martingale" id="sim-martingale" hidden></div>
+        </div>
+      </section>
+
+      <!-- STATISTIKY -->
+      <section class="statistiky" id="statistiky" aria-label="Statistiky">
+        <div class="stat">
+          <h2 id="stat-hra-nadpis">Ruleta</h2>
+          <dl id="stat-hra"></dl>
+          <div class="graf" id="graf-hra">
+            <div class="graf__legenda">
+              <span><span class="klic klic--skut"></span>čistý výsledek</span>
+              <span><span class="klic klic--ocek"></span>očekávaný výsledek</span>
+            </div>
+            <svg aria-label="Čistý výsledek hry v čase proti očekávanému"></svg>
+            <div class="tip" hidden></div>
+          </div>
+        </div>
+        <div class="stat">
+          <h2>Celkem</h2>
+          <dl id="stat-celkem"></dl>
+          <div class="graf" id="graf-celkem">
+            <div class="graf__legenda">
+              <span><span class="klic klic--skut"></span>zůstatek</span>
+              <span><span class="klic klic--ocek"></span>očekávaný zůstatek</span>
+            </div>
+            <svg aria-label="Zůstatek v čase proti očekávanému"></svg>
+            <div class="tip" hidden></div>
+          </div>
+        </div>
+      </section>
+
+      <details class="vyvojari">
+        <summary>Matematika a testy v konzoli</summary>
+<pre>kasinoTesty()                  // teorie + simulace 10 milionů kol každé hry
+kasinoTesty({ kol: 1e6 })      // rychlejší
+kasinoTesty({ seminko: 42 })   // jiný, ale opakovatelný běh
+kasino.ruleta.vyhodnotSazku('split', [17, 20], 17)   // → 18</pre>
+      </details>
+    </main>
+
+  </div>
+
+<script>
+(function () {
+  'use strict';
+
+  /* ===============================================================
+     GENERÁTOR NÁHODNÝCH ČÍSEL
+     ---------------------------------------------------------------
+     xorshift128 (Marsaglia 2003): čtyři 32bitová slova stavu, perioda
+     2^128 − 1. Pro hru to stačí s rezervou a hlavně jde nastavit
+     semínkem: stejné semínko dá stejný běh, takže test, který jednou
+     prošel, projde i příště a chyba se dá zopakovat.
+
+     Semínko (jedno číslo) se na čtyři slova stavu rozfouká přes
+     splitmix32. Kdyby šlo rovnou do x a zbytek byl nula, prvních pár
+     desítek výstupů by bylo zjevně nenáhodných — xorshift se z „řídkého“
+     stavu vzpamatovává pomalu.
+     =============================================================== */
+
+  var DVA_NA_32 = 4294967296;
+
+  function Nahoda(seminko) {
+    if (!(this instanceof Nahoda)) return new Nahoda(seminko);
+    this.nastav(seminko === undefined ? 1 : seminko);
+  }
+
+  Nahoda.prototype.nastav = function (seminko) {
+    var s = seminko >>> 0;
+    function splitmix32() {
+      s = (s + 0x9e3779b9) | 0;
+      var z = s;
+      z = Math.imul(z ^ (z >>> 16), 0x85ebca6b);
+      z = Math.imul(z ^ (z >>> 13), 0xc2b2ae35);
+      return (z ^ (z >>> 16)) | 0;
+    }
+    this.seminko = seminko >>> 0;
+    this.nastavStav(splitmix32(), splitmix32(), splitmix32(), splitmix32());
+    return this;
+  };
+
+  /* Přímé nastavení stavu. Potřebuje ho hlavně test proti známé
+     posloupnosti z Marsagliova článku. Nulový stav je jediný zakázaný
+     — xorshift by z něj vydával samé nuly navždy. */
+  Nahoda.prototype.nastavStav = function (x, y, z, w) {
+    this.x = x | 0; this.y = y | 0; this.z = z | 0; this.w = w | 0;
+    if ((this.x | this.y | this.z | this.w) === 0) this.w = 1;
+    return this;
+  };
+
+  /* Další 32bitové číslo bez znaménka, 0 … 2^32 − 1. */
+  Nahoda.prototype.dalsi = function () {
+    var t = this.x ^ (this.x << 11);
+    this.x = this.y;
+    this.y = this.z;
+    this.z = this.w;
+    this.w = (this.w ^ (this.w >>> 19)) ^ (t ^ (t >>> 8));
+    return this.w >>> 0;
+  };
+
+  /* Rovnoměrné celé číslo 0 … n − 1, bez modulo bias.
+
+     Holé  dalsi() % n  je zkreslené, kdykoli n nedělí 2^32: zbytek
+     2^32 mod n hodnot na začátku rozsahu má o jednu šanci víc. U n = 37
+     je to zanedbatelných 1 : 116 milionům, ale u velkého n (třeba tři
+     miliardy) padá dolní třetina rozsahu dvakrát častěji. Proto se
+     horní neúplný „pruh“ zahodí a táhne se znovu. Průměrně se táhne
+     méně než dvakrát i v nejhorším případě (n = 2^31 + 1). */
+  Nahoda.prototype.cele = function (n) {
+    if (!(n >= 1 && n <= DVA_NA_32 && n === Math.floor(n))) {
+      throw new RangeError('cele(n): n musí být celé číslo 1 … 2^32, ne ' + n);
+    }
+    var limit = DVA_NA_32 - DVA_NA_32 % n;
+    var r;
+    do { r = this.dalsi(); } while (r >= limit);
+    return r % n;
+  };
+
+  /* Rovnoměrné celé číslo min … max včetně obou mezí. */
+  Nahoda.prototype.rozsah = function (min, max) {
+    return min + this.cele(max - min + 1);
+  };
+
+  /* Desetinné číslo z [0, 1) s plnými 53 bity — pro animace a podobně,
+     do výsledků her se nemíchá. */
+  Nahoda.prototype.desetinne = function () {
+    var a = this.dalsi() >>> 5, b = this.dalsi() >>> 6;
+    return (a * 67108864 + b) / 9007199254740992;
+  };
+
+  /* Vážený výběr: index i s pravděpodobností vahy[i] / součet.
+     Váhy jsou celá čísla, takže to je přesně cele(součet) a pohled do
+     kumulativní tabulky — žádné zaokrouhlování desetinných vah. */
+  function vazenaTabulka(vahy) {
+    var tab = [];
+    vahy.forEach(function (v, i) {
+      if (!(v >= 1 && v === Math.floor(v))) {
+        throw new RangeError('Váha musí být kladné celé číslo, ne ' + v);
+      }
+      for (var k = 0; k < v; k++) tab.push(i);
+    });
+    return tab;
+  }
+
+  /* ===============================================================
+     STATISTIKA ROZDĚLENÍ VÝPLATY
+     ---------------------------------------------------------------
+     Všechny hry se převedou na totéž: seznam možných výsledků
+     { p, x }, kde p je pravděpodobnost a x hrubá výplata na jednotku
+     vkladu (vklad v ní JE započtený, prohra = 0). Pak
+       RTP        = E[x]
+       výhoda     = 1 − RTP
+       rozptyl    = E[x²] − E[x]²
+     Rozptyl hrubé a čisté výplaty je stejný (liší se o konstantu 1).
+     =============================================================== */
+
+  function statistika(vysledky) {
+    var e = 0, e2 = 0, sumaP = 0, trefa = 0;
+    vysledky.forEach(function (v) {
+      e += v.p * v.x;
+      e2 += v.p * v.x * v.x;
+      sumaP += v.p;
+      if (v.x > 0) trefa += v.p;
+    });
+    var rozptyl = e2 - e * e;
+    return {
+      rtp: e,
+      vyhoda: 1 - e,
+      rozptyl: rozptyl,
+      sd: Math.sqrt(rozptyl),
+      trefa: trefa,          // pravděpodobnost, že se vůbec něco vyplatí
+      sumaP: sumaP           // kontrola: má být 1
+    };
+  }
+
+  function nsd(a, b) { while (b) { var t = a % b; a = b; b = t; } return a; }
+
+  /* ===============================================================
+     RULETA (evropská, jedna nula)
+     =============================================================== */
+
+  /* Čísla po obvodu kola po směru hodinových ručiček, od nuly.
+     Rozložení není sekvenční — sousedé na kole se na stole střídají
+     barvou, sudostí i polovinou. Simulace točí kapsu na kole, ne
+     číslo, aby ji šlo později napojit na animaci kola. */
+  var KOLO = [
+    0, 32, 15, 19, 4, 21, 2, 25, 17, 34, 6, 27, 13, 36, 11, 30, 8, 23, 10, 5, 24, 16,
+    33, 1, 20, 14, 31, 9, 22, 18, 29, 7, 28, 12, 35, 3, 26
+  ];
+
+  var CERVENA = [1, 3, 5, 7, 9, 12, 14, 16, 18, 19, 21, 23, 25, 27, 30, 32, 34, 36];
+  var jeCervena = [];
+  (function () {
+    for (var n = 0; n <= 36; n++) jeCervena[n] = false;
+    CERVENA.forEach(function (n) { jeCervena[n] = true; });
+  })();
+
+  function barva(n) {
+    if (n === 0) return 'zelena';
+    return jeCervena[n] ? 'cervena' : 'cerna';
+  }
+
+  /* Výplata X:1 — kolik se vyhraje navíc k vrácenému vkladu. Všechny
+     odpovídají vzorci 36/k − 1 (k = počet pokrytých čísel), a proto
+     mají všechny sázky stejnou výhodu podniku 1/37 = 2.70 %.
+     Objekt se čte až při vyhodnocení, takže ho test může dočasně
+     pokazit a ověřit, že si toho všimne. */
+  var VYPLATY = {
+    plne:       35,   // 1 číslo
+    split:      17,   // 2 sousední čísla
+    stred:      11,   // 3 čísla v řadě (street), taky 0-1-2 a 0-2-3
+    roh:         8,   // 4 čísla ve čtverci, taky 0-1-2-3
+    linie:       5,   // 6 čísel, dvě sousední řady
+    tucet:       2,   // 1–12, 13–24, 25–36
+    sloupec:     2,   // 12 čísel ve sloupci stolu
+    jednoducha:  1    // červená, černá, sudá, lichá, 1–18, 19–36
+  };
+
+  /* Stůl: čísla 1–36 ve 12 řadách po třech. Číslo n leží v řadě
+     (n − 1) / 3 a ve sloupci (n − 1) % 3; nula je nad prvními třemi. */
+  function radaCisla(n) { return Math.floor((n - 1) / 3); }
+  function sloupecCisla(n) { return (n - 1) % 3; }
+
+  function cislaOd(a, b) {
+    var r = [];
+    for (var n = a; n <= b; n++) r.push(n);
+    return r;
+  }
+
+  var JEDNODUCHE = {
+    cervena: CERVENA.slice(),
+    cerna:   cislaOd(1, 36).filter(function (n) { return !jeCervena[n]; }),
+    suda:    cislaOd(1, 36).filter(function (n) { return n % 2 === 0; }),
+    licha:   cislaOd(1, 36).filter(function (n) { return n % 2 === 1; }),
+    mala:    cislaOd(1, 18),
+    velka:   cislaOd(19, 36)
+  };
+
+  function tucetCisla(k) { return cislaOd(12 * (k - 1) + 1, 12 * k); }
+  function sloupecStolu(k) {
+    return cislaOd(1, 36).filter(function (n) { return sloupecCisla(n) === k - 1; });
+  }
+
+  /* Úplný výčet všech platných sázek každého typu. Slouží dvakrát:
+     vyhodnotSazku podle něj odmítne nesmysl (split 1 + 5 neexistuje)
+     a test výhody podniku projde opravdu každou sázku, ne jednu
+     vzorovou. */
+  var PLATNE = (function () {
+    var s = { plne: [], split: [], stred: [], roh: [], linie: [], tucet: [], sloupec: [], jednoducha: [] };
+    var n, r, k;
+
+    for (n = 0; n <= 36; n++) s.plne.push([n]);
+
+    for (n = 1; n <= 36; n++) {
+      if (sloupecCisla(n) < 2) s.split.push([n, n + 1]);      // vedle sebe
+      if (n <= 33)            s.split.push([n, n + 3]);        // pod sebou
+    }
+    s.split.push([0, 1], [0, 2], [0, 3]);
+
+    for (r = 0; r < 12; r++) s.stred.push([3 * r + 1, 3 * r + 2, 3 * r + 3]);
+    s.stred.push([0, 1, 2], [0, 2, 3]);
+
+    for (n = 1; n <= 32; n++) {
+      if (sloupecCisla(n) < 2) s.roh.push([n, n + 1, n + 3, n + 4]);
+    }
+    s.roh.push([0, 1, 2, 3]);
+
+    for (r = 0; r < 11; r++) s.linie.push(cislaOd(3 * r + 1, 3 * r + 6));
+
+    for (k = 1; k <= 3; k++) {
+      s.tucet.push(tucetCisla(k));
+      s.sloupec.push(sloupecStolu(k));
+    }
+
+    Object.keys(JEDNODUCHE).forEach(function (j) { s.jednoducha.push(JEDNODUCHE[j]); });
+    return s;
+  })();
+
+  function klicSazky(cisla) {
+    return cisla.slice().sort(function (a, b) { return a - b; }).join(',');
+  }
+
+  var PLATNE_KLICE = {};
+  Object.keys(PLATNE).forEach(function (typ) {
+    PLATNE_KLICE[typ] = {};
+    PLATNE[typ].forEach(function (c) { PLATNE_KLICE[typ][klicSazky(c)] = true; });
+  });
+
+  /* Pohodlné zápisy: tucet a sloupec číslem 1–3, jednoduchá šance
+     jménem ('cervena', 'suda', 'mala' …), plné číslo holým číslem.
+     Jinak pole pokrytých čísel v libovolném pořadí. */
+  function overSazku(typ, cisla) {
+    if (!Object.prototype.hasOwnProperty.call(VYPLATY, typ)) {
+      throw new Error('Neznámý typ sázky: ' + typ);
+    }
+    if (typ === 'jednoducha' && typeof cisla === 'string') {
+      if (!Object.prototype.hasOwnProperty.call(JEDNODUCHE, cisla)) {
+        throw new Error('Neznámá jednoduchá šance: ' + cisla);
+      }
+      cisla = JEDNODUCHE[cisla];
+    } else if ((typ === 'tucet' || typ === 'sloupec') && typeof cisla === 'number') {
+      if (cisla !== 1 && cisla !== 2 && cisla !== 3) throw new Error(typ + ' musí být 1, 2 nebo 3');
+      cisla = typ === 'tucet' ? tucetCisla(cisla) : sloupecStolu(cisla);
+    } else if (typeof cisla === 'number') {
+      cisla = [cisla];
+    }
+    if (!Array.isArray(cisla) || !PLATNE_KLICE[typ][klicSazky(cisla)]) {
+      throw new Error('Neplatná sázka ' + typ + ': ' + JSON.stringify(cisla));
+    }
+    return cisla;
+  }
+
+  /* Hrubá výplata sázky: vklad × (X + 1), když padlo pokryté číslo,
+     jinak 0. Vrácený vklad je v čísle započtený — plné číslo
+     s vkladem 1 tedy při výhře vrátí 36, ne 35. Nula prohrává
+     i jednoduché šance (bez „la partage“, jinak by u nich výhoda
+     podniku klesla na polovinu). */
+  function vyhodnotSazku(typ, cisla, vysledek, vklad) {
+    var c = overSazku(typ, cisla);
+    if (!(vysledek >= 0 && vysledek <= 36 && vysledek === Math.floor(vysledek))) {
+      throw new RangeError('Výsledek rulety musí být 0 … 36, ne ' + vysledek);
+    }
+    if (vklad === undefined) vklad = 1;
+    return c.indexOf(vysledek) >= 0 ? vklad * (VYPLATY[typ] + 1) : 0;
+  }
+
+  /* Jedno zatočení: rovnoměrně náhodná kapsa kola. */
+  function zatocRuletou(nahoda) {
+    var kapsa = nahoda.cele(KOLO.length);
+    return { kapsa: kapsa, cislo: KOLO[kapsa], barva: barva(KOLO[kapsa]) };
+  }
+
+  /* Pravděpodobnost každého čísla se počítá z kola, ne dosazením
+     1/37: kdyby v poli KOLO nějaké číslo chybělo nebo bylo dvakrát,
+     projeví se to v RTP. */
+  function pravdepodobnostiRulety() {
+    var p = [];
+    for (var n = 0; n <= 36; n++) p[n] = 0;
+    KOLO.forEach(function (n) { p[n] += 1 / KOLO.length; });
+    return p;
+  }
+
+  function rozborSazky(typ, cisla) {
+    var p = pravdepodobnostiRulety();
+    var vysledky = [];
+    for (var n = 0; n <= 36; n++) vysledky.push({ p: p[n], x: vyhodnotSazku(typ, cisla, n) });
+    return statistika(vysledky);
+  }
+
+  /* ===============================================================
+     AUTOMAT (tři válce, jedna výherní linie)
+     ---------------------------------------------------------------
+     Každý válec je pás zastavení; každé zastavení nese symbol a váhu.
+     Váha je počet „virtuálních“ pozic, které na to zastavení míří:
+     pás má 42–44 zastavení, ale sedmička na linii padá jen v 1 ze 64
+     případů. Na výherní linii leží symbol, na kterém se válec zastavil,
+     a nad ní a pod ní jeho skuteční sousedé na pásu.
+
+     Bez near-missu: každý neprázdný symbol sousedí jen s prázdnou
+     pozicí o váze 1. Díky tomu se žádný symbol neukáže těsně nad nebo
+     pod linií častěji než dvakrát tolik, co na ní — a dvojnásobek je
+     přesně to, co dá pás se všemi vahami stejnými (dva sousedé proti
+     jedné linii). Ověřuje to kasinoTesty(), sekce automat.
+     Těžší prázdné pozice (váha 3) leží uprostřed mezer, daleko od
+     symbolů. Pásy vyhledal skript, který hlídal souhrnné váhy symbolů
+     (ty určují RTP) a právě tenhle poměr.
+     =============================================================== */
+
+  var SYMBOLY = {
+    sedm:    '7',
+    bar:     'BAR',
+    zvonek:  'zvonek',
+    svestka: 'švestka',
+    citron:  'citron',
+    tresen:  'třešeň',
+    prazdne: '—'
+  };
+
+  var VALCE = [
+    [
+      ['svestka', 3], ['prazdne', 1], ['prazdne', 1], ['tresen', 3], ['prazdne', 1],
+      ['prazdne', 1], ['bar', 1], ['prazdne', 1], ['prazdne', 1], ['zvonek', 2],
+      ['prazdne', 1], ['citron', 3], ['prazdne', 1], ['svestka', 2], ['prazdne', 1],
+      ['bar', 1], ['prazdne', 1], ['tresen', 3], ['prazdne', 1], ['prazdne', 1],
+      ['citron', 3], ['prazdne', 1], ['zvonek', 2], ['prazdne', 1], ['prazdne', 1],
+      ['prazdne', 1], ['bar', 1], ['prazdne', 1], ['prazdne', 3], ['prazdne', 1],
+      ['tresen', 3], ['prazdne', 1], ['zvonek', 1], ['prazdne', 1], ['tresen', 3],
+      ['prazdne', 1], ['svestka', 2], ['prazdne', 1], ['sedm', 1], ['prazdne', 1],
+      ['citron', 3], ['prazdne', 1]
+    ],
+    [
+      ['citron', 3], ['prazdne', 1], ['zvonek', 2], ['prazdne', 1], ['bar', 1],
+      ['prazdne', 1], ['tresen', 3], ['prazdne', 1], ['prazdne', 1], ['prazdne', 1],
+      ['bar', 1], ['prazdne', 1], ['svestka', 3], ['prazdne', 1], ['tresen', 3],
+      ['prazdne', 1], ['citron', 3], ['prazdne', 1], ['zvonek', 2], ['prazdne', 1],
+      ['bar', 1], ['prazdne', 1], ['svestka', 2], ['prazdne', 1], ['prazdne', 1],
+      ['tresen', 2], ['prazdne', 1], ['svestka', 2], ['prazdne', 1], ['prazdne', 3],
+      ['prazdne', 1], ['citron', 3], ['prazdne', 1], ['prazdne', 3], ['prazdne', 1],
+      ['tresen', 2], ['prazdne', 1], ['sedm', 1], ['prazdne', 1], ['zvonek', 1],
+      ['prazdne', 1], ['prazdne', 1]
+    ],
+    [
+      ['citron', 3], ['prazdne', 1], ['zvonek', 2], ['prazdne', 1], ['prazdne', 1],
+      ['bar', 1], ['prazdne', 1], ['tresen', 2], ['prazdne', 1], ['prazdne', 1],
+      ['prazdne', 1], ['bar', 1], ['prazdne', 1], ['svestka', 3], ['prazdne', 1],
+      ['tresen', 2], ['prazdne', 1], ['citron', 3], ['prazdne', 1], ['zvonek', 2],
+      ['prazdne', 1], ['bar', 1], ['prazdne', 1], ['svestka', 2], ['prazdne', 1],
+      ['prazdne', 1], ['tresen', 2], ['prazdne', 1], ['svestka', 2], ['prazdne', 1],
+      ['prazdne', 3], ['prazdne', 1], ['citron', 3], ['prazdne', 1], ['prazdne', 3],
+      ['prazdne', 1], ['tresen', 2], ['prazdne', 1], ['prazdne', 1], ['sedm', 1],
+      ['prazdne', 1], ['zvonek', 1], ['prazdne', 1], ['prazdne', 1]
+    ]
+  ];
+
+  /* Výplatní tabulka: vzor na linii → násobek sázky (hrubá výplata,
+     vklad se nevrací zvlášť). Vzory se zkoušejí shora a platí první,
+     který sedí — tři třešně tedy vyplatí 20, ne ještě 8 a 3 navíc.
+     '*' znamená libovolný symbol; třešně se počítají zleva. */
+  var VYPLATNI_TABULKA = [
+    { vzor: ['sedm', 'sedm', 'sedm'],          nasobek: 1000 },
+    { vzor: ['bar', 'bar', 'bar'],             nasobek: 200 },
+    { vzor: ['zvonek', 'zvonek', 'zvonek'],    nasobek: 100 },
+    { vzor: ['svestka', 'svestka', 'svestka'], nasobek: 50 },
+    { vzor: ['citron', 'citron', 'citron'],    nasobek: 25 },
+    { vzor: ['tresen', 'tresen', 'tresen'],    nasobek: 20 },
+    { vzor: ['tresen', 'tresen', '*'],         nasobek: 8 },
+    { vzor: ['tresen', '*', '*'],              nasobek: 3 }
+  ];
+
+  /* Index řádku výplatní tabulky, který na linii padl, nebo −1. */
+  function radekLinie(a, b, c) {
+    var linie = [a, b, c];
+    for (var i = 0; i < VYPLATNI_TABULKA.length; i++) {
+      var vzor = VYPLATNI_TABULKA[i].vzor, sedi = true;
+      for (var k = 0; k < 3 && sedi; k++) {
+        if (vzor[k] !== '*' && vzor[k] !== linie[k]) sedi = false;
+      }
+      if (sedi) return i;
+    }
+    return -1;
+  }
+
+  function vyhodnotLinii(a, b, c) {
+    var i = radekLinie(a, b, c);
+    return i < 0 ? 0 : VYPLATNI_TABULKA[i].nasobek;
+  }
+
+  var vahyValcu = VALCE.map(function (pas) { return pas.map(function (z) { return z[1]; }); });
+  var tabulkyValcu = vahyValcu.map(vazenaTabulka);
+
+  /* Jedno zatočení: každý válec se zastaví na váženě náhodném místě
+     pásu. Vrací indexy zastavení (pro budoucí animaci) i symboly. */
+  function zatocAutomatem(nahoda) {
+    var zastaveni = tabulkyValcu.map(function (tab) { return tab[nahoda.cele(tab.length)]; });
+    var symboly = zastaveni.map(function (z, v) { return VALCE[v][z][0]; });
+    return {
+      zastaveni: zastaveni,
+      symboly: symboly,
+      vyplata: vyhodnotLinii(symboly[0], symboly[1], symboly[2])
+    };
+  }
+
+  /* Analytické RTP. Váhy se na každém válci sečtou po symbolech
+     (na pásu je třešeň na několika místech) a pak se projdou všechny
+     trojice symbolů — 7³ = 343 případů místo 36·36·35 zastavení.
+     Počítá se v celých číslech: čitatel = Σ w₁·w₂·w₃·násobek,
+     jmenovatel = W₁·W₂·W₃. Výsledek je tak přesný zlomek, žádná
+     simulace ani zaokrouhlování. */
+  function rozborAutomatu() {
+    var souhrny = VALCE.map(function (pas) {
+      var vahy = {}, celkem = 0;
+      pas.forEach(function (z) {
+        vahy[z[0]] = (vahy[z[0]] || 0) + z[1];
+        celkem += z[1];
+      });
+      return { vahy: vahy, celkem: celkem, symboly: Object.keys(vahy) };
+    });
+
+    var jmenovatel = souhrny[0].celkem * souhrny[1].celkem * souhrny[2].celkem;
+    var citatel = 0, citatel2 = 0, trefCitatel = 0;
+    var poRadcich = VYPLATNI_TABULKA.map(function () { return 0; });
+
+    souhrny[0].symboly.forEach(function (a) {
+      souhrny[1].symboly.forEach(function (b) {
+        souhrny[2].symboly.forEach(function (c) {
+          var w = souhrny[0].vahy[a] * souhrny[1].vahy[b] * souhrny[2].vahy[c];
+          var i = radekLinie(a, b, c);
+          if (i < 0) return;
+          var x = VYPLATNI_TABULKA[i].nasobek;
+          poRadcich[i] += w;
+          citatel += w * x;
+          citatel2 += w * x * x;
+          trefCitatel += w;
+        });
+      });
+    });
+
+    var rtp = citatel / jmenovatel;
+    var e2 = citatel2 / jmenovatel;
+    var d = nsd(citatel, jmenovatel);
+    return {
+      rtp: rtp,
+      vyhoda: 1 - rtp,
+      zlomek: (citatel / d) + '/' + (jmenovatel / d),
+      citatel: citatel,
+      jmenovatel: jmenovatel,
+      rozptyl: e2 - rtp * rtp,
+      sd: Math.sqrt(e2 - rtp * rtp),
+      trefa: trefCitatel / jmenovatel,
+      vahyValcu: souhrny.map(function (s) { return s.vahy; }),
+      radky: VYPLATNI_TABULKA.map(function (r, i) {
+        return {
+          vzor: r.vzor,
+          nasobek: r.nasobek,
+          pocet: poRadcich[i],                 // z jmenovatel stejně pravděpodobných
+          p: poRadcich[i] / jmenovatel,
+          podilRtp: poRadcich[i] * r.nasobek / jmenovatel
+        };
+      })
+    };
+  }
+
+  /* Kontrola near-missu: pro každý válec a symbol srovná, jak často
+     je symbol vidět těsně nad nebo pod linií (součet vah sousedních
+     zastavení), s tím, jak často padne na linii (jeho vlastní váha).
+     Pás se všemi vahami stejnými dá přesně 2; víc by znamenalo, že
+     pás symbol ukazuje „skoro“ častěji, než ho doopravdy dává. */
+  function blizkostLinie() {
+    return VALCE.map(function (pas) {
+      var naLinii = {}, vedle = {}, n = pas.length;
+      pas.forEach(function (z, i) {
+        if (z[0] === 'prazdne') return;
+        naLinii[z[0]] = (naLinii[z[0]] || 0) + z[1];
+        vedle[z[0]] = (vedle[z[0]] || 0) + pas[(i + n - 1) % n][1] + pas[(i + 1) % n][1];
+      });
+      var pomery = {};
+      Object.keys(naLinii).forEach(function (s) { pomery[s] = vedle[s] / naLinii[s]; });
+      return pomery;
+    });
+  }
+
+  /* ===============================================================
+     KOLO ŠTĚSTÍ
+     ---------------------------------------------------------------
+     Výseče po obvodu kola. Váha je úhlová velikost výseče v jednotkách
+     (součet 100, tedy procenta obvodu). Násobek je hrubá výplata na
+     jednotku vkladu: 0 = vklad propadne, 1 = vrátí se, 0.5 = polovina.
+     Pořadí výsečí je jen kvůli budoucímu vykreslení, na
+     pravděpodobnosti nemá vliv.
+     =============================================================== */
+
+  var VYSECE = [
+    { nasobek: 0,   vaha: 9 }, { nasobek: 1,   vaha: 4 }, { nasobek: 0.5, vaha: 3 },
+    { nasobek: 2,   vaha: 2 }, { nasobek: 0,   vaha: 9 }, { nasobek: 20,  vaha: 1 },
+    { nasobek: 0,   vaha: 9 }, { nasobek: 1.5, vaha: 3 }, { nasobek: 1,   vaha: 4 },
+    { nasobek: 3,   vaha: 2 }, { nasobek: 0,   vaha: 9 }, { nasobek: 0.5, vaha: 3 },
+    { nasobek: 5,   vaha: 1 }, { nasobek: 2,   vaha: 3 }, { nasobek: 0,   vaha: 8 },
+    { nasobek: 1,   vaha: 4 }, { nasobek: 0.5, vaha: 3 }, { nasobek: 10,  vaha: 1 },
+    { nasobek: 1.5, vaha: 3 }, { nasobek: 0,   vaha: 8 }, { nasobek: 2,   vaha: 2 },
+    { nasobek: 3,   vaha: 2 }, { nasobek: 0.5, vaha: 3 }, { nasobek: 5,   vaha: 1 },
+    { nasobek: 1,   vaha: 3 }
+  ];
+
+  var tabulkaKola = vazenaTabulka(VYSECE.map(function (v) { return v.vaha; }));
+
+  function zatocKolem(nahoda) {
+    var i = tabulkaKola[nahoda.cele(tabulkaKola.length)];
+    return { vysec: i, nasobek: VYSECE[i].nasobek };
+  }
+
+  function rozborKola() {
+    var celkem = 0;
+    VYSECE.forEach(function (v) { celkem += v.vaha; });
+    var st = statistika(VYSECE.map(function (v) { return { p: v.vaha / celkem, x: v.nasobek }; }));
+    /* Po násobcích: stejný násobek může mít víc výsečí. */
+    var po = {};
+    VYSECE.forEach(function (v) {
+      po[v.nasobek] = po[v.nasobek] || { nasobek: v.nasobek, vysece: 0, vaha: 0 };
+      po[v.nasobek].vysece++;
+      po[v.nasobek].vaha += v.vaha;
+    });
+    st.celkemVaha = celkem;
+    st.radky = Object.keys(po).map(function (k) { return po[k]; })
+      .sort(function (a, b) { return a.nasobek - b.nasobek; })
+      .map(function (r) {
+        r.p = r.vaha / celkem;
+        r.podilRtp = r.p * r.nasobek;
+        return r;
+      });
+    return st;
+  }
+
+  /* ===============================================================
+     SIMULACE STRATEGIÍ
+     ---------------------------------------------------------------
+     Jeden „běh“ je hráč s vlastním kapitálem a vlastním generátorem,
+     který hraje až `kol` kol podle strategie. Běh se posouvá po
+     kouscích (krokBehu), aby šel počítat po dávkách v rytmu snímků
+     a stránka nezamrzla.
+
+     Krach: kapitál nestačí na sázku, kterou strategie předepisuje.
+     U Martingale je to přesně chvíle, kdy systém selže — hráči ještě
+     něco zbývá, ale na další zdvojení už nemá.
+     Prohra (do série proher): výplata menší než vklad. Na kole štěstí
+     je tedy „vráceno 5 z 10“ prohra, „vráceno 10 z 10“ ne.
+     =============================================================== */
+
+  /* Hrubý násobek vkladu za jedno kolo každé hry. Ruleta sází na
+     červenou; tabulka výplat vzniká z vyhodnotSazku, ne opsáním. */
+  var nasobekCervene = [];
+  for (var cis = 0; cis <= 36; cis++) nasobekCervene[cis] = vyhodnotSazku('jednoducha', 'cervena', cis);
+
+  var HRA_KOLA = {
+    ruleta: function (g) { return nasobekCervene[KOLO[g.cele(37)]]; },
+    automat: function (g) {
+      var t1 = tabulkyValcu[0], t2 = tabulkyValcu[1], t3 = tabulkyValcu[2];
+      return vyhodnotLinii(VALCE[0][t1[g.cele(t1.length)]][0],
+                           VALCE[1][t2[g.cele(t2.length)]][0],
+                           VALCE[2][t3[g.cele(t3.length)]][0]);
+    },
+    kolo: function (g) { return VYSECE[tabulkaKola[g.cele(tabulkaKola.length)]].nasobek; }
+  };
+
+  /* Výhoda podniku pro sázku, kterou simulace hraje. */
+  function vyhodaSimulace(hra) {
+    if (hra === 'ruleta') return rozborSazky('jednoducha', 'cervena').vyhoda;
+    if (hra === 'automat') return rozborAutomatu().vyhoda;
+    return rozborKola().vyhoda;
+  }
+
+  /* Strategie: jak se změní sázka po kole. Dostane běh a výsledek
+     kola (výplata proti vkladu) a nastaví b.sazka na další kolo. */
+  var STRATEGIE = {
+    plocha: {
+      nazev: 'Plochá sázka',
+      po: function () { /* sázka se nemění */ }
+    },
+    martingale: {
+      nazev: 'Martingale',
+      po: function (b, vklad, vyplata) {
+        if (vyplata > vklad) b.sazka = b.zaklad;
+        else if (vyplata < vklad) b.sazka = vklad * 2;
+      }
+    },
+    dalembert: {
+      nazev: "D'Alembert",
+      po: function (b, vklad, vyplata) {
+        if (vyplata > vklad) b.uroven = Math.max(1, b.uroven - 1);
+        else if (vyplata < vklad) b.uroven++;
+        b.sazka = b.zaklad * b.uroven;
+      }
+    }
+  };
+
+  /* nast = { hra, strategie, kol, kapital, sazka, seminko, krok }
+     krok = po kolika kolech se ukládá vzorek pro graf. Vzorek j patří
+     ke kolu min(j·krok, kol); poslední kolo má vzorek vždycky. */
+  function pocetVzorku(nast) { return Math.ceil(nast.kol / nast.krok) + 1; }
+  function koloVzorku(nast, j) { return Math.min(j * nast.krok, nast.kol); }
+
+  function novyBeh(nast, index) {
+    return {
+      nast: nast,
+      g: new Nahoda((nast.seminko + index) >>> 0),
+      hraj: HRA_KOLA[nast.hra],
+      strategie: STRATEGIE[nast.strategie],
+      zaklad: nast.sazka,
+      sazka: nast.sazka,
+      uroven: 1,
+      kapital: nast.kapital,
+      maxKapital: nast.kapital,
+      kolo: 0,
+      vsazeno: 0,
+      serie: 0,                 // aktuální série proher
+      nejdelsiSerie: 0,
+      krach: false,
+      kolKrachu: null,          // počet odehraných kol v okamžiku krachu
+      serieKrachu: 0,           // série proher, která ho položila
+      hotovo: false,
+      vzorky: [nast.kapital],   // kapitál po kolech 0, krok, 2·krok, …, kol
+      vsazenoVzorky: [0]
+    };
+  }
+
+  /* Odehraje nejvýš n kol. Vrací, kolik kol se odehrálo. */
+  function krokBehu(b, n) {
+    var nast = b.nast, i = 0;
+    while (i < n && !b.hotovo) {
+      var vklad = b.sazka;
+      if (vklad > b.kapital) {
+        b.krach = true;
+        b.kolKrachu = b.kolo;
+        b.serieKrachu = b.serie;
+        b.hotovo = true;
+        /* Vzorky po krachu drží konečný kapitál — běh už nehraje. */
+        while (b.vzorky.length < pocetVzorku(nast)) {
+          b.vzorky.push(b.kapital);
+          b.vsazenoVzorky.push(b.vsazeno);
+        }
+        break;
+      }
+      var vyplata = vklad * b.hraj(b.g);
+      b.kapital += vyplata - vklad;
+      b.vsazeno += vklad;
+      b.kolo++;
+      i++;
+      if (vyplata < vklad) {
+        b.serie++;
+        if (b.serie > b.nejdelsiSerie) b.nejdelsiSerie = b.serie;
+      } else {
+        b.serie = 0;
+      }
+      if (b.kapital > b.maxKapital) b.maxKapital = b.kapital;
+      b.strategie.po(b, vklad, vyplata);
+      if (b.kolo % nast.krok === 0 || b.kolo === nast.kol) {
+        b.vzorky.push(b.kapital);
+        b.vsazenoVzorky.push(b.vsazeno);
+      }
+      if (b.kolo === nast.kol) b.hotovo = true;
+    }
+    return i;
+  }
+
+  /* Kolik proher v řadě stačí Martingale ke krachu s kapitálem K
+     a základní sázkou z: po N prohrách je ztráta z·(2^N − 1) a další
+     sázka z·2^N, krach tedy nastane pro nejmenší N, kde
+     K − z·(2^N − 1) < z·2^N. */
+  function martingaleSerieKeKrachu(kapital, zaklad) {
+    var n = 0;
+    while (kapital - zaklad * (Math.pow(2, n) - 1) >= zaklad * Math.pow(2, n)) n++;
+    return n;
+  }
+
+  /* ===============================================================
+     VEŘEJNÉ ROZHRANÍ
+     =============================================================== */
+
+  window.kasino = {
+    Nahoda: Nahoda,
+    statistika: statistika,
+    ruleta: {
+      KOLO: KOLO,
+      CERVENA: CERVENA,
+      VYPLATY: VYPLATY,
+      JEDNODUCHE: JEDNODUCHE,
+      PLATNE: PLATNE,
+      barva: barva,
+      overSazku: overSazku,
+      vyhodnotSazku: vyhodnotSazku,
+      zatoc: zatocRuletou,
+      pravdepodobnosti: pravdepodobnostiRulety,
+      rozborSazky: rozborSazky
+    },
+    automat: {
+      SYMBOLY: SYMBOLY,
+      VALCE: VALCE,
+      VYPLATNI_TABULKA: VYPLATNI_TABULKA,
+      vyhodnotLinii: vyhodnotLinii,
+      zatoc: zatocAutomatem,
+      rozbor: rozborAutomatu,
+      blizkostLinie: blizkostLinie
+    },
+    koloStesti: {
+      VYSECE: VYSECE,
+      zatoc: zatocKolem,
+      rozbor: rozborKola
+    },
+    simulace: {
+      STRATEGIE: STRATEGIE,
+      novyBeh: novyBeh,
+      krokBehu: krokBehu,
+      pocetVzorku: pocetVzorku,
+      koloVzorku: koloVzorku,
+      vyhoda: vyhodaSimulace,
+      martingaleSerieKeKrachu: martingaleSerieKeKrachu
+    }
+  };
+
+  /* ===============================================================
+     TESTY
+     =============================================================== */
+
+  function pct(x, mist) { return (x * 100).toFixed(mist === undefined ? 3 : mist) + ' %'; }
+  function zaokr(x, mist) { var m = Math.pow(10, mist); return Math.round(x * m) / m; }
+
+  /* Empirický souhrn z průběžných součtů Σx a Σx². */
+  function empirie(suma, suma2, n) {
+    var e = suma / n;
+    var rozptyl = suma2 / n - e * e;
+    return { rtp: e, rozptyl: rozptyl, sd: Math.sqrt(rozptyl) };
+  }
+
+  /* Porovnání simulace s teorií. Odchylka průměru z N kol má
+     směrodatnou chybu SE = σ/√N; 3 SE je hranice, za kterou už je
+     odchylka podezřelá (náhodou ji překročí 0.3 % poctivých běhů).
+     Pevných 0.1 procentního bodu se hlásí zvlášť — u her s velkým σ
+     na ni deset milionů kol nestačí a sloupec „kol na 0.1 p. b.“
+     říká, kolik by jich bylo potřeba. */
+  function radekSimulace(nazev, teor, emp, n, cas) {
+    var se = teor.sd / Math.sqrt(n);
+    var odch = emp.rtp - teor.rtp;
+    var z = se > 0 ? odch / se : 0;
+    return {
+      'hra / sázka': nazev,
+      'RTP teor.': pct(teor.rtp),
+      'RTP simul.': pct(emp.rtp),
+      'odchylka p. b.': zaokr(odch * 100, 4),
+      'SE p. b.': zaokr(se * 100, 4),
+      'z': zaokr(z, 2),
+      'do 3 SE': Math.abs(z) <= 3 ? 'ano' : 'NE',
+      'do 0.1 p. b.': Math.abs(odch) <= 0.001 ? 'ano' : 'ne',
+      'kol na 0.1 p. b.': Math.ceil(Math.pow(3 * teor.sd / 0.001, 2)).toExponential(1),
+      'σ teor.': zaokr(teor.sd, 3),
+      'σ simul.': zaokr(emp.sd, 3),
+      'čas s': cas === undefined ? '' : zaokr(cas / 1000, 1),
+      _ok: Math.abs(z) <= 3,
+      _v01: Math.abs(odch) <= 0.001
+    };
+  }
+
+  function bezPomocnych(radky) {
+    return radky.map(function (r) {
+      var o = {};
+      Object.keys(r).forEach(function (k) { if (k.charAt(0) !== '_') o[k] = r[k]; });
+      return o;
+    });
+  }
+
+  function testGeneratoru(seminko) {
+    var ok = true, n, i;
+    function over(podminka, text) {
+      console.log((podminka ? '  ok   ' : '  CHYBA ') + text);
+      if (!podminka) ok = false;
+    }
+
+    /* Známá posloupnost: Marsaglia, „Xorshift RNGs“ (2003), funkce
+       xor128 s x=123456789, y=362436069, z=521288629, w=88675123. */
+    var g = new Nahoda().nastavStav(123456789, 362436069, 521288629, 88675123);
+    var prvni = g.dalsi();
+    over(prvni === 3701687786, 'xorshift128 dává známou posloupnost (první výstup ' + prvni + ')');
+
+    var a = new Nahoda(seminko), b = new Nahoda(seminko), c = new Nahoda(seminko + 1);
+    var stejne = true, jine = 0;
+    for (i = 0; i < 1000; i++) {
+      var va = a.dalsi();
+      if (va !== b.dalsi()) stejne = false;
+      if (va !== c.dalsi()) jine++;
+    }
+    over(stejne, 'stejné semínko → stejných 1000 čísel');
+    over(jine > 990, 'sousední semínko → jiná posloupnost (' + jine + '/1000 se liší)');
+
+    var hranice = [1, 2, 3, 37, 1000, 2147483649, 3000000000, DVA_NA_32];
+    var vRozsahu = true;
+    hranice.forEach(function (m) {
+      for (var k = 0; k < 2000; k++) {
+        var r = g.cele(m);
+        if (r < 0 || r >= m || r !== Math.floor(r)) vRozsahu = false;
+      }
+    });
+    over(vRozsahu, 'cele(n) je vždy celé číslo 0 … n−1 (n od 1 do 2^32)');
+
+    var chyceno = 0;
+    [0, -1, 1.5, DVA_NA_32 + 1, NaN].forEach(function (m) {
+      try { g.cele(m); } catch (e) { chyceno++; }
+    });
+    over(chyceno === 5, 'cele(0), cele(−1), cele(1.5), cele(2^32+1), cele(NaN) vyhodí chybu');
+
+    /* Modulo bias naplno: n = 3·10⁹. Holý zbytek by hodnotám pod
+       2^32 − n ≈ 1.29·10⁹ dal dvojnásobnou šanci, takže P(r < 10⁹)
+       by bylo 2·10⁹/2^32 = 46.6 % místo správných 33.3 %. */
+    n = 1000000;
+    var m = 3000000000, dole = 0, doleNaivne = 0;
+    var h1 = new Nahoda(seminko), h2 = new Nahoda(seminko);
+    for (i = 0; i < n; i++) {
+      if (h1.cele(m) < 1e9) dole++;
+      if (h2.dalsi() % m < 1e9) doleNaivne++;
+    }
+    console.log('  modulo bias, n = 3·10⁹, podíl výsledků pod 10⁹ (správně 33.33 %):');
+    console.log('       cele(n) ' + pct(dole / n, 2) + '   |   holé dalsi() % n ' + pct(doleNaivne / n, 2));
+    over(Math.abs(dole / n - 1 / 3) < 0.003, 'cele() je bez modulo bias');
+
+    /* Chí-kvadrát: 37 přihrádek, 3.7 milionu hodů. Při 36 stupních
+       volnosti leží kritická hodnota na hladině 0.1 % u 67.99. */
+    var h = new Nahoda(seminko + 7), pocty = [], N = 3700000;
+    for (i = 0; i < 37; i++) pocty[i] = 0;
+    for (i = 0; i < N; i++) pocty[h.cele(37)]++;
+    var chi = 0, ocek = N / 37;
+    pocty.forEach(function (p) { chi += (p - ocek) * (p - ocek) / ocek; });
+    over(chi < 67.99, 'cele(37) rovnoměrně: χ² = ' + chi.toFixed(1) + ' (mez 67.99 při 36 st. v., hladina 0.1 %)');
+
+    return ok;
+  }
+
+  function testRuletyAnalyticky() {
+    var ok = true;
+    function over(podminka, text) {
+      console.log((podminka ? '  ok   ' : '  CHYBA ') + text);
+      if (!podminka) ok = false;
+    }
+
+    var serazene = KOLO.slice().sort(function (a, b) { return a - b; });
+    over(KOLO.length === 37 && serazene.every(function (n, i) { return n === i; }),
+      'kolo obsahuje každé z čísel 0–36 právě jednou');
+
+    var stridaSe = true;
+    for (var i = 1; i < KOLO.length; i++) {
+      var dalsi = KOLO[(i + 1) % KOLO.length];
+      if (dalsi !== 0 && barva(KOLO[i]) === barva(dalsi)) stridaSe = false;
+    }
+    over(stridaSe, 'barvy se po obvodu kola střídají (kontrola pořadí i barev)');
+    over(JEDNODUCHE.cervena.length === 18 && JEDNODUCHE.cerna.length === 18, '18 červených, 18 černých');
+
+    var ocekPocty = { plne: 37, split: 60, stred: 14, roh: 23, linie: 11, tucet: 3, sloupec: 3, jednoducha: 6 };
+    Object.keys(ocekPocty).forEach(function (typ) {
+      over(PLATNE[typ].length === ocekPocty[typ], typ + ': ' + PLATNE[typ].length + ' platných sázek');
+    });
+
+    var chyceno = 0;
+    [['split', [1, 5]], ['roh', [1, 2, 3, 4]], ['stred', [2, 3, 4]], ['plne', 37],
+     ['jednoducha', 'modra'], ['tucet', 4], ['linie', [1, 2, 3]]].forEach(function (s) {
+      try { vyhodnotSazku(s[0], s[1], 0); } catch (e) { chyceno++; }
+    });
+    over(chyceno === 7, 'nesmyslné sázky (split 1+5, roh 1-2-3-4 …) se odmítnou');
+
+    /* Hlavní test: každá platná sázka každého typu, RTP z rozložení
+       pravděpodobností přes všech 37 výsledků. Evropská ruleta má
+       mít u všech výhodu přesně 1/37 = 2.7027 %. */
+    var radky = [], vsechnyOk = true;
+    Object.keys(VYPLATY).forEach(function (typ) {
+      var min = Infinity, max = -Infinity, vzor = null;
+      PLATNE[typ].forEach(function (cisla) {
+        var st = rozborSazky(typ, cisla);
+        if (st.vyhoda < min) min = st.vyhoda;
+        if (st.vyhoda > max) max = st.vyhoda;
+        if (!vzor) vzor = st;
+      });
+      var sedi = Math.abs(min - 1 / 37) < 1e-12 && Math.abs(max - 1 / 37) < 1e-12;
+      if (!sedi) vsechnyOk = false;
+      radky.push({
+        typ: typ,
+        'výplata': VYPLATY[typ] + ':1',
+        'čísel': PLATNE[typ][0].length,
+        'sázek': PLATNE[typ].length,
+        'RTP': pct(1 - min),
+        'výhoda min': pct(min),
+        'výhoda max': pct(max),
+        'P(výhra)': pct(vzor.trefa, 2),
+        'rozptyl': zaokr(vzor.rozptyl, 4),
+        'σ': zaokr(vzor.sd, 4),
+        '2.70 %': sedi ? 'ano' : 'NE — chybná výplata'
+      });
+    });
+    console.table(radky);
+    over(vsechnyOk, 'všech ' + Object.keys(PLATNE).reduce(function (s, t) { return s + PLATNE[t].length; }, 0) +
+      ' sázek má výhodu podniku 1/37 = ' + pct(1 / 37, 4));
+
+    /* Má test zuby? Split se na chvíli přepíše na 16:1 — test ho musí
+       chytit. Kdyby ne, ověřoval by jen sám sebe. */
+    VYPLATY.split = 16;
+    var pokazeny = rozborSazky('split', [17, 20]);
+    VYPLATY.split = 17;
+    over(Math.abs(pokazeny.vyhoda - 1 / 37) > 1e-6,
+      'kontrola: split pokažený na 16:1 by vyšel na ' + pct(pokazeny.vyhoda) + ' a test by ho chytil');
+
+    return ok;
+  }
+
+  function testAutomatuAnalyticky(r) {
+    console.log('  váhy po symbolech na válcích (z ' + VALCE.map(function (p) { return p.length; }).join(', ') +
+      ' zastavení; součty ' + r.jmenovatel + ' = ' + VALCE.map(function (p, i) {
+        return Object.keys(r.vahyValcu[i]).reduce(function (s, k) { return s + r.vahyValcu[i][k]; }, 0);
+      }).join(' × ') + '):');
+    console.table(Object.keys(SYMBOLY).map(function (s) {
+      return {
+        symbol: SYMBOLY[s],
+        'válec 1': r.vahyValcu[0][s] || 0,
+        'válec 2': r.vahyValcu[1][s] || 0,
+        'válec 3': r.vahyValcu[2][s] || 0
+      };
+    }));
+    console.table(r.radky.map(function (x) {
+      return {
+        linie: x.vzor.map(function (s) { return s === '*' ? '*' : SYMBOLY[s]; }).join(' '),
+        'násobek': x.nasobek,
+        'P': x.p.toExponential(3),
+        '1 z': Math.round(1 / x.p),
+        'podíl na RTP': pct(x.podilRtp)
+      };
+    }));
+    console.log('  RTP = ' + r.zlomek + ' = ' + pct(r.rtp, 4) + ', výhoda podniku ' + pct(r.vyhoda, 4) +
+      ', výhra v ' + pct(r.trefa, 2) + ' zatočení');
+    console.log('  rozptyl ' + r.rozptyl.toFixed(3) + ', σ = ' + r.sd.toFixed(3));
+
+    var bl = blizkostLinie(), nejvic = 0, kde = '';
+    bl.forEach(function (pomery, v) {
+      Object.keys(pomery).forEach(function (s) {
+        if (pomery[s] > nejvic) { nejvic = pomery[s]; kde = SYMBOLY[s] + ' na válci ' + (v + 1); }
+      });
+    });
+    var bezNearMiss = nejvic <= 2 + 1e-12;
+    console.log((bezNearMiss ? '  ok   ' : '  CHYBA ') + 'bez near-missu: symbol vedle linie / na linii nejvýš ' +
+      nejvic.toFixed(2) + '× (' + kde + '), rovnoměrný pás dává 2×');
+    return r.rtp > 0 && r.rtp < 1 && bezNearMiss;
+  }
+
+  function testKolaAnalyticky(r) {
+    console.table(r.radky.map(function (x) {
+      return {
+        'násobek': x.nasobek,
+        'výsečí': x.vysece,
+        'váha': x.vaha + '/' + r.celkemVaha,
+        'P': pct(x.p, 1),
+        'podíl na RTP': pct(x.podilRtp)
+      };
+    }));
+    console.log('  RTP = ' + pct(r.rtp, 4) + ', výhoda podniku ' + pct(r.vyhoda, 4) +
+      ', rozptyl ' + r.rozptyl.toFixed(4) + ', σ = ' + r.sd.toFixed(3));
+    return Math.abs(r.sumaP - 1) < 1e-12 && r.rtp > 0 && r.rtp < 1;
+  }
+
+  /* Ruleta: jeden proud zatočení a nad ním osm vzorových sázek, jedna
+     od každého typu. Výplata každé sázky pro každé z 37 čísel se
+     předpočítá voláním vyhodnotSazku — v cyklu se pak jen sčítá. */
+  function simulujRuletu(n, seminko) {
+    var vzory = [
+      ['plne', [17]], ['split', [17, 20]], ['stred', [16, 17, 18]], ['roh', [17, 18, 20, 21]],
+      ['linie', [13, 14, 15, 16, 17, 18]], ['tucet', 2], ['sloupec', 2], ['jednoducha', 'cervena']
+    ];
+    var tabulky = vzory.map(function (s) {
+      var t = new Float64Array(37);
+      for (var v = 0; v <= 36; v++) t[v] = vyhodnotSazku(s[0], s[1], v);
+      return t;
+    });
+    var S = vzory.length, suma = new Float64Array(S), suma2 = new Float64Array(S);
+    var pocty = new Float64Array(37);
+    var g = new Nahoda(seminko), t0 = Date.now(), i, k;
+
+    for (i = 0; i < n; i++) {
+      var cislo = KOLO[g.cele(37)];
+      pocty[cislo]++;
+      for (k = 0; k < S; k++) {
+        var x = tabulky[k][cislo];
+        suma[k] += x;
+        suma2[k] += x * x;
+      }
+    }
+    var cas = Date.now() - t0;
+
+    var chi = 0, ocek = n / 37;
+    for (i = 0; i <= 36; i++) chi += (pocty[i] - ocek) * (pocty[i] - ocek) / ocek;
+
+    return {
+      cas: cas,
+      chi: chi,
+      radky: vzory.map(function (s, k) {
+        return radekSimulace('ruleta: ' + s[0] + ' ' + (Array.isArray(s[1]) ? s[1].join('-') : s[1]),
+          rozborSazky(s[0], s[1]), empirie(suma[k], suma2[k], n), n, k === 0 ? cas : undefined);
+      })
+    };
+  }
+
+  /* Automat se simuluje poctivě po zastaveních pásu a každá linie se
+     vyhodnotí výplatní tabulkou — nezávisle na analytickém součtu,
+     který pracuje se sečtenými váhami symbolů. */
+  function simulujAutomat(n, seminko, teor) {
+    var g = new Nahoda(seminko), t0 = Date.now();
+    var t1 = tabulkyValcu[0], t2 = tabulkyValcu[1], t3 = tabulkyValcu[2];
+    var p1 = VALCE[0], p2 = VALCE[1], p3 = VALCE[2];
+    var suma = 0, suma2 = 0;
+    for (var i = 0; i < n; i++) {
+      var a = p1[t1[g.cele(t1.length)]][0];
+      var b = p2[t2[g.cele(t2.length)]][0];
+      var c = p3[t3[g.cele(t3.length)]][0];
+      var x = vyhodnotLinii(a, b, c);
+      suma += x;
+      suma2 += x * x;
+    }
+    return radekSimulace('automat', teor, empirie(suma, suma2, n), n, Date.now() - t0);
+  }
+
+  function simulujKolo(n, seminko, teor) {
+    var g = new Nahoda(seminko), t0 = Date.now(), m = tabulkaKola.length;
+    var suma = 0, suma2 = 0;
+    for (var i = 0; i < n; i++) {
+      var x = VYSECE[tabulkaKola[g.cele(m)]].nasobek;
+      suma += x;
+      suma2 += x * x;
+    }
+    return radekSimulace('kolo štěstí', teor, empirie(suma, suma2, n), n, Date.now() - t0);
+  }
+
+  window.kasinoTesty = function (moznosti) {
+    moznosti = moznosti || {};
+    var n = moznosti.kol || 1e7;
+    var seminko = moznosti.seminko === undefined ? 20260927 : moznosti.seminko;
+    var vse = true;
+
+    console.log('%c--- 1. Generátor (xorshift128, semínko ' + seminko + ') ---', 'font-weight:bold');
+    vse = testGeneratoru(seminko) && vse;
+
+    console.log('%c--- 2. Ruleta — teorie ---', 'font-weight:bold');
+    vse = testRuletyAnalyticky() && vse;
+
+    console.log('%c--- 3. Automat — teorie ---', 'font-weight:bold');
+    var rA = rozborAutomatu();
+    vse = testAutomatuAnalyticky(rA) && vse;
+
+    console.log('%c--- 4. Kolo štěstí — teorie ---', 'font-weight:bold');
+    var rK = rozborKola();
+    vse = testKolaAnalyticky(rK) && vse;
+
+    var sudaSance = rozborSazky('jednoducha', 'cervena');
+    var plne = rozborSazky('plne', [17]);
+    console.log('%c--- 5. Souhrn teorie ---', 'font-weight:bold');
+    console.table([
+      { hra: 'ruleta (každá sázka)', RTP: pct(36 / 37, 4), 'výhoda podniku': pct(1 / 37, 4),
+        'σ': zaokr(sudaSance.sd, 3) + ' … ' + zaokr(plne.sd, 3), 'rozptyl': zaokr(sudaSance.rozptyl, 3) + ' … ' + zaokr(plne.rozptyl, 3) },
+      { hra: 'automat', RTP: pct(rA.rtp, 4), 'výhoda podniku': pct(rA.vyhoda, 4),
+        'σ': zaokr(rA.sd, 3), 'rozptyl': zaokr(rA.rozptyl, 3) },
+      { hra: 'kolo štěstí', RTP: pct(rK.rtp, 4), 'výhoda podniku': pct(rK.vyhoda, 4),
+        'σ': zaokr(rK.sd, 3), 'rozptyl': zaokr(rK.rozptyl, 3) }
+    ]);
+    console.log('  σ automatu je ' + (rA.sd / sudaSance.sd).toFixed(1) + '× σ jednoduché šance na ruletě' +
+      ' (rozptyl ' + (rA.rozptyl / sudaSance.rozptyl).toFixed(0) + '×), ale jen ' +
+      (rA.sd / plne.sd).toFixed(2) + '× σ sázky na plné číslo.');
+
+    if (moznosti.bezSimulace) {
+      console.log(vse ? 'Vše v pořádku.' : 'POZOR: něco nevyšlo, viz CHYBA výš.');
+      return { ok: vse, automat: rA, kolo: rK };
+    }
+
+    console.log('%c--- 6. Simulace: ' + n.toLocaleString('cs-CZ') + ' kol každé hry ---', 'font-weight:bold');
+    var simR = simulujRuletu(n, seminko + 101);
+    var radky = simR.radky.concat([
+      simulujAutomat(n, seminko + 202, rA),
+      simulujKolo(n, seminko + 303, rK)
+    ]);
+    console.table(bezPomocnych(radky));
+    console.log('  kapsy rulety v simulaci: χ² = ' + simR.chi.toFixed(1) + ' (mez 67.99 při 36 st. v., hladina 0.1 %) → ' +
+      (simR.chi < 67.99 ? 'ok' : 'CHYBA'));
+    if (simR.chi >= 67.99) vse = false;
+
+    var mimo3 = radky.filter(function (r) { return !r._ok; });
+    var mimo01 = radky.filter(function (r) { return !r._v01; });
+    console.log('  do 3 SE: ' + (radky.length - mimo3.length) + '/' + radky.length +
+      ', do 0.1 p. b.: ' + (radky.length - mimo01.length) + '/' + radky.length);
+    if (mimo01.length) {
+      console.log('  Pevná mez 0.1 p. b. je u sázek s velkým σ pod hranicí toho, co ' +
+        n.toLocaleString('cs-CZ') + ' kol dokáže rozlišit — jejich SE je sám kolem ' +
+        'této hodnoty. Rozhoduje proto test 3 SE; kolik kol by 0.1 p. b. spolehlivě ' +
+        'potřebovalo, ukazuje sloupec „kol na 0.1 p. b.“.');
+    }
+    if (mimo3.length) vse = false;
+
+    console.log(vse ? 'Vše v pořádku.' : 'POZOR: něco nevyšlo, viz CHYBA / NE výš.');
+    return { ok: vse, automat: rA, kolo: rK, simulace: bezPomocnych(radky) };
+  };
+
+  console.log('Kasino: testy matematiky spustíš příkazem kasinoTesty() — nebo kasinoTesty({ kol: 1e6 }) pro rychlejší běh.');
+})();
+</script>
+
+<script>
+/* =================================================================
+   ETAPA 2 — ROZHRANÍ
+   -----------------------------------------------------------------
+   Matematika v bloku výš se tu nemění, jen se přes ni losuje. Pořadí
+   je u všech tří her stejné:
+
+     1. výsledek vylosuje RNG (kasino.*.zatoc),
+     2. hned se zaúčtuje a uloží do localStorage,
+     3. animace ho pak jen dojede ukázat.
+
+   Animace tedy výsledek nikdy neurčuje, jen dopočítá, kam má dojet.
+   Obnovení stránky uprostřed točení nic nezmění, výsledek už je
+   zapsaný. Zůstatek a statistiky se na obrazovce přepíšou až po
+   dojetí animace, aby výsledek neprozradily dopředu.
+   ================================================================= */
+(function () {
+  'use strict';
+
+  var K = window.kasino, R = K.ruleta, A = K.automat, KS = K.koloStesti;
+  var SVG_NS = 'http://www.w3.org/2000/svg';
+
+  var START = 1000;
+  var KLIC_STAV = 'kasino.stav.v1';
+  var KLIC_ZALOZKA = 'kasino.zalozka';
+  var HRY = ['ruleta', 'automat', 'kolo'];
+  var NAZVY = { ruleta: 'Ruleta', automat: 'Automat', kolo: 'Kolo štěstí' };
+  var RTP_TEOR = { ruleta: 36 / 37, automat: A.rozbor().rtp, kolo: KS.rozbor().rtp };
+  var MAX_BODU = 800;          // víc bodů na graf se ukládat nevyplatí
+
+  var HODNOTY_ZETONU = [1, 5, 10, 25, 100];
+  var SAZKY_AUTOMAT = [1, 5, 10, 25, 50, 100];
+  /* Na kole jsou jen sudé sázky: násobek 0,5 tak dá vždycky celý žeton
+     a zůstatek zůstane celé číslo. */
+  var SAZKY_KOLO = [2, 10, 20, 50, 100];
+
+  function $(id) { return document.getElementById(id); }
+
+  function tvor(tag, trida, text) {
+    var e = document.createElement(tag);
+    if (trida) e.className = trida;
+    if (text !== undefined) e.textContent = text;
+    return e;
+  }
+
+  function svgEl(tag, atr) {
+    var e = document.createElementNS(SVG_NS, tag);
+    if (atr) Object.keys(atr).forEach(function (k) { e.setAttribute(k, atr[k]); });
+    return e;
+  }
+
+  function cislo(x, mist) {
+    return Number(x).toLocaleString('cs-CZ', { maximumFractionDigits: mist || 0 });
+  }
+
+  function znamenko(x, mist) {
+    var t = cislo(Math.abs(x), mist);
+    if (t === '0') return '0';
+    return (x > 0 ? '+' : '−') + t;
+  }
+
+  function procenta(x) {
+    return (x * 100).toLocaleString('cs-CZ', { minimumFractionDigits: 2, maximumFractionDigits: 2 }) + ' %';
+  }
+
+  /* Semínko pro hru se bere z kryptografického zdroje. Reprodukovatelnost
+     tu není potřeba (tu mají testy) — naopak, každé načtení má hrát jinak. */
+  function noveSeminko() {
+    try {
+      var a = new Uint32Array(1);
+      window.crypto.getRandomValues(a);
+      return a[0];
+    } catch (e) {
+      return (Date.now() ^ (performance.now() * 1000)) >>> 0;
+    }
+  }
+
+  var nahoda = new K.Nahoda(noveSeminko());
+
+  var omezPohyb = window.matchMedia && window.matchMedia('(prefers-reduced-motion: reduce)').matches;
+  function doba(ms) { return omezPohyb ? Math.min(ms, 250) : ms; }
+
+  /* ---------------------------------------------------------------
+     Stav a účetnictví
+     --------------------------------------------------------------- */
+
+  function novyStav() {
+    var s = {
+      verze: 1,
+      zustatek: START,
+      hry: {},
+      /* Body grafů: [pořadí hry, skutečnost, očekávání]. U celku je to
+         zůstatek, u jednotlivé hry čistý výsledek (vyplaceno − vsazeno). */
+      body: { celkem: [[0, START, START]] },
+      historieRulety: []
+    };
+    HRY.forEach(function (h) {
+      s.hry[h] = { her: 0, vsazeno: 0, vyplaceno: 0, ocekavano: 0 };
+      s.body[h] = [[0, 0, 0]];
+    });
+    return s;
+  }
+
+  function nactiStav() {
+    try {
+      var s = JSON.parse(localStorage.getItem(KLIC_STAV));
+      if (s && s.verze === 1 && isFinite(s.zustatek) && s.zustatek >= 0 && s.hry && s.body &&
+          Array.isArray(s.body.celkem) && Array.isArray(s.historieRulety) &&
+          HRY.every(function (h) { return s.hry[h] && Array.isArray(s.body[h]); })) {
+        return s;
+      }
+    } catch (e) { /* poškozený nebo nepřístupný záznam → nová hra */ }
+    return novyStav();
+  }
+
+  function ulozStav() {
+    try { localStorage.setItem(KLIC_STAV, JSON.stringify(stav)); } catch (e) { /* bez úložiště se hraje dál */ }
+  }
+
+  var stav = nactiStav();
+
+  function souhrn() {
+    var c = { her: 0, vsazeno: 0, vyplaceno: 0, ocekavano: 0 };
+    HRY.forEach(function (h) {
+      Object.keys(c).forEach(function (k) { c[k] += stav.hry[h][k]; });
+    });
+    return c;
+  }
+
+  /* Dlouhá řada bodů se prořídí na polovinu: první a poslední bod
+     zůstanou, x-ová souřadnice je pořadí hry, takže tvar grafu drží. */
+  function proredit(body) {
+    if (body.length <= MAX_BODU) return body;
+    return body.filter(function (b, i) { return i === 0 || i === body.length - 1 || i % 2 === 0; });
+  }
+
+  /* Jediné místo, kde se mění zůstatek během hry. Očekávaná výplata
+     je vsazeno × teoretické RTP dané hry; rozdíl proti skutečné je
+     štěstí nebo smůla. */
+  function zapocitej(hra, vsazeno, vyplaceno) {
+    var h = stav.hry[hra];
+    stav.zustatek += vyplaceno - vsazeno;
+    h.her++;
+    h.vsazeno += vsazeno;
+    h.vyplaceno += vyplaceno;
+    h.ocekavano += vsazeno * RTP_TEOR[hra];
+
+    var c = souhrn();
+    stav.body.celkem.push([c.her, stav.zustatek, START + c.ocekavano - c.vsazeno]);
+    stav.body[hra].push([h.her, h.vyplaceno - h.vsazeno, h.ocekavano - h.vsazeno]);
+    stav.body.celkem = proredit(stav.body.celkem);
+    stav.body[hra] = proredit(stav.body[hra]);
+    ulozStav();
+  }
+
+  /* ---------------------------------------------------------------
+     Zámek během animace a stav ovládání
+     --------------------------------------------------------------- */
+
+  var animuje = false;
+  var zobrazenyZustatek = stav.zustatek;
+
+  function ukazZustatek() { $('zustatek').textContent = cislo(zobrazenyZustatek); }
+
+  function konecHry() { return !animuje && stav.zustatek <= 0; }
+
+  function hlaska(hra, text) { $(hra + '-hlaska').textContent = text || ''; }
+
+  /* Text výsledku. Efekt výhry jen při čistém zisku; výplata do výše
+     vkladu je „vráceno X z Y“ bez oslav — hráč na ní nic nezískal. */
+  function popisVysledku(vsazeno, vyplaceno) {
+    if (vyplaceno > vsazeno) {
+      return { vyhra: true, text: 'Výhra ' + cislo(vyplaceno) + ' — čistý zisk +' + cislo(vyplaceno - vsazeno) };
+    }
+    if (vyplaceno > 0) return { vyhra: false, text: 'Vráceno ' + cislo(vyplaceno) + ' z ' + cislo(vsazeno) };
+    return { vyhra: false, text: 'Bez výhry — vsazeno ' + cislo(vsazeno) };
+  }
+
+  function ukazVysledek(box, hlavni, v) {
+    box.textContent = '';
+    box.classList.remove('vysledek--vyhra');
+    if (hlavni) box.appendChild(tvor('small', '', hlavni));
+    box.appendChild(document.createTextNode(v.text));
+    if (v.vyhra) {
+      void box.offsetWidth;                 // restart animace pulzu
+      box.classList.add('vysledek--vyhra');
+    }
+  }
+
+  function vyberSazku(seznam, zadana, zustatek) {
+    if (zadana <= zustatek) return zadana;
+    var dostupne = seznam.filter(function (s) { return s <= zustatek; });
+    return dostupne.length ? dostupne[dostupne.length - 1] : zadana;
+  }
+
+  function aktualizujOvladani() {
+    var konec = konecHry();
+    var volno = !animuje && !konec;
+    $('konec').hidden = !konec;
+
+    // ruleta
+    var ns = naStole();
+    $('na-stole').textContent = cislo(ns);
+    $('ruleta-toc').disabled = !volno || ns <= 0 || ns > stav.zustatek;
+    $('ruleta-zpet').disabled = !volno || !tahy.length;
+    $('ruleta-zrus').disabled = !volno || ns <= 0;
+    $('stul').classList.toggle('stul--zamceno', !volno);
+    Array.prototype.forEach.call($('zetony').children, function (b) { b.disabled = !volno; });
+    if (volno && ns > stav.zustatek) {
+      hlaska('ruleta', 'Na stole je ' + cislo(ns) + ', ale máš jen ' + cislo(stav.zustatek) + '. Uber sázky (Zpět nebo Zrušit).');
+    }
+
+    // automat a kolo — sázka nad zůstatek se sama sníží na nejvyšší možnou
+    if (volno) {
+      sazkaAutomat = vyberSazku(SAZKY_AUTOMAT, sazkaAutomat, stav.zustatek);
+      sazkaKolo = vyberSazku(SAZKY_KOLO, sazkaKolo, stav.zustatek);
+    }
+    [['automat', SAZKY_AUTOMAT, sazkaAutomat], ['kolo', SAZKY_KOLO, sazkaKolo]].forEach(function (x) {
+      var hra = x[0], sazka = x[2];
+      Array.prototype.forEach.call($(hra + '-sazky').children, function (b) {
+        var h = Number(b.dataset.hodnota);
+        b.disabled = !volno || h > stav.zustatek;
+        b.setAttribute('aria-checked', String(h === sazka));
+      });
+      var jde = volno && sazka <= stav.zustatek;
+      $(hra + '-toc').disabled = !jde;
+      if (volno && !jde) hlaska(hra, 'Na tuhle hru už nemáš dost žetonů — nejnižší sázka je ' + x[1][0] + '.');
+      else if (volno) hlaska(hra, '');
+    });
+    vykresliVyplatni();
+  }
+
+  function zamkni(ano) {
+    animuje = ano;
+    aktualizujOvladani();
+  }
+
+  /* ---------------------------------------------------------------
+     Záložky
+     --------------------------------------------------------------- */
+
+  /* Simulace je čtvrtá záložka, ale ne hra: nemá vlastní statistiky
+     a panel statistik hráče se na ní schová. */
+  var ZALOZKY = HRY.concat(['simulace']);
+  var zalozka = 'ruleta';
+  try { var z = localStorage.getItem(KLIC_ZALOZKA); if (ZALOZKY.indexOf(z) >= 0) zalozka = z; } catch (e) {}
+
+  function prepni(hra, fokus) {
+    zalozka = hra;
+    ZALOZKY.forEach(function (h) {
+      var tab = $('tab-' + h);
+      tab.setAttribute('aria-selected', String(h === hra));
+      tab.tabIndex = h === hra ? 0 : -1;
+      $('panel-' + h).hidden = h !== hra;
+    });
+    $('statistiky').hidden = hra === 'simulace';
+    if (fokus) $('tab-' + hra).focus();
+    try { localStorage.setItem(KLIC_ZALOZKA, hra); } catch (e) {}
+    if (hra === 'simulace') vykresliSimulaci();
+    else vykresliStatistiky();
+  }
+
+  ZALOZKY.forEach(function (h, i) {
+    var tab = $('tab-' + h);
+    tab.addEventListener('click', function () { prepni(h); });
+    tab.addEventListener('keydown', function (e) {
+      var d = e.key === 'ArrowRight' ? 1 : e.key === 'ArrowLeft' ? -1 : 0;
+      if (d) { e.preventDefault(); prepni(ZALOZKY[(i + d + ZALOZKY.length) % ZALOZKY.length], true); }
+    });
+  });
+
+  /* Skupina tlačítek „vyber jednu hodnotu“ (žeton, sázka). */
+  function postavVolbu(kam, hodnoty, trida, pri) {
+    hodnoty.forEach(function (h) {
+      var b = tvor('button', trida, String(h));
+      b.type = 'button';
+      b.setAttribute('role', 'radio');
+      b.dataset.hodnota = h;
+      b.addEventListener('click', function () { pri(h); });
+      kam.appendChild(b);
+    });
+  }
+
+  /* ---------------------------------------------------------------
+     Geometrie kol (ruleta i kolo štěstí)
+     Úhly se měří ve stupních po směru hodinových ručiček od vršku.
+     --------------------------------------------------------------- */
+
+  function bod(r, uhel) {
+    var a = uhel * Math.PI / 180;
+    return (r * Math.sin(a)).toFixed(2) + ',' + (-r * Math.cos(a)).toFixed(2);
+  }
+
+  function vysec(r0, r1, u0, u1) {
+    var velky = u1 - u0 > 180 ? 1 : 0;
+    return 'M' + bod(r1, u0) + ' A' + r1 + ' ' + r1 + ' 0 ' + velky + ' 1 ' + bod(r1, u1) +
+           ' L' + bod(r0, u1) + ' A' + r0 + ' ' + r0 + ' 0 ' + velky + ' 0 ' + bod(r0, u0) + ' Z';
+  }
+
+  /* Otočí rotor tak, aby úhel `uhel` (na kole) skončil nahoře pod
+     ručičkou. Vždy dopředu a o pár celých otáček navíc. */
+  function otoc(rotor, dosavad, uhel, otacek, ms) {
+    var delta = ((-uhel - dosavad) % 360 + 360) % 360;
+    var nova = dosavad + 360 * otacek + delta;
+    rotor.style.transition = ms ? 'transform ' + ms + 'ms cubic-bezier(.12,.6,.12,1)' : 'none';
+    rotor.style.transform = 'rotate(' + nova + 'deg)';
+    return nova;
+  }
+
+  function rucicka(svg) {
+    svg.appendChild(svgEl('polygon', {
+      points: '0,-140 -9,-161 9,-161',
+      fill: '#e6e9ef', stroke: '#0a0c10', 'stroke-width': 1.5
+    }));
+  }
+
+  /* ---------------------------------------------------------------
+     RULETA
+     --------------------------------------------------------------- */
+
+  var ALFA = 360 / R.KOLO.length;
+  var rulRotor, rulKulicka, rotaceRulety = 0;
+
+  function postavKoloRulety() {
+    var s = $('ruleta-svg');
+    s.appendChild(svgEl('circle', { r: 156, fill: '#3b2a1a' }));
+    rulRotor = svgEl('g', { 'class': 'rotor' });
+    R.KOLO.forEach(function (n, k) {
+      var u = k * ALFA;
+      var barva = R.barva(n);
+      rulRotor.appendChild(svgEl('path', {
+        d: vysec(108, 150, u - ALFA / 2, u + ALFA / 2),
+        fill: barva === 'zelena' ? '#1f8a4c' : barva === 'cervena' ? '#c0392b' : '#1c1f26',
+        stroke: '#d4c49a', 'stroke-width': 0.8
+      }));
+      var t = svgEl('text', {
+        x: 0, y: -134, fill: '#fff', 'font-size': 11, 'font-weight': 700,
+        'text-anchor': 'middle', 'dominant-baseline': 'central',
+        transform: 'rotate(' + u + ')', 'font-family': 'system-ui, sans-serif'
+      });
+      t.textContent = n;
+      rulRotor.appendChild(t);
+    });
+    rulRotor.appendChild(svgEl('circle', { r: 108, fill: 'none', stroke: '#d4c49a', 'stroke-width': 1 }));
+    rulRotor.appendChild(svgEl('circle', { r: 96, fill: '#5a3d22' }));
+    rulRotor.appendChild(svgEl('circle', { r: 60, fill: '#2b1d10' }));
+    for (var i = 0; i < 4; i++) {
+      rulRotor.appendChild(svgEl('rect', {
+        x: -3, y: -58, width: 6, height: 116, rx: 3, fill: '#c9b27a',
+        transform: 'rotate(' + (i * 45) + ')'
+      }));
+    }
+    rulRotor.appendChild(svgEl('circle', { r: 12, fill: '#d4c49a' }));
+    s.appendChild(rulRotor);
+    /* Kulička se ukáže až po zastavení, v kapse pod ručičkou. */
+    rulKulicka = svgEl('circle', { cx: 0, cy: -116, r: 6, fill: '#fff', stroke: '#888', 'stroke-width': 1 });
+    rulKulicka.style.display = 'none';
+    s.appendChild(rulKulicka);
+    rucicka(s);
+
+    // po načtení ukázat naposledy padlé číslo
+    if (stav.historieRulety.length) {
+      var kapsa = R.KOLO.indexOf(stav.historieRulety[0]);
+      rotaceRulety = otoc(rulRotor, 0, kapsa * ALFA, 0, 0);
+      rulKulicka.style.display = '';
+    }
+  }
+
+  /* Sázky na stole: klíč → { typ, cisla, castka }. Zůstávají i po
+     zatočení, jako „vsadit znovu“. Vsazené žetony se od zůstatku
+     odečtou až při zatočení. */
+  var sazky = {};
+  var tahy = [];                 // pro „Zpět“: [{ klic, castka }]
+  var hodnotaZetonu = 5;
+  var svisle = false;
+  var padloCislo = stav.historieRulety.length ? stav.historieRulety[0] : null;
+  var vyherniKlice = {};
+
+  function klicSazky(typ, cisla) {
+    return typ + ':' + cisla.slice().sort(function (a, b) { return a - b; }).join(',');
+  }
+
+  function naStole() {
+    var s = 0;
+    Object.keys(sazky).forEach(function (k) { s += sazky[k].castka; });
+    return s;
+  }
+
+  function polozZeton(typ, cisla) {
+    if (animuje || konecHry()) return;
+    if (naStole() + hodnotaZetonu > stav.zustatek) {
+      hlaska('ruleta', 'Na další žeton ' + hodnotaZetonu + ' nemáš — na stole je ' + cislo(naStole()) +
+        ' z ' + cislo(stav.zustatek) + '.');
+      return;
+    }
+    hlaska('ruleta', '');
+    var k = klicSazky(typ, cisla);
+    if (!sazky[k]) sazky[k] = { typ: typ, cisla: cisla.slice(), castka: 0 };
+    sazky[k].castka += hodnotaZetonu;
+    tahy.push({ klic: k, castka: hodnotaZetonu });
+    vyherniKlice = {};
+    vykresliZetony();
+    aktualizujOvladani();
+  }
+
+  $('ruleta-zpet').addEventListener('click', function () {
+    var t = tahy.pop();
+    if (!t) return;
+    if (sazky[t.klic]) {
+      sazky[t.klic].castka -= t.castka;
+      if (sazky[t.klic].castka <= 0) delete sazky[t.klic];
+    }
+    hlaska('ruleta', '');
+    vykresliZetony();
+    aktualizujOvladani();
+  });
+
+  $('ruleta-zrus').addEventListener('click', function () {
+    sazky = {};
+    tahy = [];
+    hlaska('ruleta', '');
+    vykresliZetony();
+    aktualizujOvladani();
+  });
+
+  /* Logická mřížka stolu: osa „d“ (délka, 0–14) vede od nuly přes
+     12 řad čísel ke sloupcům 2:1, osa „n“ (napříč, 0–5) přes tři čísla
+     řady, tucty a jednoduché šance. Na šířku je d vodorovně a nahoře
+     leží řada 3-6-9…; na výšku je d svisle a vlevo leží 1-4-7…  */
+  function napric(c) { return svisle ? c : 2 - c; }
+  function radaC(n) { return Math.floor((n - 1) / 3); }
+  function sloupC(n) { return (n - 1) % 3; }
+
+  var PORADI_JEDNODUCHYCH = ['mala', 'suda', 'cervena', 'cerna', 'licha', 'velka'];
+  var POPISY_JEDNODUCHYCH = { mala: '1–18', suda: 'Sudá', cervena: 'Červená', cerna: 'Černá', licha: 'Lichá', velka: '19–36' };
+
+  function umisti(el, d0, d1, n0, n1) {
+    var s = el.style;
+    if (!svisle) {
+      s.left = (d0 / 14 * 100) + '%'; s.width = ((d1 - d0) / 14 * 100) + '%';
+      s.top = (n0 / 5 * 100) + '%';   s.height = ((n1 - n0) / 5 * 100) + '%';
+    } else {
+      s.left = (n0 / 5 * 100) + '%';  s.width = ((n1 - n0) / 5 * 100) + '%';
+      s.top = (d0 / 14 * 100) + '%';  s.height = ((d1 - d0) / 14 * 100) + '%';
+    }
+  }
+
+  function umistiStred(el, p, velikost) {
+    var s = el.style;
+    var x = svisle ? p.n / 5 : p.d / 14, y = svisle ? p.d / 14 : p.n / 5;
+    s.left = (x * 100) + '%';
+    s.top = (y * 100) + '%';
+    if (velikost) {
+      s.width = (velikost / (svisle ? 5 : 14) * 100) + '%';
+      s.height = (velikost / (svisle ? 14 : 5) * 100) + '%';
+    }
+  }
+
+  /* Střed sázky v logické mřížce — tam leží její bod i žeton. */
+  function stredSazky(typ, cisla) {
+    var s = cisla.slice().sort(function (a, b) { return a - b; }), n0 = s[0];
+    switch (typ) {
+      case 'plne':
+        return n0 === 0 ? { d: 0.5, n: 1.5 } : { d: 1.5 + radaC(n0), n: napric(sloupC(n0)) + 0.5 };
+      case 'split':
+        if (n0 === 0) return { d: 1, n: napric(s[1] - 1) + 0.5 };
+        if (s[1] === n0 + 1) return { d: 1.5 + radaC(n0), n: Math.max(napric(sloupC(n0)), napric(sloupC(n0) + 1)) };
+        return { d: 2 + radaC(n0), n: napric(sloupC(n0)) + 0.5 };
+      case 'stred':
+        if (n0 === 0) return { d: 1, n: Math.max(napric(s[1] - 1), napric(s[2] - 1)) };
+        return { d: 1.5 + radaC(n0), n: 3 };
+      case 'roh':
+        if (n0 === 0) return { d: 1, n: 3 };
+        return { d: 2 + radaC(n0), n: Math.max(napric(sloupC(n0)), napric(sloupC(n0) + 1)) };
+      case 'linie':
+        return { d: 2 + radaC(n0), n: 3 };
+      case 'tucet':
+        return { d: 1 + 4 * Math.floor((n0 - 1) / 12) + 2, n: 3.5 };
+      case 'sloupec':
+        return { d: 13.5, n: napric(sloupC(n0)) + 0.5 };
+      case 'jednoducha':
+        var klic = s.join(',');
+        for (var i = 0; i < PORADI_JEDNODUCHYCH.length; i++) {
+          if (R.JEDNODUCHE[PORADI_JEDNODUCHYCH[i]].slice().sort(function (a, b) { return a - b; }).join(',') === klic) {
+            return { d: 2 + 2 * i, n: 4.5 };
+          }
+        }
+    }
+    return { d: 0, n: 0 };
+  }
+
+  var POPIS_TYPU = { plne: 'plné číslo', split: 'split', stred: 'street', roh: 'roh', linie: 'linie',
+                     tucet: 'tucet', sloupec: 'sloupec', jednoducha: 'jednoduchá šance' };
+
+  var polaCisel = [];            // n → element pole, kvůli zvýraznění
+
+  function nahled(cisla, zapnout) {
+    cisla.forEach(function (n) { if (polaCisel[n]) polaCisel[n].classList.toggle('pole--nahled', zapnout); });
+  }
+
+  function napojSazku(el, typ, cisla, popis) {
+    el.type = 'button';
+    el.setAttribute('aria-label', POPIS_TYPU[typ] + ' ' + popis + ', výplata ' + R.VYPLATY[typ] + ':1');
+    el.title = POPIS_TYPU[typ] + ' ' + popis + ' (' + R.VYPLATY[typ] + ':1)';
+    el.addEventListener('click', function () { polozZeton(typ, cisla); });
+    if (typ !== 'plne') {
+      el.addEventListener('pointerenter', function () { nahled(cisla, true); });
+      el.addEventListener('pointerleave', function () { nahled(cisla, false); });
+      el.addEventListener('focus', function () { nahled(cisla, true); });
+      el.addEventListener('blur', function () { nahled(cisla, false); });
+    }
+  }
+
+  function vykresliStul() {
+    var stul = $('stul');
+    stul.textContent = '';
+    stul.classList.toggle('stul--svisle', svisle);
+    polaCisel = [];
+
+    var nula = tvor('button', 'pole pole--zelena', '0');
+    umisti(nula, 0, 1, 0, 3);
+    napojSazku(nula, 'plne', [0], '0');
+    polaCisel[0] = nula;
+    stul.appendChild(nula);
+
+    for (var n = 1; n <= 36; n++) {
+      var p = tvor('button', 'pole pole--' + R.barva(n), String(n));
+      var a = napric(sloupC(n)), r = radaC(n);
+      umisti(p, 1 + r, 2 + r, a, a + 1);
+      napojSazku(p, 'plne', [n], String(n));
+      polaCisel[n] = p;
+      stul.appendChild(p);
+    }
+
+    R.PLATNE.sloupec.forEach(function (cisla, k) {
+      var el = tvor('button', 'pole pole--bok', '2:1');
+      var a = napric(k);
+      umisti(el, 13, 14, a, a + 1);
+      napojSazku(el, 'sloupec', cisla, (k + 1) + '. sloupec');
+      stul.appendChild(el);
+    });
+
+    R.PLATNE.tucet.forEach(function (cisla, k) {
+      var el = tvor('button', 'pole pole--bok', (k + 1) + '. tucet');
+      umisti(el, 1 + 4 * k, 5 + 4 * k, 3, 4);
+      napojSazku(el, 'tucet', cisla, (12 * k + 1) + '–' + (12 * k + 12));
+      stul.appendChild(el);
+    });
+
+    PORADI_JEDNODUCHYCH.forEach(function (jm, i) {
+      var el = tvor('button', 'pole pole--bok', POPISY_JEDNODUCHYCH[jm]);
+      if (jm === 'cervena') el.classList.add('pole--cervena');
+      if (jm === 'cerna') el.classList.add('pole--cerna');
+      umisti(el, 1 + 2 * i, 3 + 2 * i, 4, 5);
+      napojSazku(el, 'jednoducha', R.JEDNODUCHE[jm], POPISY_JEDNODUCHYCH[jm]);
+      stul.appendChild(el);
+    });
+
+    /* Body pro dělené sázky — přímo z výčtu platných sázek, takže
+       stůl nabídne přesně to, co vyhodnotSazku přijme. */
+    ['split', 'stred', 'roh', 'linie'].forEach(function (typ) {
+      R.PLATNE[typ].forEach(function (cisla) {
+        var b = tvor('button', 'bod');
+        umistiStred(b, stredSazky(typ, cisla), 0.44);
+        napojSazku(b, typ, cisla, cisla.join('-'));
+        stul.appendChild(b);
+      });
+    });
+
+    var vrstva = tvor('div');
+    vrstva.id = 'zetony-na-stole';
+    stul.appendChild(vrstva);
+
+    if (padloCislo !== null && polaCisel[padloCislo]) polaCisel[padloCislo].classList.add('pole--padlo');
+    vykresliZetony();
+  }
+
+  function tridaZetonu(castka) {
+    var t = 1;
+    HODNOTY_ZETONU.forEach(function (h) { if (castka >= h) t = h; });
+    return 'z-' + t;
+  }
+
+  function kratce(x) { return x >= 10000 ? Math.round(x / 1000) + 'k' : x >= 1000 ? (x / 1000).toFixed(1).replace('.0', '') + 'k' : String(x); }
+
+  function vykresliZetony() {
+    var vrstva = $('zetony-na-stole');
+    if (!vrstva) return;
+    vrstva.textContent = '';
+    Object.keys(sazky).forEach(function (k) {
+      var s = sazky[k];
+      var z = tvor('div', 'zeton ' + tridaZetonu(s.castka), kratce(s.castka));
+      if (vyherniKlice[k]) z.classList.add('zeton--vyhral');
+      umistiStred(z, stredSazky(s.typ, s.cisla));
+      vrstva.appendChild(z);
+    });
+  }
+
+  function vykresliHistorii() {
+    var ol = $('ruleta-historie');
+    ol.textContent = '';
+    stav.historieRulety.forEach(function (n) {
+      var li = tvor('li', 'c-' + R.barva(n), String(n));
+      ol.appendChild(li);
+    });
+  }
+
+  var NAZEV_BARVY = { cervena: 'červená', cerna: 'černá', zelena: 'zelená' };
+
+  $('ruleta-toc').addEventListener('click', function () {
+    var vsazeno = naStole();
+    if (animuje || vsazeno <= 0 || vsazeno > stav.zustatek) return;
+    var seznam = Object.keys(sazky).map(function (k) { return { klic: k, s: sazky[k] }; });
+
+    // 1. výsledek
+    var vysl = R.zatoc(nahoda);
+    var vyplaceno = 0, vyherni = {};
+    seznam.forEach(function (x) {
+      var v = R.vyhodnotSazku(x.s.typ, x.s.cisla, vysl.cislo, x.s.castka);
+      vyplaceno += v;
+      if (v > 0) vyherni[x.klic] = true;
+    });
+
+    // 2. zaúčtování
+    zobrazenyZustatek = stav.zustatek - vsazeno;
+    zapocitej('ruleta', vsazeno, vyplaceno);
+    stav.historieRulety.unshift(vysl.cislo);
+    if (stav.historieRulety.length > 20) stav.historieRulety.length = 20;
+    ulozStav();
+
+    // 3. animace
+    zamkni(true);
+    ukazZustatek();
+    hlaska('ruleta', '');
+    $('ruleta-vysledek').classList.remove('vysledek--vyhra');
+    $('ruleta-vysledek').textContent = 'Kolo se točí…';
+    if (padloCislo !== null && polaCisel[padloCislo]) polaCisel[padloCislo].classList.remove('pole--padlo');
+    vyherniKlice = {};
+    vykresliZetony();
+    rulKulicka.style.display = 'none';
+
+    var ms = doba(4200);
+    rotaceRulety = otoc(rulRotor, rotaceRulety, vysl.kapsa * ALFA, omezPohyb ? 0 : 5, ms);
+    setTimeout(function () {
+      rulKulicka.style.display = '';
+      padloCislo = vysl.cislo;
+      if (polaCisel[padloCislo]) polaCisel[padloCislo].classList.add('pole--padlo');
+      var v = popisVysledku(vsazeno, vyplaceno);
+      if (v.vyhra) vyherniKlice = vyherni;     // záře na žetonech jen při čistém zisku
+      vykresliZetony();
+      ukazVysledek($('ruleta-vysledek'), 'Padlo ' + vysl.cislo + ' · ' + NAZEV_BARVY[vysl.barva], v);
+      vykresliHistorii();
+      zobrazenyZustatek = stav.zustatek;
+      ukazZustatek();
+      zamkni(false);
+      vykresliStatistiky();
+    }, ms + 60);
+  });
+
+  /* ---------------------------------------------------------------
+     AUTOMAT
+     --------------------------------------------------------------- */
+
+  var SMYCEK = 8;                 // kolikrát je pás v DOM za sebou
+  var sazkaAutomat = 10;
+  var poziceValcu = [];           // index v opakovaném pásu, který je na linii
+  var pasy = [];
+
+  function svestkaSvg() {
+    var s = svgEl('svg', { viewBox: '0 0 32 32', 'aria-hidden': 'true' });
+    s.appendChild(svgEl('path', { d: 'M16 9 C 17 5, 20 3, 24 3', stroke: '#5b4a2a', 'stroke-width': 2, fill: 'none' }));
+    s.appendChild(svgEl('ellipse', { cx: 22, cy: 6, rx: 5, ry: 2.4, fill: '#5f9e3a', transform: 'rotate(-20 22 6)' }));
+    s.appendChild(svgEl('ellipse', { cx: 16, cy: 19, rx: 10, ry: 11, fill: '#6d2f8f' }));
+    s.appendChild(svgEl('path', { d: 'M16 9 C 13 14, 13 24, 16 30', stroke: '#4d1d68', 'stroke-width': 1.3, fill: 'none' }));
+    s.appendChild(svgEl('ellipse', { cx: 11.5, cy: 15, rx: 2.2, ry: 3.5, fill: '#a77cc4', opacity: 0.7 }));
+    return s;
+  }
+
+  var NAZVY_SYMBOLU = { sedm: 'sedmička', bar: 'BAR', zvonek: 'zvonek', svestka: 'švestka',
+                        citron: 'citron', tresen: 'třešeň', prazdne: 'prázdné' };
+
+  function symbolEl(s) {
+    var e = tvor('span', 'sym sym--' + s);
+    var znak = { sedm: '7', bar: 'BAR', zvonek: '🔔', citron: '🍋', tresen: '🍒' }[s];
+    if (znak) e.textContent = znak;
+    if (s === 'svestka') e.appendChild(svestkaSvg());
+    e.title = NAZVY_SYMBOLU[s];
+    return e;
+  }
+
+  function postavValce() {
+    var valce = $('valce');
+    A.VALCE.forEach(function (pas, v) {
+      var valec = tvor('div', 'valec');
+      var el = tvor('div', 'valec__pas');
+      for (var k = 0; k < SMYCEK; k++) {
+        pas.forEach(function (z) {
+          var b = tvor('div', 'symbol');
+          b.appendChild(symbolEl(z[0]));
+          el.appendChild(b);
+        });
+      }
+      valec.appendChild(el);
+      valce.insertBefore(valec, valce.lastElementChild);
+      pasy[v] = el;
+      poziceValcu[v] = pas.length * 4;
+      posunValec(v, poziceValcu[v], 0);
+    });
+  }
+
+  /* Zobrazí zastavení `idx` na linii: nad ním idx − 1, pod ním idx + 1,
+     tedy skuteční sousedé na pásu — nic se nepřidává ani nepřeskakuje. */
+  function posunValec(v, idx, ms) {
+    var el = pasy[v];
+    el.style.transition = ms ? 'transform ' + ms + 'ms cubic-bezier(.2,.62,.25,1)' : 'none';
+    el.style.transform = 'translateY(calc(var(--radek) * ' + (-(idx - 1)) + '))';
+  }
+
+  function vykresliVyplatni() {
+    var tb = $('vyplatni');
+    if (!tb.children.length) {
+      A.VYPLATNI_TABULKA.forEach(function (r) {
+        var tr = tvor('tr');
+        var td = tvor('td');
+        var k = tvor('div', 'kombinace');
+        r.vzor.forEach(function (s) {
+          var bunka = tvor('span');
+          if (s === '*') {
+            // Slovo „cokoli“ se do 30px políčka nevejde, proto otazník.
+            var ck = tvor('span', 'cokoli', '?');
+            ck.title = 'cokoli';
+            ck.setAttribute('aria-label', 'cokoli');
+            bunka.appendChild(ck);
+          }
+          else bunka.appendChild(symbolEl(s));
+          k.appendChild(bunka);
+        });
+        td.appendChild(k);
+        tr.appendChild(td);
+        tr.appendChild(tvor('td', '', '×' + r.nasobek));
+        tr.appendChild(tvor('td', 'vyhra-bunka'));
+        tb.appendChild(tr);
+      });
+      var rozbor = A.rozbor();
+      $('automat-pozn').textContent = 'Výplata je celková (vklad se nevrací zvlášť). Třešně se počítají zleva, ' +
+        'platí nejvyšší výhra. Teoretické RTP ' + procenta(rozbor.rtp) + ', výhra padá v ' +
+        procenta(rozbor.trefa) + ' zatočení.';
+    }
+    Array.prototype.forEach.call(tb.children, function (tr, i) {
+      tr.querySelector('.vyhra-bunka').textContent = cislo(A.VYPLATNI_TABULKA[i].nasobek * sazkaAutomat);
+    });
+  }
+
+  function radekVyplatni(symboly) {
+    for (var i = 0; i < A.VYPLATNI_TABULKA.length; i++) {
+      var vzor = A.VYPLATNI_TABULKA[i].vzor;
+      if (vzor.every(function (s, k) { return s === '*' || s === symboly[k]; })) return i;
+    }
+    return -1;
+  }
+
+  $('automat-toc').addEventListener('click', function () {
+    var vsazeno = sazkaAutomat;
+    if (animuje || vsazeno > stav.zustatek || stav.zustatek <= 0) return;
+
+    // 1. výsledek — zastavení všech tří válců najednou
+    var vysl = A.zatoc(nahoda);
+    var vyplaceno = vysl.vyplata * vsazeno;
+
+    // 2. zaúčtování
+    zobrazenyZustatek = stav.zustatek - vsazeno;
+    zapocitej('automat', vsazeno, vyplaceno);
+
+    // 3. animace: válce se zastaví jeden po druhém, každý přesně na
+    //    vylosovaném zastavení
+    zamkni(true);
+    ukazZustatek();
+    $('valce').classList.remove('valce--vyhra');
+    Array.prototype.forEach.call($('vyplatni').children, function (tr) { tr.classList.remove('radek--vyhra'); });
+    $('automat-vysledek').classList.remove('vysledek--vyhra');
+    $('automat-vysledek').textContent = 'Válce se točí…';
+
+    var konecMs = 0;
+    A.VALCE.forEach(function (pas, v) {
+      var n = pas.length;
+      var odkud = poziceValcu[v] % n + n * 6;
+      posunValec(v, odkud, 0);
+      void pasy[v].offsetHeight;                // ať prohlížeč vezme start bez přechodu
+      var kam = vysl.zastaveni[v] + n * (3 - v);  // pás jede dolů, další válec o otáčku déle
+      var ms = doba(1300 + 500 * v);
+      posunValec(v, kam, ms);
+      poziceValcu[v] = kam;
+      konecMs = Math.max(konecMs, ms);
+    });
+
+    setTimeout(function () {
+      var v = popisVysledku(vsazeno, vyplaceno);
+      var i = radekVyplatni(vysl.symboly);
+      var hlavni = vysl.symboly.map(function (s) { return NAZVY_SYMBOLU[s]; }).join(' · ');
+      if (v.vyhra) {
+        $('valce').classList.add('valce--vyhra');
+        if (i >= 0) $('vyplatni').children[i].classList.add('radek--vyhra');
+      }
+      ukazVysledek($('automat-vysledek'), hlavni, v);
+      zobrazenyZustatek = stav.zustatek;
+      ukazZustatek();
+      zamkni(false);
+      vykresliStatistiky();
+    }, konecMs + 60);
+  });
+
+  /* ---------------------------------------------------------------
+     KOLO ŠTĚSTÍ
+     --------------------------------------------------------------- */
+
+  var sazkaKolo = 10;
+  var koloRotor, rotaceKola = 0;
+  var uhlyVysece = [];            // [od, do] ve stupních, přímo z vah
+
+  var BARVY_NASOBKU = {
+    0: '#262b36', 0.5: '#3f4a5e', 1: '#2d5c99', 1.5: '#1b7f7a', 2: '#1e8a4f',
+    3: '#a86d12', 5: '#c2410c', 10: '#b91c1c', 20: '#7e22ce'
+  };
+
+  function popisNasobku(x) { return x === 0 ? '0' : '×' + cislo(x, 1); }
+
+  function postavKoloStesti() {
+    var s = $('kolo-svg');
+    var celkem = 0;
+    KS.VYSECE.forEach(function (v) { celkem += v.vaha; });
+
+    s.appendChild(svgEl('circle', { r: 156, fill: '#0a0c10', stroke: '#383f52', 'stroke-width': 2 }));
+    koloRotor = svgEl('g', { 'class': 'rotor' });
+    var od = 0;
+    KS.VYSECE.forEach(function (v, i) {
+      /* Úhel výseče = váha / součet vah × 360°. Nic jiného do něj
+         nevstupuje — velikost je přímo pravděpodobnost. */
+      var u0 = od / celkem * 360, u1 = (od + v.vaha) / celkem * 360;
+      uhlyVysece[i] = [u0, u1];
+      od += v.vaha;
+      koloRotor.appendChild(svgEl('path', {
+        d: vysec(28, 150, u0, u1), fill: BARVY_NASOBKU[v.nasobek] || '#555',
+        stroke: '#0a0c10', 'stroke-width': 1.2
+      }));
+      var stred = (u0 + u1) / 2;
+      var t = svgEl('text', {
+        x: 0, y: -105, fill: '#fff', 'font-weight': 700,
+        'font-size': v.vaha >= 2 ? 13 : 10,
+        'text-anchor': 'middle', 'dominant-baseline': 'central',
+        'font-family': 'system-ui, sans-serif',
+        transform: 'rotate(' + stred + ') rotate(-90 0 -105)'
+      });
+      t.textContent = popisNasobku(v.nasobek);
+      koloRotor.appendChild(t);
+    });
+    koloRotor.appendChild(svgEl('circle', { r: 28, fill: '#171a21', stroke: '#383f52', 'stroke-width': 2 }));
+    s.appendChild(koloRotor);
+    rucicka(s);
+
+    // legenda: po násobcích, s podílem obvodu
+    var tb = $('kolo-legenda');
+    KS.rozbor().radky.forEach(function (r) {
+      var tr = tvor('tr');
+      var td = tvor('td');
+      var b = tvor('span', 'barvicka');
+      b.style.background = BARVY_NASOBKU[r.nasobek];
+      td.appendChild(b);
+      td.appendChild(document.createTextNode(popisNasobku(r.nasobek)));
+      tr.appendChild(td);
+      tr.appendChild(tvor('td', '', String(r.vysece)));
+      tr.appendChild(tvor('td', '', cislo(r.p * 100, 1) + ' %'));
+      tb.appendChild(tr);
+    });
+  }
+
+  $('kolo-toc').addEventListener('click', function () {
+    var vsazeno = sazkaKolo;
+    if (animuje || vsazeno > stav.zustatek) return;
+
+    // 1. výsledek: výseč i místo uvnitř ní, obojí z RNG předem.
+    //    Místo je rovnoměrně v prostředních 70 % výseče — ne u hrany,
+    //    ať je z obrázku jasné, kde se kolo zastavilo, a ne schválně
+    //    „těsně vedle“ sousední výseče.
+    var vysl = KS.zatoc(nahoda);
+    var u = nahoda.desetinne();
+    var uh = uhlyVysece[vysl.vysec];
+    var cil = uh[0] + (0.15 + 0.7 * u) * (uh[1] - uh[0]);
+    var vyplaceno = vysl.nasobek * vsazeno;
+
+    // 2. zaúčtování
+    zobrazenyZustatek = stav.zustatek - vsazeno;
+    zapocitej('kolo', vsazeno, vyplaceno);
+
+    // 3. animace
+    zamkni(true);
+    ukazZustatek();
+    $('kolo-vysledek').classList.remove('vysledek--vyhra');
+    $('kolo-vysledek').textContent = 'Kolo se točí…';
+    var ms = doba(4200);
+    rotaceKola = otoc(koloRotor, rotaceKola, cil, omezPohyb ? 0 : 4, ms);
+
+    setTimeout(function () {
+      ukazVysledek($('kolo-vysledek'), 'Padlo ' + popisNasobku(vysl.nasobek), popisVysledku(vsazeno, vyplaceno));
+      zobrazenyZustatek = stav.zustatek;
+      ukazZustatek();
+      zamkni(false);
+      vykresliStatistiky();
+    }, ms + 60);
+  });
+
+  /* ---------------------------------------------------------------
+     Statistiky a grafy
+     --------------------------------------------------------------- */
+
+  function vyplnStat(dl, s, rtpTeor) {
+    dl.textContent = '';
+    var stesti = s.vyplaceno - s.ocekavano;
+    var radky = [
+      ['Her', cislo(s.her)],
+      ['Vsazeno', cislo(s.vsazeno)],
+      ['Vyplaceno', cislo(s.vyplaceno)],
+      ['RTP skutečné', s.vsazeno ? procenta(s.vyplaceno / s.vsazeno) : '—', true],
+      ['RTP teoretické', rtpTeor === null ? '—' : procenta(rtpTeor)],
+      ['Očekávaná výplata', cislo(s.ocekavano, 1), true],
+      ['Skutečná výplata', cislo(s.vyplaceno)],
+      ['Štěstí / smůla', s.her ? znamenko(stesti, 1) + (stesti > 0.05 ? ' štěstí' : stesti < -0.05 ? ' smůla' : '') : '—']
+    ];
+    radky.forEach(function (r) {
+      var dt = tvor('dt', r[2] ? 'oddel' : '', r[0]);
+      var dd = tvor('dd', r[2] ? 'oddel' : '', r[1]);
+      dl.appendChild(dt);
+      dl.appendChild(dd);
+    });
+  }
+
+  function hezkyKrok(x) {
+    if (!(x > 0)) return 1;
+    var p = Math.pow(10, Math.floor(Math.log10(x))), m = x / p;
+    return (m <= 1 ? 1 : m <= 2 ? 2 : m <= 5 ? 5 : 10) * p;
+  }
+
+  /* Čárový graf: skutečnost (plná modrá) proti očekávání (přerušovaná
+     oranžová). Nitkový kříž se chytá nejbližší hry na ose x a tooltip
+     vypíše obě řady. */
+  function kresliGraf(obal, body, o) {
+    var s = obal.querySelector('svg'), tip = obal.querySelector('.tip');
+    while (s.firstChild) s.removeChild(s.firstChild);
+    tip.hidden = true;
+    var W = Math.max(220, Math.round(s.getBoundingClientRect().width) || 300), H = 180;
+    s.setAttribute('viewBox', '0 0 ' + W + ' ' + H);
+    var L = 50, P = 10, T = 8, B = 22;
+
+    var maxX = Math.max(1, body[body.length - 1][0]);
+    var ymin = o.nula, ymax = o.nula;
+    body.forEach(function (b) {
+      ymin = Math.min(ymin, b[1], b[2]);
+      ymax = Math.max(ymax, b[1], b[2]);
+    });
+    if (ymax - ymin < 10) { ymin -= 5; ymax += 5; }
+    var krok = hezkyKrok((ymax - ymin) / 4);
+    ymin = Math.floor(ymin / krok) * krok;
+    ymax = Math.ceil(ymax / krok) * krok;
+
+    function sx(x) { return L + (W - L - P) * x / maxX; }
+    function sy(y) { return T + (H - T - B) * (1 - (y - ymin) / (ymax - ymin)); }
+
+    for (var y = ymin; y <= ymax + krok / 1000; y += krok) {
+      var hlavni = Math.abs(y - o.nula) < krok / 1000;
+      s.appendChild(svgEl('line', {
+        x1: L, x2: W - P, y1: sy(y), y2: sy(y),
+        stroke: hlavni ? '#3a4152' : '#20242d', 'stroke-width': 1
+      }));
+      var t = svgEl('text', { x: L - 6, y: sy(y), fill: '#98a0b3', 'font-size': 11,
+        'text-anchor': 'end', 'dominant-baseline': 'central' });
+      t.textContent = cislo(y);
+      s.appendChild(t);
+    }
+    [[0, 'start'], [maxX, 'end']].forEach(function (x) {
+      var t = svgEl('text', { x: sx(x[0]), y: H - 6, fill: '#98a0b3', 'font-size': 11, 'text-anchor': x[1] });
+      t.textContent = x[0] === 0 ? '0' : 'hra ' + cislo(x[0]);
+      s.appendChild(t);
+    });
+
+    function cesta(k) {
+      return body.map(function (b, i) { return (i ? 'L' : 'M') + sx(b[0]).toFixed(1) + ' ' + sy(b[k]).toFixed(1); }).join(' ');
+    }
+    s.appendChild(svgEl('path', { d: cesta(2), fill: 'none', stroke: 'var(--graf-ocek)', 'stroke-width': 2,
+      'stroke-dasharray': '6 4', 'stroke-linejoin': 'round' }));
+    s.appendChild(svgEl('path', { d: cesta(1), fill: 'none', stroke: 'var(--graf-skut)', 'stroke-width': 2,
+      'stroke-linejoin': 'round', 'stroke-linecap': 'round' }));
+
+    var kriz = svgEl('line', { y1: T, y2: H - B, stroke: '#98a0b3', 'stroke-width': 1 });
+    kriz.style.display = 'none';
+    s.appendChild(kriz);
+    var tecky = [1, 2].map(function (k) {
+      var c = svgEl('circle', { r: 4, fill: k === 1 ? 'var(--graf-skut)' : 'var(--graf-ocek)', stroke: '#171a21', 'stroke-width': 2 });
+      c.style.display = 'none';
+      s.appendChild(c);
+      return c;
+    });
+    var plocha = svgEl('rect', { x: L, y: 0, width: W - L - P, height: H, fill: 'transparent' });
+    s.appendChild(plocha);
+
+    function ukaz(e) {
+      var r = s.getBoundingClientRect();
+      var x = (e.clientX - r.left) * W / r.width;
+      var hra = (x - L) / (W - L - P) * maxX, nej = 0;
+      body.forEach(function (b, i) { if (Math.abs(b[0] - hra) < Math.abs(body[nej][0] - hra)) nej = i; });
+      var b = body[nej], px = sx(b[0]);
+      kriz.setAttribute('x1', px); kriz.setAttribute('x2', px); kriz.style.display = '';
+      [1, 2].forEach(function (k, i) {
+        tecky[i].setAttribute('cx', px); tecky[i].setAttribute('cy', sy(b[k])); tecky[i].style.display = '';
+      });
+      tip.textContent = '';
+      tip.appendChild(tvor('span', '', b[0] === 0 ? 'Začátek' : 'Po hře ' + cislo(b[0])));
+      [[1, o.skut, 'klic klic--skut'], [2, o.ocek, 'klic klic--ocek']].forEach(function (r) {
+        var d = tvor('div');
+        d.appendChild(tvor('span', r[2]));
+        d.appendChild(tvor('strong', '', cislo(b[r[0]], 1)));
+        d.appendChild(tvor('span', '', r[1]));
+        tip.appendChild(d);
+      });
+      tip.hidden = false;
+      var sirka = tip.offsetWidth, vlevo = px / W * r.width + 12;
+      if (vlevo + sirka > r.width) vlevo = px / W * r.width - sirka - 12;
+      tip.style.left = Math.max(0, vlevo) + 'px';
+    }
+    function schovej() {
+      tip.hidden = true;
+      kriz.style.display = 'none';
+      tecky.forEach(function (c) { c.style.display = 'none'; });
+    }
+    plocha.addEventListener('pointermove', ukaz);
+    plocha.addEventListener('pointerdown', ukaz);
+    plocha.addEventListener('pointerleave', schovej);
+  }
+
+  function vykresliStatistiky() {
+    if (animuje) return;       // během točení by statistiky prozradily výsledek
+    if (zalozka === 'simulace') return;
+    $('stat-hra-nadpis').textContent = NAZVY[zalozka];
+    vyplnStat($('stat-hra'), stav.hry[zalozka], RTP_TEOR[zalozka]);
+    var c = souhrn();
+    vyplnStat($('stat-celkem'), c, c.vsazeno ? c.ocekavano / c.vsazeno : null);
+    kresliGraf($('graf-hra'), stav.body[zalozka], { skut: 'čistý výsledek', ocek: 'očekávaný', nula: 0 });
+    kresliGraf($('graf-celkem'), stav.body.celkem, { skut: 'zůstatek', ocek: 'očekávaný zůstatek', nula: START });
+  }
+
+  /* ---------------------------------------------------------------
+     SIMULACE (záložka)
+     Hraje naoko: vlastní generátory, vlastní kapitál. Na `stav`
+     hráče (zůstatek, statistiky, úložiště) nesahá nic z tohoto bloku.
+     Počítá se po dávkách v requestAnimationFrame — každý snímek dostane
+     nejvýš ~12 ms výpočtu, pak se překreslí průběh a pokračuje se
+     v dalším snímku, takže stránka nezamrzne ani na 5 milionech kol.
+     --------------------------------------------------------------- */
+
+  var SIM = K.simulace;
+  var BEHU = 50;
+  var ROZPOCET_SNIMKU = 12;
+  var sim = null;                 // běžící nebo poslední dokončená simulace
+
+  var POPIS_STRATEGIE = {
+    plocha: 'Plochá sázka: každé kolo stejná částka.',
+    martingale: 'Martingale: po prohře zdvojnásob, po výhře zpět na základ. Každá vyhraná série ' +
+      'vrátí všechno prohrané plus jednu základní sázku — dokud série proher nepřeroste kapitál.',
+    dalembert: "D'Alembert: po prohře o jednu základní sázku víc, po výhře o jednu méně (nejméně jedna)."
+  };
+
+  function nahodneSeminko() { return noveSeminko() % 1000000; }
+
+  function aktualizujVolbySimulace() {
+    var ruleta = $('sim-hra').value === 'ruleta';
+    Array.prototype.forEach.call($('sim-strategie').options, function (o) {
+      o.disabled = !ruleta && o.value !== 'plocha';
+    });
+    if (!ruleta) $('sim-strategie').value = 'plocha';
+    $('sim-sazka').step = $('sim-hra').value === 'kolo' ? 2 : 1;
+    $('sim-popis-strategie').textContent = POPIS_STRATEGIE[$('sim-strategie').value] +
+      (ruleta ? ' Sází se na červenou (1:1).' : ' Progresivní strategie jsou jen pro ruletu.');
+  }
+
+  function celeCislo(id) {
+    var t = String($(id).value).trim(), v = Number(t);
+    return t !== '' && isFinite(v) && v === Math.floor(v) ? v : NaN;
+  }
+
+  /* Vrací nastavení, nebo text chyby. */
+  function nactiNastaveni() {
+    var n = {
+      hra: $('sim-hra').value,
+      strategie: $('sim-strategie').value,
+      kol: celeCislo('sim-kol'),
+      kapital: celeCislo('sim-kapital'),
+      sazka: celeCislo('sim-sazka'),
+      seminko: celeCislo('sim-seminko')
+    };
+    if (!(n.kol >= 100 && n.kol <= 100000)) return 'Počet kol musí být celé číslo od 100 do 100 000.';
+    if (!(n.sazka >= 1)) return 'Základní sázka musí být kladné celé číslo.';
+    if (n.hra === 'kolo' && n.sazka % 2) return 'Na kole štěstí musí být sázka sudá (kvůli násobku 0,5).';
+    if (!(n.kapital >= n.sazka)) return 'Počáteční kapitál musí pokrýt aspoň jednu základní sázku.';
+    if (n.kapital > 1e12) return 'Počáteční kapitál nejvýš 10¹².';
+    if (!(n.seminko >= 0 && n.seminko < 4294967296)) return 'Semínko musí být celé číslo od 0 do 4 294 967 295.';
+    if (n.hra !== 'ruleta') n.strategie = 'plocha';
+    n.krok = Math.max(1, Math.ceil(n.kol / 500));     // nejvýš ~500 bodů na čáru
+    return n;
+  }
+
+  function zamkniSimulaci(bezi) {
+    Array.prototype.forEach.call($('sim-form').querySelectorAll('input, select'), function (e) { e.disabled = bezi; });
+    $('sim-start').disabled = bezi;
+    $('sim-nove-seminko').disabled = bezi;
+    $('sim-stop').disabled = !bezi;
+  }
+
+  function spustSimulaci(e) {
+    if (e) e.preventDefault();
+    if (sim && !sim.hotovo && !sim.zruseno) return;
+    var n = nactiNastaveni();
+    if (typeof n === 'string') { hlaska('sim', n); return; }
+    sim = { nast: n, behy: [], aktualni: 0, hotovo: false, zruseno: false, start: performance.now() };
+    for (var i = 0; i < BEHU; i++) sim.behy.push(SIM.novyBeh(n, i));
+    zamkniSimulaci(true);
+    $('sim-vysledky').hidden = true;
+    $('sim-pruh').style.width = '0';
+    hlaska('sim', 'Počítám… 0 %');
+    requestAnimationFrame(tikSimulace);
+  }
+
+  function tikSimulace() {
+    var s = sim;
+    if (!s || s.zruseno) return;
+    var t0 = performance.now();
+    while (s.aktualni < BEHU && performance.now() - t0 < ROZPOCET_SNIMKU) {
+      var b = s.behy[s.aktualni];
+      SIM.krokBehu(b, 2000);
+      if (b.hotovo) s.aktualni++;
+    }
+    var hotovo = s.aktualni * s.nast.kol + (s.aktualni < BEHU ? s.behy[s.aktualni].kolo : 0);
+    var podil = hotovo / (BEHU * s.nast.kol);
+    $('sim-pruh').style.width = (podil * 100).toFixed(1) + '%';
+    if (s.aktualni < BEHU) {
+      hlaska('sim', 'Počítám… ' + Math.floor(podil * 100) + ' %');
+      requestAnimationFrame(tikSimulace);
+      return;
+    }
+    $('sim-pruh').style.width = '100%';
+    s.hotovo = true;
+    s.cas = performance.now() - s.start;
+    zamkniSimulaci(false);
+    hlaska('sim', BEHU + ' běhů × ' + cislo(s.nast.kol) + ' kol za ' + cislo(s.cas / 1000, 1) + ' s. Semínko ' +
+      s.nast.seminko + ' — stejné semínko a nastavení dají přesně tytéž běhy.');
+    vykresliSimulaci();
+  }
+
+  $('sim-form').addEventListener('submit', spustSimulaci);
+  $('sim-stop').addEventListener('click', function () {
+    if (!sim || sim.hotovo) return;
+    sim.zruseno = true;
+    zamkniSimulaci(false);
+    $('sim-pruh').style.width = '0';
+    hlaska('sim', 'Simulace zastavena, výsledky zahozeny.');
+  });
+  $('sim-nove-seminko').addEventListener('click', function () { $('sim-seminko').value = nahodneSeminko(); });
+  $('sim-hra').addEventListener('change', aktualizujVolbySimulace);
+  $('sim-strategie').addEventListener('change', aktualizujVolbySimulace);
+
+  function prumer(a) { return a.reduce(function (s, x) { return s + x; }, 0) / a.length; }
+  function median(a) {
+    var s = a.slice().sort(function (x, y) { return x - y; }), m = s.length >> 1;
+    return s.length % 2 ? s[m] : (s[m - 1] + s[m]) / 2;
+  }
+
+  function vykresliSimulaci() {
+    if (!sim || !sim.hotovo || sim.zruseno) { $('sim-vysledky').hidden = true; return; }
+    $('sim-vysledky').hidden = false;
+    kresliSimGraf();
+    vyplnSouhrnSimulace();
+  }
+
+  /* Očekávaná hodnota kapitálu po kole x: kapitál − výhoda × průměrně
+     vsazeno do kola x. Každá sázka má stejnou výhodu podniku, takže to
+     platí pro jakoukoli strategii; u ploché sázky bez krachu je
+     vsazeno = sázka × x a vyjde z toho přímka. */
+  function ocekavaniSimulace() {
+    var n = sim.nast, vyhoda = SIM.vyhoda(n.hra), S = SIM.pocetVzorku(n), r = [];
+    for (var j = 0; j < S; j++) {
+      r.push(n.kapital - vyhoda * prumer(sim.behy.map(function (b) { return b.vsazenoVzorky[j]; })));
+    }
+    return r;
+  }
+
+  function kresliSimGraf() {
+    var obal = $('sim-graf'), s = obal.querySelector('svg'), tip = obal.querySelector('.tip');
+    while (s.firstChild) s.removeChild(s.firstChild);
+    tip.hidden = true;
+    var W = Math.max(260, Math.round(s.getBoundingClientRect().width) || 600), H = 300;
+    s.setAttribute('viewBox', '0 0 ' + W + ' ' + H);
+    var L = 58, P = 12, T = 10, B = 24;
+
+    var n = sim.nast, S = SIM.pocetVzorku(n), behy = sim.behy;
+    var ocek = ocekavaniSimulace();
+    var ymin = Math.min(0, n.kapital), ymax = n.kapital;
+    behy.forEach(function (b) {
+      b.vzorky.forEach(function (v) { if (v < ymin) ymin = v; if (v > ymax) ymax = v; });
+    });
+    ocek.forEach(function (v) { if (v < ymin) ymin = v; if (v > ymax) ymax = v; });
+    var krok = hezkyKrok((ymax - ymin) / 5);
+    ymin = Math.floor(ymin / krok) * krok;
+    ymax = Math.ceil(ymax / krok) * krok;
+    if (ymax === ymin) ymax = ymin + krok;
+
+    function sx(x) { return L + (W - L - P) * x / n.kol; }
+    function sy(y) { return T + (H - T - B) * (1 - (y - ymin) / (ymax - ymin)); }
+
+    for (var y = ymin; y <= ymax + krok / 1000; y += krok) {
+      var zvyrazni = Math.abs(y) < krok / 1000 || Math.abs(y - n.kapital) < krok / 1000;
+      s.appendChild(svgEl('line', { x1: L, x2: W - P, y1: sy(y), y2: sy(y),
+        stroke: zvyrazni ? '#3a4152' : '#20242d', 'stroke-width': 1 }));
+      var t = svgEl('text', { x: L - 6, y: sy(y), fill: '#98a0b3', 'font-size': 11,
+        'text-anchor': 'end', 'dominant-baseline': 'central' });
+      t.textContent = cislo(y);
+      s.appendChild(t);
+    }
+    [[0, 'start', '0'], [n.kol, 'end', 'kolo ' + cislo(n.kol)]].forEach(function (x) {
+      var t = svgEl('text', { x: sx(x[0]), y: H - 6, fill: '#98a0b3', 'font-size': 11, 'text-anchor': x[1] });
+      t.textContent = x[2];
+      s.appendChild(t);
+    });
+
+    /* Běhy: tenké průsvitné čáry, kde se jich víc překrývá, sytnou.
+       Zkrachovalý běh končí v bodě krachu značkou ×. */
+    var krachy = [];
+    behy.forEach(function (b) {
+      var posledni = b.krach ? Math.floor(b.kolKrachu / n.krok) : S - 1;
+      var d = '';
+      for (var j = 0; j <= posledni; j++) {
+        d += (j ? 'L' : 'M') + sx(SIM.koloVzorku(n, j)).toFixed(1) + ' ' + sy(b.vzorky[j]).toFixed(1);
+      }
+      if (b.krach) {
+        d += 'L' + sx(b.kolKrachu).toFixed(1) + ' ' + sy(b.kapital).toFixed(1);
+        krachy.push([sx(b.kolKrachu), sy(b.kapital)]);
+      }
+      s.appendChild(svgEl('path', { d: d, fill: 'none', stroke: 'var(--graf-skut)', 'stroke-width': 1,
+        'stroke-opacity': 0.4, 'stroke-linejoin': 'round' }));
+    });
+
+    s.appendChild(svgEl('path', {
+      d: ocek.map(function (v, j) { return (j ? 'L' : 'M') + sx(SIM.koloVzorku(n, j)).toFixed(1) + ' ' + sy(v).toFixed(1); }).join(''),
+      fill: 'none', stroke: 'var(--graf-ocek)', 'stroke-width': 2.5, 'stroke-dasharray': '7 4'
+    }));
+
+    krachy.forEach(function (k) {
+      var d = 'M' + (k[0] - 4) + ' ' + (k[1] - 4) + 'L' + (k[0] + 4) + ' ' + (k[1] + 4) +
+              'M' + (k[0] - 4) + ' ' + (k[1] + 4) + 'L' + (k[0] + 4) + ' ' + (k[1] - 4);
+      s.appendChild(svgEl('path', { d: d, stroke: '#171a21', 'stroke-width': 5, 'stroke-linecap': 'round' }));
+      s.appendChild(svgEl('path', { d: d, stroke: '#d03b3b', 'stroke-width': 2, 'stroke-linecap': 'round' }));
+    });
+
+    var kriz = svgEl('line', { y1: T, y2: H - B, stroke: '#98a0b3', 'stroke-width': 1 });
+    kriz.style.display = 'none';
+    s.appendChild(kriz);
+    var plocha = svgEl('rect', { x: L, y: 0, width: W - L - P, height: H, fill: 'transparent' });
+    s.appendChild(plocha);
+
+    function ukaz(e) {
+      var r = s.getBoundingClientRect();
+      var x = (e.clientX - r.left) * W / r.width;
+      var kolo = Math.max(0, Math.min(n.kol, (x - L) / (W - L - P) * n.kol));
+      var j = Math.round(kolo / n.krok);
+      if (j > S - 1) j = S - 1;
+      var kx = SIM.koloVzorku(n, j), px = sx(kx);
+      kriz.setAttribute('x1', px); kriz.setAttribute('x2', px); kriz.style.display = '';
+      var hodnoty = behy.map(function (b) { return b.vzorky[j]; });
+      var veHre = behy.filter(function (b) { return !b.krach || b.kolKrachu >= kx; }).length;
+      tip.textContent = '';
+      tip.appendChild(tvor('span', '', 'Kolo ' + cislo(kx)));
+      [
+        [cislo(ocek[j], 1), 'očekávaná hodnota', 'klic klic--ocek'],
+        [cislo(median(hodnoty), 1), 'medián běhů', 'klic klic--skut'],
+        [cislo(Math.min.apply(null, hodnoty)) + ' až ' + cislo(Math.max.apply(null, hodnoty)), 'rozsah běhů', ''],
+        [veHre + ' z ' + BEHU, 'ještě ve hře', '']
+      ].forEach(function (r) {
+        var d = tvor('div');
+        if (r[2]) d.appendChild(tvor('span', r[2]));
+        d.appendChild(tvor('strong', '', r[0]));
+        d.appendChild(tvor('span', '', r[1]));
+        tip.appendChild(d);
+      });
+      tip.hidden = false;
+      var sirka = tip.offsetWidth, vlevo = px / W * r.width + 12;
+      if (vlevo + sirka > r.width) vlevo = px / W * r.width - sirka - 12;
+      tip.style.left = Math.max(0, vlevo) + 'px';
+    }
+    plocha.addEventListener('pointermove', ukaz);
+    plocha.addEventListener('pointerdown', ukaz);
+    plocha.addEventListener('pointerleave', function () { tip.hidden = true; kriz.style.display = 'none'; });
+  }
+
+  /* Podíl ztráty na vsazeném za všechny běhy a jeho 95% interval
+     (poměrový odhad, směrodatná chyba z reziduí e = ztráta − podíl ×
+     vsazeno). U Martingale je interval široký — ztráty chodí v řídkých
+     velkých kusech a 50 běhů je málo. */
+  function podilZtraty(behy, kapital) {
+    var ztraty = behy.map(function (b) { return kapital - b.kapital; });
+    var vsaz = behy.map(function (b) { return b.vsazeno; });
+    var sz = ztraty.reduce(function (s, x) { return s + x; }, 0);
+    var sv = vsaz.reduce(function (s, x) { return s + x; }, 0);
+    var r = sz / sv, n = behy.length, e2 = 0;
+    for (var i = 0; i < n; i++) { var e = ztraty[i] - r * vsaz[i]; e2 += e * e; }
+    var se = Math.sqrt(e2 / (n * (n - 1))) / (sv / n);
+    return { podil: r, od: r - 1.96 * se, do: r + 1.96 * se };
+  }
+
+  function vyplnSouhrnSimulace() {
+    var n = sim.nast, behy = sim.behy, vyhoda = SIM.vyhoda(n.hra);
+    var pz = podilZtraty(behy, n.kapital);
+    var vRozpeti = vyhoda >= pz.od && vyhoda <= pz.do;
+    var konecne = behy.map(function (b) { return b.kapital; });
+    var krachy = behy.filter(function (b) { return b.krach; });
+    var vsazeno = prumer(behy.map(function (b) { return b.vsazeno; }));
+    var prumKonec = prumer(konecne);
+    var serie = behy.map(function (b) { return b.nejdelsiSerie; });
+
+    var radky = [
+      ['Zkrachovalo', krachy.length + ' z ' + BEHU],
+      ['Krach typicky', krachy.length ? 'po ' + cislo(median(krachy.map(function (b) { return b.kolKrachu; }))) + ' kolech (medián)' : '—'],
+      ['Průměrný konečný kapitál', cislo(prumKonec, 1) + ' (' + znamenko(prumKonec - n.kapital, 1) + ')', true],
+      ['Medián konečného kapitálu', cislo(median(konecne), 1)],
+      ['Nejhorší / nejlepší běh', cislo(Math.min.apply(null, konecne)) + ' / ' + cislo(Math.max.apply(null, konecne))],
+      ['Nejdelší série proher', serie.length ? Math.max.apply(null, serie) + ' (medián běhu ' + cislo(median(serie), 1) + ')' : '—'],
+      ['Průměrně vsazeno', cislo(vsazeno, 1), true],
+      ['Očekávaný konečný kapitál', cislo(n.kapital - vyhoda * vsazeno, 1)],
+      ['Ztráta z vsazeného', procenta(pz.podil)],
+      ['95% interval', procenta(pz.od) + ' až ' + procenta(pz.do)],
+      ['Výhoda podniku', procenta(vyhoda) + (vRozpeti ? ' (v intervalu)' : ' (mimo interval)')]
+    ];
+    var dl = $('sim-souhrn');
+    dl.textContent = '';
+    radky.forEach(function (r) {
+      dl.appendChild(tvor('dt', r[2] ? 'oddel' : '', r[0]));
+      dl.appendChild(tvor('dd', r[2] ? 'oddel' : '', r[1]));
+    });
+
+    var box = $('sim-martingale');
+    box.textContent = '';
+    box.hidden = n.strategie !== 'martingale';
+    if (box.hidden) return;
+
+    var N = SIM.martingaleSerieKeKrachu(n.kapital, n.sazka);
+    var pProhry = 1 - K.ruleta.rozborSazky('jednoducha', 'cervena').trefa;
+    var pSerie = Math.pow(pProhry, N);
+    box.appendChild(tvor('h3', '', 'Proč Martingale nepřekoná výhodu podniku'));
+
+    var p1 = tvor('p');
+    if (krachy.length) {
+      var kola = krachy.map(function (b) { return b.kolKrachu; });
+      p1.appendChild(document.createTextNode('Zkrachovalo '));
+      p1.appendChild(tvor('strong', '', krachy.length + ' z ' + BEHU + ' běhů'));
+      p1.appendChild(document.createTextNode(', typicky '));
+      p1.appendChild(tvor('strong', '', 'po ' + cislo(median(kola)) + ' kolech'));
+      p1.appendChild(document.createTextNode(' (medián; nejdřív po ' + cislo(Math.min.apply(null, kola)) +
+        ', nejpozději po ' + cislo(Math.max.apply(null, kola)) + ').'));
+    } else {
+      p1.appendChild(document.createTextNode('Žádný běh nezkrachoval — za ' + cislo(n.kol) +
+        ' kol nepřišla dost dlouhá série proher. To neznamená, že systém funguje: ztráta se jen schovala do vzácné katastrofy.'));
+    }
+    box.appendChild(p1);
+
+    box.appendChild(tvor('p', '', 'S kapitálem ' + cislo(n.kapital) + ' a základem ' + cislo(n.sazka) +
+      ' stačí na začátku ' + N + ' proher v řadě: pak je prohráno ' + cislo(n.sazka * (Math.pow(2, N) - 1)) +
+      ' a na další sázku ' + cislo(n.sazka * Math.pow(2, N)) + ' už nezbývá. Série ' + N +
+      ' proher má na červenou pravděpodobnost (19/37)^' + N + ' = ' + procenta(pSerie) +
+      ' — v jednom kole vzácné, za stovky kol skoro jisté. Jak kapitál roste, potřebná série se prodlužuje jen pomalu: ' +
+      'dvojnásobný kapitál přidá jedinou prohru navíc.'));
+
+    if (krachy.length) {
+      var vrchol = median(krachy.map(function (b) { return b.maxKapital - n.kapital; }));
+      var konecKrachu = median(krachy.map(function (b) { return b.kapital - n.kapital; }));
+      box.appendChild(tvor('p', '', 'Do krachu běhy vypadaly dobře: každá vyhraná série přidá jen ' + cislo(n.sazka) +
+        ' a zkrachovalé běhy se na vrcholu dostaly v mediánu na ' + znamenko(vrchol) + ' proti startu. ' +
+        'Jediná série proher pak smazala celý zisk i kus kapitálu: v mediánu skončily na ' +
+        znamenko(konecKrachu) + '.'));
+    }
+
+    box.appendChild(tvor('p', '', 'Všech ' + BEHU + ' běhů dohromady ztratilo ' + procenta(pz.podil) +
+      ' z vsazeného (95% interval ' + procenta(pz.od) + ' až ' + procenta(pz.do) + '); výhoda podniku je ' +
+      procenta(vyhoda) + (vRozpeti ? ' a leží v tom intervalu' : ' — tentokrát mimo interval, což se v 1 z 20 simulací stane') +
+      '. Strategie mění, kdy a jak velké ztráty přijdou, ne kolik se průměrně ztratí z každé vsazené koruny. ' +
+      'Interval je u Martingale široký, protože ztráty chodí v řídkých velkých kusech.'));
+  }
+
+  $('sim-seminko').value = nahodneSeminko();
+  aktualizujVolbySimulace();
+
+  /* ---------------------------------------------------------------
+     Začít znovu — jediná cesta zpět na 1000, a jen po prohře všeho
+     --------------------------------------------------------------- */
+
+  $('znovu').addEventListener('click', function () {
+    if (!konecHry()) return;
+    stav = novyStav();
+    ulozStav();
+    zobrazenyZustatek = stav.zustatek;
+    sazky = {};
+    tahy = [];
+    vyherniKlice = {};
+    padloCislo = null;
+    ukazZustatek();
+    vykresliHistorii();
+    vykresliStul();
+    rulKulicka.style.display = 'none';
+    ['ruleta', 'automat', 'kolo'].forEach(function (h) {
+      $(h + '-vysledek').classList.remove('vysledek--vyhra');
+      hlaska(h, '');
+    });
+    $('ruleta-vysledek').textContent = 'Polož žetony na stůl a roztoč kolo.';
+    $('automat-vysledek').textContent = 'Zvol sázku a zatoč.';
+    $('kolo-vysledek').textContent = 'Zvol sázku a roztoč kolo.';
+    $('valce').classList.remove('valce--vyhra');
+    aktualizujOvladani();
+    vykresliStatistiky();
+  });
+
+  /* ---------------------------------------------------------------
+     Rozjezd
+     --------------------------------------------------------------- */
+
+  postavVolbu($('zetony'), HODNOTY_ZETONU, '', function (h) {
+    hodnotaZetonu = h;
+    Array.prototype.forEach.call($('zetony').children, function (b) {
+      b.setAttribute('aria-checked', String(Number(b.dataset.hodnota) === h));
+    });
+  });
+  Array.prototype.forEach.call($('zetony').children, function (b) {
+    var h = Number(b.dataset.hodnota);
+    b.className = 'zeton-volba z-' + h;
+    b.setAttribute('aria-label', 'žeton ' + h);
+    b.setAttribute('aria-checked', String(h === hodnotaZetonu));
+  });
+  postavVolbu($('automat-sazky'), SAZKY_AUTOMAT, 'btn volba', function (h) { sazkaAutomat = h; aktualizujOvladani(); });
+  postavVolbu($('kolo-sazky'), SAZKY_KOLO, 'btn volba', function (h) { sazkaKolo = h; aktualizujOvladani(); });
+
+  var uzky = window.matchMedia('(max-width: 640px)');
+  svisle = uzky.matches;
+  function priZmeneSirky() {
+    if (uzky.matches !== svisle) { svisle = uzky.matches; vykresliStul(); }
+  }
+  if (uzky.addEventListener) uzky.addEventListener('change', priZmeneSirky);
+  else if (uzky.addListener) uzky.addListener(priZmeneSirky);
+
+  var casovacResize = null;
+  window.addEventListener('resize', function () {
+    clearTimeout(casovacResize);
+    casovacResize = setTimeout(function () {
+      if (zalozka === 'simulace') vykresliSimulaci();
+      else vykresliStatistiky();
+    }, 150);
+  });
+
+  postavKoloRulety();
+  vykresliStul();
+  vykresliHistorii();
+  postavValce();
+  postavKoloStesti();
+  ukazZustatek();
+  prepni(zalozka);
+  aktualizujOvladani();
+})();
+</script>
+</body>
+</html>

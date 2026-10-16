@@ -89,6 +89,10 @@ body {
   display: grid;
   grid-template-columns: repeat(auto-fill, minmax(260px, 1fr));
   gap: var(--gap);
+  /* Dlaždice v řádku mají být stejně vysoké i s různě dlouhým textem.
+     Je to výchozí hodnota, ale stojí za to ji napsat: kdyby se sem
+     někdy dostalo start nebo center, karty by se rozjely do schodů. */
+  align-items: stretch;
 }
 
 /* ---------- Karta / dlaždice ---------- */
@@ -128,15 +132,38 @@ a.card:focus-visible {
   font-size: 0.92rem;
 }
 
-/* Štítek v rohu karty (např. "externí") */
+/* Řádek štítků pod popiskem. margin-top: auto ho odtlačí ke spodní
+   hraně karty — karty jsou v řádku stejně vysoké, takže se štítky
+   zarovnají mezi sebou, i když má jedna kratší popisek než druhá. */
+.card__stitky {
+  display: flex;
+  flex-wrap: wrap;
+  gap: 0.3rem;
+  margin-top: auto;
+  padding-top: 0.5rem;
+}
+
+/* Detail hry v pilulce: tlumenější než popisek a na tmavším podkladu,
+   ať se čte jako odbočka, ne jako pokračování věty. */
 .card__tag {
-  align-self: flex-start;
-  margin-top: 0.5rem;
-  padding: 0.15rem 0.5rem;
+  padding: 0.1rem 0.5rem;
+  border: 1px solid var(--border);
   border-radius: 999px;
+  background: var(--bg);
+  color: var(--text-dim);
+  font-size: 0.75rem;
+  line-height: 1.5;
+  /* Štítek se láme jen mezi pilulkami, ne uvnitř: „3×3 až 15×15“
+     rozseknuté přes dva řádky by se četlo jako dva údaje. */
+  white-space: nowrap;
+}
+
+/* Matematika není hra. Kromě barvy to nese i verzálkami — samotný
+   odstín by ten rozdíl unesl jen pro toho, kdo ho vidí. */
+.card__tag--nastroj {
+  border-color: transparent;
   background: var(--accent-soft);
   color: var(--accent);
-  font-size: 0.72rem;
   font-weight: 600;
   text-transform: uppercase;
   letter-spacing: 0.06em;

@@ -1,0 +1,3321 @@
+<!DOCTYPE html>
+<html lang="cs">
+<head>
+  <meta charset="utf-8">
+  <meta name="viewport" content="width=device-width, initial-scale=1">
+  <title>Sokoban — Hry v prohlížeči</title>
+  <!-- Pojistka pro případ, že se sdílený styl nenačte (jiný server,
+       špatný MIME typ, offline). Stránka pak není holý bílý dokument. -->
+  <style>
+    :root {
+      --bg:   #0f1115;
+      --text: #e6e9ef;
+      --font: system-ui, -apple-system, "Segoe UI", Roboto, "Helvetica Neue", Arial, sans-serif;
+    }
+    html { color-scheme: dark; background: #0f1115; }
+    body {
+      margin: 0;
+      background: var(--bg);
+      color: var(--text);
+      font-family: var(--font);
+    }
+  </style>
+  <link rel="stylesheet" href="../shared/style.css">
+  <style>
+    /* Barvy a rozměry, které jsou jen tady. Do sdílené palety nepatří —
+       sklad s bednami se nikde jinde ve sbírce nevyskytuje. */
+    :root {
+      /* Zeď je světlejší než podlaha, ne tmavší. Tmavší zeď by splynula
+         s pozadím stránky a hráč by neviděl obrys místnosti — a právě
+         ten je v Sokobanu to hlavní, co se čte. */
+      --zed:       #2b3140;
+      --zed-hrana: #383f52;
+
+      /* Cíl: podbarvená plocha a k tomu kroužek uprostřed. Kroužek je
+         dost malý na to, aby ho bedna i hráč celý zakryli — pole tak
+         nikdy nevypadá zaplněné napůl. Samotné podbarvení by nestačilo:
+         na pár procentech jasu se cíl v rohu snadno přehlédne. */
+      --cil-plocha: rgba(74, 222, 128, 0.10);
+      --cil-znacka: rgba(74, 222, 128, 0.5);
+
+      /* Bedna mimo cíl je hnědá, na cíli zelená. Zelená je v celé sbírce
+         barva hotové věci, takže „kolik už je hotovo“ jde přečíst z desky
+         jedním pohledem, bez počítání. */
+      --bedna:        #b5763f;
+      --bedna-hrana:  #7d4d24;
+      --bedna-hotova: #4ade80;
+      --bedna-hotova-hrana: #2f9e5c;
+
+      /* Hráč má vlastní barvu, ne odstín bedny ani cíle: jinak by na
+         cílovém poli splynul s bednou, která na něm stojí. */
+      --hrac:       #7dd3fc;
+      --hrac-hrana: #38a3d1;
+    }
+
+    /* Na herní stránce nechceme přiblížení dvojklikem ani výběr textu
+       při klepání do desky. */
+    html, body {
+      overscroll-behavior: none;
+      -webkit-text-size-adjust: 100%;
+    }
+
+    /* Herní stránka je užší než rozcestník a drží se uprostřed. */
+    .wrap {
+      max-width: 900px;
+      margin-inline: auto;
+    }
+
+    main {
+      display: flex;
+      flex-direction: column;
+      align-items: center;
+      touch-action: manipulation;     /* zabije double-tap zoom */
+      user-select: none;
+      -webkit-user-select: none;
+      -webkit-touch-callout: none;
+    }
+
+    /* Sloupec hry. Šířku mu dává nejširší prvek uvnitř — deska má
+       u každé úrovně jiné rozměry, takže pevná šířka by u malých
+       úrovní nechala HUD viset ve vzduchu daleko od desky.
+
+       Všechny rozměry desky vycházejí z jediného čísla: --pole, tedy
+       strany jednoho pole v pixelech. Počítá ho JS z místa v okně
+       a z rozměrů úrovně a nastavuje sem, na kontejner. Hodnota níž
+       platí jen do prvního přepočtu. */
+    .hra {
+      --pole: 40px;
+      display: flex;
+      flex-direction: column;
+      align-items: stretch;
+      max-width: 100%;
+    }
+
+    /* Údaje nad deskou. Mřížka s pevnými sloupci, ne text s mezerami:
+       každý údaj má vlastní sloupec, takže přibývající cifra u tahů
+       neposune sousedy do stran. */
+    .hud {
+      display: grid;
+      grid-template-columns: repeat(3, max-content);
+      gap: 0.3rem 1.5rem;
+      margin-bottom: 0.75rem;
+      font-family: var(--font-mono);
+      font-variant-numeric: tabular-nums;
+      font-size: 0.9rem;
+      color: var(--text-dim);
+    }
+
+    .hud__cislo {
+      display: inline-block;
+      text-align: right;
+      color: var(--text);
+      font-weight: 600;
+    }
+
+    /* Šířka podle nejdelší hodnoty, jaká může padnout: tahů bývá pod
+       tisíc, posunů pod sto. Rekordy šířku pevnou nemají — stojí na
+       vlastním řádku, kde nemají koho posunout. */
+    .hud__cislo--tahy   { min-width: 4ch; }
+    .hud__cislo--posuny { min-width: 3ch; }
+    .hud__cislo--uroven { min-width: 5ch; }
+
+    /* Řádek s rekordy jde přes celou šířku HUDu. Na úzkém displeji je
+       to zároveň to, co drží HUD pohromadě: tři údaje vedle sebe se tam
+       nevejdou, zalomí se na dva sloupce a rekordy si podržely svůj
+       řádek pod nimi. */
+    .hud__nej {
+      grid-column: 1 / -1;
+    }
+
+    .hud__nej .hud__cislo {
+      color: var(--accent);
+      min-width: 0;
+    }
+
+    @media (max-width: 520px) {
+      .hud {
+        grid-template-columns: repeat(2, max-content);
+        gap: 0.25rem 1.2rem;
+      }
+    }
+
+    /* ---------- pásmo citlivé na tah prstem ----------
+
+       Prst při rychlém tahu často začne nebo skončí až kousek za okrajem
+       desky. Rezerva kolem ní proto poslouchá na tahy stejně jako deska
+       sama — posluchače má navěšené tenhle obal.
+
+       touch-action: none patří sem a nikam jinam. Uvnitř pásma prst
+       stránkou nehne, takže se tah vždycky dopočítá celý; zbytek stránky
+       rolovat musí. Spoléhat na preventDefault v touchmove nejde — ten
+       je ve výchozím stavu pasivní.
+
+       Záporné vodorovné okraje ruší vodorovnou rezervu z rozvržení:
+       sloupec hry je široký podle obsahu, takže by se jinak o rezervu
+       rozšířil a HUD i tlačítka by přestaly lícovat s okrajem desky.
+       Rezerva místo toho přeteče do odsazení stránky.
+
+       Strop musí ten přetok povolit, jinak si pásmo ukrojí rezervu ze
+       svého vnitřku a deska se do něj přestane vejít — pod ní by pak
+       naskočil posuvník, i když je kolem dost místa. */
+    .swipe-zona {
+      --swipe-rezerva: 16px;
+      align-self: center;
+      display: flex;
+      justify-content: center;
+      max-width: calc(100% + 2 * var(--swipe-rezerva));
+      padding: var(--swipe-rezerva);
+      margin-inline: calc(-1 * var(--swipe-rezerva));
+      touch-action: none;
+    }
+
+    /* Kdyby se deska při spodní mezi velikosti pole do okna nevešla
+       (hodně úzký telefon a nejširší úroveň), roluje se sama místo
+       toho, aby roztáhla celou stránku. */
+    .deska-obal {
+      max-width: 100%;
+      overflow-x: auto;
+      overscroll-behavior-x: contain;
+    }
+
+    /* Deska. Stopy jsou pevné, obojí podle rozměrů úrovně: velikost
+       mřížky nesmí vyplývat z obsahu polí. S auto stopami by prázdné
+       pole mělo nulovou výšku a řádek by byl vysoký podle toho, jestli
+       v něm zrovna nějaká bedna stojí.
+
+       Šířku i výšku dávají stopy, ne kontejner (width: max-content),
+       jinak by se deska v rolovacím obalu roztáhla a pole by se rozešla
+       s rámem. */
+    .deska {
+      display: grid;
+      grid-template-columns: repeat(var(--sloupcu, 1), var(--pole));
+      grid-template-rows: repeat(var(--radku, 1), var(--pole));
+      width: max-content;
+      border: 2px solid var(--border);
+      border-radius: var(--radius-sm);
+      overflow: hidden;
+      background: var(--board);
+    }
+
+    .deska--vyhra {
+      border-color: var(--accent);
+    }
+
+    /* Jedno pole. Rozměr má zadaný, ne odvozený z obsahu, a bedna i hráč
+       v něm drží uprostřed mřížkovým centrováním.
+
+       Obsah leží v jediné oblasti: značka cíle (::after) a bedna nebo
+       hráč (.znak) se překrývají, místo aby stály vedle sebe. Kdyby šlo
+       o dvě stopy, měnil by obsah velikost pole — přesně to, čemu se tu
+       celou dobu vyhýbáme. */
+    .pole {
+      width: var(--pole);
+      height: var(--pole);
+      display: grid;
+      grid-template-areas: "obsah";
+      place-items: center;
+    }
+
+    /* Zeď. Světlejší výplň a ještě světlejší vnitřní hrana: bez ní
+       splyne blok zdi v jednu plochu a v místnosti se ztratí členění. */
+    .pole--zed {
+      background: var(--zed);
+      box-shadow: inset 0 0 0 1px var(--zed-hrana);
+    }
+
+    /* Pole mimo místnost. Do mřížky patří kvůli tvaru (řádky musí zůstat
+       zarovnané), ale kreslit se nemá nic — jinak by okolo místnosti
+       vznikl pruh podlahy a obrys úrovně by se rozmazal. */
+    .pole--venku {
+      background: var(--bg);
+    }
+
+    .pole--cil {
+      background: var(--cil-plocha);
+    }
+
+    /* Kroužek uprostřed cílového pole. Podíl je schválně malý: bedna
+       (76 %) i hráč (60 %) ho celý zakryjí, takže obsazený cíl nikdy
+       nevypadá jako obsazený jen napůl. */
+    .pole--cil::after {
+      content: "";
+      grid-area: obsah;
+      width: 26%;
+      height: 26%;
+      border: 2px solid var(--cil-znacka);
+      border-radius: 50%;
+    }
+
+    /* Bedna i hráč sdílejí jedno místo v poli; liší se tvarem, velikostí
+       a barvou. Přechod je jen na barvě: bedna, která dojela na cíl,
+       zezelená plynule, ale sama se po desce neplíží — pohyb má být
+       okamžitý, jinak by se rychlé tahy rozmazaly. */
+    .znak {
+      grid-area: obsah;
+      transition: background-color 0.12s ease, border-color 0.12s ease;
+    }
+
+    .znak--bedna {
+      width: 76%;
+      height: 76%;
+      border: 2px solid var(--bedna-hrana);
+      border-radius: 3px;
+      background: var(--bedna);
+
+      /* Naznačené prkno uprostřed — bedna se tak nepoplete s prostým
+         barevným čtvercem a je poznat i na malém poli. */
+      box-shadow: inset 0 0 0 3px rgba(0, 0, 0, 0.16);
+    }
+
+    .znak--bedna-hotova {
+      border-color: var(--bedna-hotova-hrana);
+      background: var(--bedna-hotova);
+    }
+
+    .znak--hrac {
+      width: 60%;
+      height: 60%;
+      border: 2px solid var(--hrac-hrana);
+      border-radius: 50%;
+      background: var(--hrac);
+    }
+
+    /* Hláška pod deskou. Pevná výška, i když je text prázdný: jinak by
+       se s každou změnou stavu posunula tlačítka pod ní. */
+    .stav {
+      min-height: 2.6rem;
+      margin: 0.75rem 0 0;
+      color: var(--text-dim);
+      font-size: 0.9rem;
+    }
+
+    .stav--vyhra {
+      color: var(--accent);
+      font-weight: 600;
+    }
+
+    /* ---------- směrová tlačítka ----------
+       Záloha k tahu prstem: ne každému tah sedne a na malé desce se
+       špatně míří. Klávesnice a myš je nepotřebují, proto se ukážou jen
+       na hrubém ukazateli — u tvrdého display: none v základu, aby se
+       do rozpočtu výšky desky nezapočítala. */
+    .dpad {
+      display: none;
+    }
+
+    @media (pointer: coarse) {
+      .dpad {
+        display: grid;
+        /* 56px je spodní hranice pro pohodlný zásah palcem. Přes max()
+           drží i tehdy, když si uživatel zmenší výchozí písmo. */
+        grid-template-columns: repeat(3, max(3.5rem, 56px));
+        grid-auto-rows: max(3.5rem, 56px);
+        gap: 0.7rem;
+        align-self: center;
+        margin-top: 0.8rem;
+      }
+    }
+
+    /* Plný kříž 3×3: každý směr sedí tam, kam ukazuje, takže se trefíš
+       bez dívání. Prostřední pole zůstane prázdné — palec má kde
+       odpočívat, aniž by omylem zadal směr. */
+    .dpad__btn--nahoru { grid-column: 2; grid-row: 1; }
+    .dpad__btn--vlevo  { grid-column: 1; grid-row: 2; }
+    .dpad__btn--vpravo { grid-column: 3; grid-row: 2; }
+    .dpad__btn--dolu   { grid-column: 2; grid-row: 3; }
+
+    .dpad__btn {
+      display: flex;
+      align-items: center;
+      justify-content: center;
+      border: 1px solid var(--border);
+      border-radius: var(--radius-sm);
+      background: var(--bg-elev);
+      color: var(--text-dim);
+      font: inherit;
+      line-height: 1;
+      cursor: pointer;
+      touch-action: manipulation;
+      -webkit-tap-highlight-color: transparent;
+      padding: 0;
+    }
+
+    /* Šipka je kreslená, ne psaná: znaky ▲▼◀▶ i emoji vykreslí každý
+       systém jinou velikostí a někde je nahradí barevnou verzí. Jeden
+       trojúhelník otočený po čtvrtinách vypadá všude stejně a všechny
+       čtyři jsou zaručeně shodné. */
+    .dpad__ikona {
+      width: 40%;
+      height: 40%;
+      fill: currentColor;
+      display: block;
+      pointer-events: none;   /* cíl události je vždy tlačítko */
+    }
+
+    .dpad__btn--vpravo .dpad__ikona { transform: rotate(90deg); }
+    .dpad__btn--dolu   .dpad__ikona { transform: rotate(180deg); }
+    .dpad__btn--vlevo  .dpad__ikona { transform: rotate(270deg); }
+
+    /* Odezva na stisk musí být vidět hned — tlačítko zabírá už při
+       pointerdown, ne až po zvednutí prstu. */
+    .dpad__btn:active {
+      background: var(--accent-soft);
+      border-color: var(--accent);
+      color: var(--accent);
+    }
+
+    /* ---------- akce pod deskou ---------- */
+    .akce {
+      display: flex;
+      flex-wrap: wrap;
+      gap: 0.5rem;
+      margin-top: 1rem;
+    }
+
+    /* ---------- výběr úrovně ---------- */
+    .nastaveni {
+      margin-top: 1.25rem;
+    }
+
+    .nastaveni__popis {
+      display: block;
+      margin-bottom: 0.25rem;
+      color: var(--text-dim);
+      font-size: 0.68rem;
+      font-weight: 600;
+      text-transform: uppercase;
+      letter-spacing: 0.08em;
+    }
+
+    .urovne {
+      display: grid;
+      grid-template-columns: repeat(10, minmax(0, 1fr));
+      gap: 0.3rem;
+    }
+
+    /* Deset tlačítek vedle sebe vyjde na úzkém displeji na necelé tři
+       čtvrtiny centimetru — to se prstem netrefí. Pod 520 px se proto
+       výběr zalomí na dvě řady po pěti. */
+    @media (max-width: 520px) {
+      .urovne {
+        grid-template-columns: repeat(5, minmax(0, 1fr));
+      }
+    }
+
+    .uroven {
+      position: relative;
+      display: flex;
+      align-items: center;
+      justify-content: center;
+      min-height: 2.6rem;
+      padding: 0.3rem 0;
+      border: 1px solid var(--border);
+      border-radius: var(--radius-sm);
+      background: var(--bg-elev);
+      color: var(--text-dim);
+      font-family: var(--font-mono);
+      font-size: 1rem;
+      font-weight: 600;
+      line-height: 1;
+      cursor: pointer;
+      touch-action: manipulation;
+      transition: background 0.15s ease, border-color 0.15s ease, color 0.15s ease;
+    }
+
+    .uroven:hover,
+    .uroven:focus-visible {
+      background: var(--bg-elev-hover);
+      border-color: var(--border-hover);
+      color: var(--text);
+    }
+
+    /* Vyřešená úroveň má tečku v rohu, ne jinou barvu celého tlačítka:
+       barvu si drží rozehraná úroveň a ta je důležitější — hráč musí
+       poznat, kde zrovna je. */
+    .uroven--hotova::after {
+      content: "";
+      position: absolute;
+      top: 0.3rem;
+      right: 0.3rem;
+      width: 0.36rem;
+      height: 0.36rem;
+      border-radius: 50%;
+      background: var(--accent);
+    }
+
+    .uroven[aria-current="true"] {
+      background: var(--accent-soft);
+      border-color: var(--accent);
+      color: var(--accent);
+    }
+
+    /* ---------- volba obtížnosti náhodné úrovně ---------- */
+    .prepinace {
+      display: flex;
+      gap: 0.3rem;
+    }
+
+    .prepinac {
+      flex: 1 1 0;
+      min-width: 0;
+      display: flex;
+      flex-direction: column;
+      align-items: center;
+      gap: 0.05rem;
+      padding: 0.4rem 0.25rem;
+      border: 1px solid var(--border);
+      border-radius: var(--radius-sm);
+      background: var(--bg-elev);
+      color: var(--text-dim);
+      font: inherit;
+      line-height: 1.25;
+      cursor: pointer;
+      touch-action: manipulation;
+      transition: background 0.15s ease, border-color 0.15s ease, color 0.15s ease;
+    }
+
+    .prepinac:hover,
+    .prepinac:focus-visible {
+      background: var(--bg-elev-hover);
+      border-color: var(--border-hover);
+      color: var(--text);
+    }
+
+    /* Generuje se na hlavním vlákně, takže po dobu hledání stránka
+       nereaguje. Tlačítko to musí říct dřív, než se to stane. */
+    .prepinac[aria-busy="true"],
+    .prepinac[aria-busy="true"]:hover {
+      background: var(--accent-soft);
+      border-color: var(--accent);
+      color: var(--accent);
+      cursor: progress;
+    }
+
+    .prepinace[aria-disabled="true"] .prepinac {
+      opacity: 0.5;
+      pointer-events: none;
+    }
+
+    .prepinac__nazev {
+      font-size: 0.82rem;
+      font-weight: 600;
+    }
+
+    .prepinac__detail {
+      font-family: var(--font-mono);
+      font-size: 0.68rem;
+      opacity: 0.8;
+    }
+
+    /* ---------- semínko ---------- */
+    .semeno {
+      display: flex;
+      align-items: center;
+      gap: 0.4rem;
+      margin: 0.5rem 0 0;
+      font-size: 0.85rem;
+      color: var(--text-dim);
+    }
+
+    .semeno__popis {
+      font-size: 0.68rem;
+      font-weight: 600;
+      text-transform: uppercase;
+      letter-spacing: 0.08em;
+    }
+
+    .semeno__pole {
+      width: 9ch;
+      padding: 0.25rem 0.4rem;
+      border: 1px solid var(--border);
+      border-radius: var(--radius-sm);
+      background: var(--bg);
+      color: var(--accent);
+      font-family: var(--font-mono);
+      font-size: 0.85rem;
+      letter-spacing: 0.06em;
+    }
+
+    .semeno__pole:focus-visible {
+      border-color: var(--accent);
+    }
+
+    .semeno__btn {
+      padding: 0.25rem 0.7rem;
+      font-size: 0.85rem;
+    }
+
+    /* Legenda ovládání pod deskou. */
+    .ovladani {
+      display: grid;
+      grid-template-columns: max-content 1fr;
+      gap: 0.35rem 0.9rem;
+      align-items: center;
+      margin: 1.25rem 0 0;
+      font-size: 0.85rem;
+    }
+
+    .ovladani dt {
+      justify-self: start;
+      display: flex;
+      gap: 0.15rem;
+      align-items: center;
+      flex-wrap: wrap;
+    }
+
+    .ovladani dd {
+      justify-self: start;
+      margin: 0;
+      color: var(--text-dim);
+    }
+
+    .ovladani kbd {
+      padding: 0.1rem 0.35rem;
+      border: 1px solid var(--border-hover);
+      border-radius: 4px;
+      background: var(--bg-elev);
+      font-family: var(--font-mono);
+      font-size: 0.9em;
+      line-height: 1.4;
+      color: var(--text);
+    }
+
+    /* Poznámka o dotykovém ovládání dává smysl jen tam, kde dotyk je. */
+    .dotykem {
+      display: none;
+      margin: 0.9rem 0 0;
+      color: var(--text-dim);
+      font-size: 0.85rem;
+      max-width: 40ch;
+    }
+
+    @media (pointer: coarse) {
+      .dotykem { display: block; }
+    }
+
+    /* nenápadné tlačítko pod legendou — nemá vypadat jako akce hry */
+    .smazat {
+      margin-top: 1.5rem;
+      padding: 0;
+      border: 0;
+      background: none;
+      color: var(--text-dim);
+      font: inherit;
+      font-size: 0.8rem;
+      text-decoration: underline;
+      text-underline-offset: 3px;
+      cursor: pointer;
+      align-self: flex-start;
+    }
+
+    .smazat:hover,
+    .smazat:focus-visible {
+      color: var(--danger);
+    }
+
+    /* touch-action se nedědí, takže ho každý ovládací prvek potřebuje
+       vlastní — jinak dvojklik na tlačítko stránku přiblíží. */
+    .btn,
+    .smazat {
+      touch-action: manipulation;
+    }
+  </style>
+</head>
+<body>
+  <div class="wrap">
+
+    <a class="back-link" href="../">← Zpět na rozcestník</a>
+
+    <header class="site-header">
+      <h1>Sokoban</h1>
+      <p>Rozvez bedny na vyznačená místa. Bedna se dá jenom tlačit,
+         nikdy táhnout, takže na jednu zeď zatlačená do rohu už zůstane —
+         od toho je krok zpět. Počítají se dvě věci zvlášť: kolik kroků
+         ušel skladník a kolikrát přitom hnul bednou.</p>
+    </header>
+
+    <main>
+      <div class="hra" id="hra">
+        <div class="hud">
+          <span>Úroveň: <strong class="hud__cislo hud__cislo--uroven" id="hud-uroven">1/10</strong></span>
+          <span>Tahy: <strong class="hud__cislo hud__cislo--tahy" id="hud-tahy">0</strong></span>
+          <span>Posuny: <strong class="hud__cislo hud__cislo--posuny" id="hud-posuny">0</strong></span>
+
+          <!-- Rekordy jsou dva a nezávislé: nejlepší řešení na tahy bývá
+               jiné než nejlepší na posuny, tak se drží každý zvlášť.
+               Stojí na vlastním řádku přes celou šířku — jsou to údaje
+               o minulosti a nemají soupeřit s tím, co se počítá teď. -->
+          <span class="hud__nej">Nejlépe:
+            <span id="hud-nej-hodnoty"><strong class="hud__cislo hud__cislo--rekord" id="hud-rekord-tahy">0</strong> tahů
+              · <strong class="hud__cislo hud__cislo--rekord" id="hud-rekord-posuny">0</strong> posunů</span><span
+                  id="hud-nej-nic">zatím nic</span></span>
+        </div>
+
+        <!-- Pásmo citlivé na tah prstem: rezerva kolem desky poslouchá na
+             tahy stejně jako deska, aby prst nemusel skončit přesně na ní.
+             Posluchače má tenhle prvek, ne mřížka. -->
+        <div class="swipe-zona" id="swipe-zona">
+          <div class="deska-obal">
+            <!-- Pole staví JS podle rozměrů úrovně. role="img" a jeden
+                 souhrnný popis: čtečka by jinak předčítala sto prázdných
+                 buněk, a z těch se stav skladu poskládat nedá. -->
+            <div class="deska" id="deska" role="img" aria-label="Sklad"></div>
+          </div>
+        </div>
+
+        <p class="stav" id="stav" aria-live="polite"></p>
+
+        <!-- Směrová tlačítka jako záloha k tahu prstem. Skrytá v CSS
+             všude, kde ukazatel není hrubý — na myši a klávesnici by jen
+             ukrajovala výšku desce. -->
+        <div class="dpad" id="dpad" role="group" aria-label="Směrové ovládání">
+          <button class="dpad__btn dpad__btn--nahoru" type="button"
+                  data-smer="nahoru" aria-label="Nahoru"><svg
+              class="dpad__ikona" viewBox="0 0 24 24" aria-hidden="true"
+              focusable="false"><path d="M12 5 L22 19 H2 Z"/></svg></button>
+          <button class="dpad__btn dpad__btn--vlevo" type="button"
+                  data-smer="vlevo" aria-label="Doleva"><svg
+              class="dpad__ikona" viewBox="0 0 24 24" aria-hidden="true"
+              focusable="false"><path d="M12 5 L22 19 H2 Z"/></svg></button>
+          <button class="dpad__btn dpad__btn--vpravo" type="button"
+                  data-smer="vpravo" aria-label="Doprava"><svg
+              class="dpad__ikona" viewBox="0 0 24 24" aria-hidden="true"
+              focusable="false"><path d="M12 5 L22 19 H2 Z"/></svg></button>
+          <button class="dpad__btn dpad__btn--dolu" type="button"
+                  data-smer="dolu" aria-label="Dolů"><svg
+              class="dpad__ikona" viewBox="0 0 24 24" aria-hidden="true"
+              focusable="false"><path d="M12 5 L22 19 H2 Z"/></svg></button>
+        </div>
+
+        <div class="akce">
+          <button class="btn" id="btn-zpet" type="button">Krok zpět</button>
+          <button class="btn" id="btn-restart" type="button">Restart úrovně</button>
+          <button class="btn" id="btn-dalsi" type="button">Další úroveň</button>
+        </div>
+
+        <!-- Výběr úrovně je vidět pořád: přeskočit zaseknutou úroveň
+             a vrátit se k ní později je normální způsob hraní.
+             Tlačítka staví JS ze seznamu úrovní. -->
+        <div class="nastaveni">
+          <span class="nastaveni__popis" id="popis-uroven">Úroveň</span>
+          <div class="urovne" role="group" aria-labelledby="popis-uroven" id="volba-uroven"></div>
+        </div>
+
+        <!-- Náhodná úroveň. Tlačítka rovnou generují — volba obtížnosti
+             a spuštění je jedna a táž věc, dvě na to být nemusí. -->
+        <div class="nastaveni">
+          <span class="nastaveni__popis" id="popis-nahodna">Náhodná úroveň</span>
+          <div class="prepinace" role="group" aria-labelledby="popis-nahodna" id="volba-nahodna"></div>
+
+          <!-- Semínko: ukazuje, z čeho úroveň vznikla, a zároveň je to
+               vstup — přepsáním a potvrzením se vyvolá táž úroveň. -->
+          <p class="semeno" id="semeno-radek" hidden>
+            <label class="semeno__popis" for="semeno-pole">Semínko</label>
+            <input class="semeno__pole" id="semeno-pole" type="text"
+                   inputmode="latin" autocomplete="off" spellcheck="false"
+                   maxlength="8" size="8">
+            <button class="btn semeno__btn" id="btn-semeno" type="button">Vyvolat</button>
+          </p>
+        </div>
+
+        <dl class="ovladani">
+          <dt><kbd>←</kbd><kbd>↑</kbd><kbd>↓</kbd><kbd>→</kbd></dt>
+          <dd>krok do stran; ve směru stojící bedna se před tebou posune</dd>
+          <dt><kbd>W</kbd><kbd>A</kbd><kbd>S</kbd><kbd>D</kbd></dt>
+          <dd>totéž, když ti sedí líp levá ruka</dd>
+          <dt><kbd>Z</kbd></dt>
+          <dd>krok zpět, klidně opakovaně až na začátek úrovně</dd>
+          <dt><kbd>R</kbd></dt>
+          <dd>postaví úroveň znovu od začátku</dd>
+        </dl>
+
+        <p class="dotykem">Na dotykových zařízeních táhni prstem po desce
+           nebo použij tlačítka pod ní.</p>
+
+        <button class="smazat" id="btn-smazat" type="button">Vymazat rekordy</button>
+      </div>
+    </main>
+
+  </div>
+
+<script>
+(function () {
+  'use strict';
+
+  /* ---------------------------------------------------------------
+     Úrovně
+
+     Textový zápis, jaký se u Sokobanu používá od začátku — dá se
+     zkopírovat odkudkoliv a hlavně se dá číst i psát ručně:
+
+         #  zeď
+         .  cíl
+         $  bedna
+         *  bedna na cíli
+         @  skladník
+         +  skladník na cíli
+         mezera  volná podlaha
+
+     Řádky nemusí být stejně dlouhé; zprava se dopadují mezerami.
+
+     Deset úrovní od nejlehčí. Každá je ověřená řešitelná; jdou po sobě
+     podle délky optimálního řešení, ne podle počtu beden — pět beden
+     naskládaných v řadě je snazší než čtyři, které se musí objíždět.
+     --------------------------------------------------------------- */
+  var UROVNE = [
+    {
+      nazev: 'Rozjezd',
+      mapa: [
+        '#######',
+        '#     #',
+        '# @$. #',
+        '#     #',
+        '#######'
+      ]
+    },
+    {
+      nazev: 'Za roh',
+      mapa: [
+        '########',
+        '#      #',
+        '# @$   #',
+        '#      #',
+        '#    . #',
+        '#      #',
+        '########'
+      ]
+    },
+    {
+      nazev: 'Dvojice',
+      mapa: [
+        '#########',
+        '#       #',
+        '#  $ $  #',
+        '#  . .  #',
+        '#   @   #',
+        '#########'
+      ]
+    },
+    {
+      nazev: 'Mezi zdmi',
+      mapa: [
+        '########',
+        '#      #',
+        '#  ##  #',
+        '# $..$ #',
+        '#  @   #',
+        '#      #',
+        '########'
+      ]
+    },
+    {
+      nazev: 'Napříč',
+      mapa: [
+        '##########',
+        '#        #',
+        '#  $  .  #',
+        '#  @     #',
+        '#  $  .  #',
+        '#        #',
+        '##########'
+      ]
+    },
+    {
+      nazev: 'Trojice',
+      mapa: [
+        '#########',
+        '#  ...  #',
+        '#       #',
+        '# $$$   #',
+        '#   @   #',
+        '#       #',
+        '#########'
+      ]
+    },
+    {
+      nazev: 'Pět v řadě',
+      mapa: [
+        '###########',
+        '#         #',
+        '#  $ $ $  #',
+        '#  .....  #',
+        '#   $ $   #',
+        '#    @    #',
+        '###########'
+      ]
+    },
+    {
+      nazev: 'Sloupy',
+      mapa: [
+        '##########',
+        '#  ....  #',
+        '#  #  #  #',
+        '# $ $$ $ #',
+        '#        #',
+        '#   @    #',
+        '##########'
+      ]
+    },
+    {
+      nazev: 'Kolem sloupu',
+      mapa: [
+        '##########',
+        '#   ##   #',
+        '# $ ..$  #',
+        '#  #..#  #',
+        '# $    $ #',
+        '#   @    #',
+        '##########'
+      ]
+    },
+    {
+      nazev: 'Sklad',
+      mapa: [
+        '###########',
+        '#    #    #',
+        '# $$ # .. #',
+        '#  $   .. #',
+        '# $$ # .  #',
+        '#  @ #    #',
+        '#         #',
+        '###########'
+      ]
+    }
+  ];
+
+  /* ---------------------------------------------------------------
+     Rozměry desky. Strana pole vychází z místa v okně; meze jsou tady,
+     ať se malá úroveň neroztáhne přes celou obrazovku a velká zůstala
+     ovladatelná i na telefonu.
+     --------------------------------------------------------------- */
+  var POLE_MIN       = 22;
+  var POLE_MIN_DOTYK = 26;       // pod prstem se menší deska špatně míří
+  var POLE_MAX       = 52;
+  var PODIL_VYSKY    = 0.5;      // kolik výšky okna smí deska zabrat
+
+  /* Kratší tah prstem než tohle bereme jako klepnutí a ignorujeme ho. */
+  var SWIPE_MIN = 24;            // px
+
+  /* ---------------------------------------------------------------
+     Směry. Klíč je zároveň to, co se ukládá do zásobníku tahů, takže
+     se krok zpět dá číst i v ladicí konzoli.
+     --------------------------------------------------------------- */
+  var SMERY = {
+    nahoru: { dx:  0, dy: -1 },
+    dolu:   { dx:  0, dy:  1 },
+    vlevo:  { dx: -1, dy:  0 },
+    vpravo: { dx:  1, dy:  0 }
+  };
+
+  var OPACNY = {
+    nahoru: 'dolu',
+    dolu:   'nahoru',
+    vlevo:  'vpravo',
+    vpravo: 'vlevo'
+  };
+
+  /* Pevné pořadí směrů pro průchody, které se musí chovat pokaždé
+     stejně. Pořadí klíčů objektu sice v praxi drží, ale spoléhat se
+     na ně u řešiče, jehož výsledek se porovnává s očekáváním, není
+     dobrý nápad. */
+  var SMERY_SEZNAM = ['nahoru', 'dolu', 'vlevo', 'vpravo'];
+
+  /* ---------------------------------------------------------------
+     Úložiště: nejlepší výsledky po úrovních.
+
+     Všechna volání jsou v try/catch: v privátním okně a při zakázaném
+     úložišti localStorage vyhazuje výjimku už při čtení. Hra pak běží
+     dál, jen si nic nepamatuje.
+
+     Tahy a posuny mají vlastní klíč, ne společný záznam. Jsou to dvě
+     nezávislé disciplíny — řešení nejkratší na kroky obvykle bednou
+     hne víckrát než to úsporné na posuny — a každá si drží své minimum
+     bez ohledu na tu druhou.
+     --------------------------------------------------------------- */
+  var KLIC_REKORD = 'sokoban:best:';   // + pořadí úrovně + ':' + druh
+  var KLIC_UROVEN  = 'sokoban:uroven';
+  var KLIC_VLASTNI = 'sokoban:vlastni';
+
+  /* Klíčem je identita úrovně, ne její pořadí: zabudované mají číslo,
+     vygenerované svoje semínko. Táž náhodná úroveň se tak dá vyvolat
+     znovu i s tím, jak si na ní hráč posledně vedl. */
+  function klicRekordu(id, druh) {
+    return KLIC_REKORD + id + ':' + druh;
+  }
+
+  function nactiRekord(id, druh) {
+    try {
+      var v = parseInt(localStorage.getItem(klicRekordu(id, druh)), 10);
+      return isFinite(v) && v > 0 ? v : 0;
+    } catch (e) {
+      return 0;
+    }
+  }
+
+  function ulozRekord(id, druh, hodnota) {
+    try {
+      localStorage.setItem(klicRekordu(id, druh), String(hodnota));
+    } catch (e) {
+      /* nevadí, rekord vydrží jen do konce sezení */
+    }
+  }
+
+  /* Maže se podle předpony, ne podle seznamu úrovní: vygenerované mají
+     klíč od svého semínka a těch může být kolik chce. Klíče se napřed
+     posbírají a teprve pak ruší — mazat z úložiště, po kterém se právě
+     prochází, si o chybu říká. */
+  function smazRekordy() {
+    try {
+      var kSmazani = [];
+      for (var i = 0; i < localStorage.length; i++) {
+        var klic = localStorage.key(i);
+        if (klic && klic.indexOf(KLIC_REKORD) === 0) kSmazani.push(klic);
+      }
+      for (i = 0; i < kSmazani.length; i++) localStorage.removeItem(kSmazani[i]);
+    } catch (e) {
+      /* nevadí */
+    }
+  }
+
+  /* Rozehraná úroveň se pamatuje taky — po návratu na stránku není co
+     hledat. Mimo rozsah seznamu se hodnota ignoruje: úrovní může časem
+     ubýt a starý záznam nemá hru shodit. */
+  function nactiUlozenouUroven() {
+    try {
+      var v = localStorage.getItem(KLIC_UROVEN);
+      if (v === 'vlastni') return 'vlastni';
+      var n = parseInt(v, 10);
+      return isFinite(n) && n >= 0 && n < UROVNE.length ? n : 0;
+    } catch (e) {
+      return 0;
+    }
+  }
+
+  function ulozUroven(kde) {
+    try {
+      localStorage.setItem(KLIC_UROVEN, String(kde));
+    } catch (e) {
+      /* nevadí */
+    }
+  }
+
+  /* Vygenerovaná úroveň se ukládá celá, ne jen semínko: znovu ji
+     vyrobit by trvalo vteřiny a hráč by po obnovení stránky koukal na
+     zamrzlé okno. Semínko se veze s ní, ať jde táž úroveň vyvolat
+     kdykoli znovu. */
+  function ulozVlastni(uroven) {
+    try {
+      localStorage.setItem(KLIC_VLASTNI, JSON.stringify({
+        nazev: uroven.nazev,
+        mapa: uroven.mapa,
+        semeno: uroven.semeno,
+        obtiznost: uroven.obtiznost
+      }));
+    } catch (e) {
+      /* nevadí, úroveň vydrží jen do konce sezení */
+    }
+  }
+
+  function nactiVlastni() {
+    try {
+      var v = JSON.parse(localStorage.getItem(KLIC_VLASTNI));
+      if (v && Array.isArray(v.mapa) && v.mapa.length) return v;
+    } catch (e) {
+      /* poškozený záznam — jede se na zabudovaných úrovních */
+    }
+    return null;
+  }
+
+  /* ---------------------------------------------------------------
+     Načtení úrovně z textu.
+
+     Zdi a cíle jsou statické mřížky — po celou úroveň se nezmění, takže
+     se spočítají jednou a pak už se do nich jen čte. Bedny a skladník
+     jsou proti tomu pouhé souřadnice; míchat je do mřížky by znamenalo
+     při každém tahu přepisovat pole, ve kterém 90 % hodnot je konstanta.
+
+     Souřadnice jsou ploché indexy do mřížky: i = y * sirka + x. Převod
+     tam a zpět dělají naIndex/sourX/sourY, žádné počítání ručně.
+     --------------------------------------------------------------- */
+  function nactiUroven(predpis) {
+    var mapa = predpis.mapa;
+    var vyska = mapa.length;
+    var sirka = 0;
+    var x, y, i;
+
+    for (y = 0; y < vyska; y++) sirka = Math.max(sirka, mapa[y].length);
+
+    var N = sirka * vyska;
+    var zdi  = new Uint8Array(N);
+    var cile = new Uint8Array(N);
+    var bedny = [];
+    var hrac = -1;
+
+    for (y = 0; y < vyska; y++) {
+      var radek = mapa[y];
+      for (x = 0; x < sirka; x++) {
+        // kratší řádek se doplní volnou podlahou, ne zdí
+        var znak = x < radek.length ? radek.charAt(x) : ' ';
+        i = y * sirka + x;
+
+        switch (znak) {
+          case '#': zdi[i] = 1; break;
+          case '.': cile[i] = 1; break;
+          case '$': bedny.push(i); break;
+          case '*': cile[i] = 1; bedny.push(i); break;
+          case '@': hrac = i; break;
+          case '+': cile[i] = 1; hrac = i; break;
+          default:  break;      // mezera i cokoliv neznámého je podlaha
+        }
+      }
+    }
+
+    var L = {
+      nazev: predpis.nazev,
+      sirka: sirka,
+      vyska: vyska,
+      zdi: zdi,
+      cile: cile,
+      uvnitr: vnitrek(sirka, vyska, zdi, hrac),
+      bedny: bedny,        // výchozí rozestavení, hra si dělá kopii
+      hrac: hrac
+    };
+
+    /* Statické tabulky pro řešič. Počítají se jednou tady, ne při
+       hledání: mrtvá pole se z tvaru úrovně nemění a přepočítávat je
+       u každého stavu by řešič utopilo. */
+    L.mrtva = mrtvaPole(L);
+    L.kCili = vzdalenostiKCilum(L);
+
+    return L;
+  }
+
+  /* ---------------------------------------------------------------
+     Mrtvá pole
+
+     Pole, ze kterého už bednu na žádný cíl nedostaneš. Nepočítá se
+     dopředu, kam se bedna dá dotlačit — to by znamenalo prohledat celou
+     úlohu — ale obráceně: od cílů, jako by se bedna místo tlačení
+     táhla.
+
+     Táhnout jde tehdy, když je volné pole za bednou (kam se posune)
+     i pole za ním (kde při tom stojí hráč). Kam se takhle od cíle
+     nedostaneš, tam bedna nemá co dělat: kdyby se tam dostala, úloha
+     je ztracená. Typicky jsou to rohy a slepé výklenky.
+
+     Bez téhle tabulky prohledávání bobtná řádově — řešič by zkoumal
+     miliony pozic, ve kterých je dávno rozhodnuto.
+     --------------------------------------------------------------- */
+  function mrtvaPole(L) {
+    var N = L.sirka * L.vyska;
+    var ziva = new Uint8Array(N);
+    var fronta = [];
+    var i, s;
+
+    for (i = 0; i < N; i++) {
+      if (L.cile[i]) { ziva[i] = 1; fronta.push(i); }
+    }
+
+    while (fronta.length) {
+      var p = fronta.pop();
+      for (s = 0; s < SMERY_SEZNAM.length; s++) {
+        var smer = SMERY[SMERY_SEZNAM[s]];
+        var b = posunV(L, p, smer);            // odkud by se bedna táhla
+        if (b < 0 || L.zdi[b] || ziva[b]) continue;
+        var h = posunV(L, b, smer);            // kde by při tom stál hráč
+        if (h < 0 || L.zdi[h]) continue;
+        ziva[b] = 1;
+        fronta.push(b);
+      }
+    }
+
+    var mrtva = new Uint8Array(N);
+    for (i = 0; i < N; i++) mrtva[i] = (!L.zdi[i] && !ziva[i]) ? 1 : 0;
+    return mrtva;
+  }
+
+  /* Manhattanovská vzdálenost každého pole k nejbližšímu cíli. Z toho
+     se skládá heuristika řešiče. Je to čtvercová smyčka přes celou
+     desku, ale ta má nanejvýš pár set polí a projde se jednou. */
+  function vzdalenostiKCilum(L) {
+    var N = L.sirka * L.vyska;
+    var vzd = new Uint16Array(N);
+
+    for (var i = 0; i < N; i++) {
+      var x = i % L.sirka, y = (i / L.sirka) | 0;
+      var nej = 0xffff;
+      for (var c = 0; c < N; c++) {
+        if (!L.cile[c]) continue;
+        var d = Math.abs(x - (c % L.sirka)) + Math.abs(y - ((c / L.sirka) | 0));
+        if (d < nej) nej = d;
+      }
+      vzd[i] = nej;
+    }
+
+    return vzd;
+  }
+
+  /* Které pole patří do místnosti. Záplavou od skladníka přes všechno,
+     co není zeď — dál než na zeď se nedostane, takže vyjde přesně
+     vnitřek ohrady.
+
+     Je to čistě kvůli kreslení: pole mimo místnost se nemají kreslit
+     jako podlaha, jinak by kolem úrovně zůstal pruh dlažby a obrys
+     skladu by se v něm ztratil. */
+  function vnitrek(sirka, vyska, zdi, start) {
+    var N = sirka * vyska;
+    var uvnitr = new Uint8Array(N);
+    if (start < 0) return uvnitr;
+
+    var fronta = [start];
+    uvnitr[start] = 1;
+
+    while (fronta.length) {
+      var i = fronta.pop();
+      var x = i % sirka, y = (i / sirka) | 0;
+
+      for (var s = 0; s < SMERY_SEZNAM.length; s++) {
+        var smer = SMERY[SMERY_SEZNAM[s]];
+        var nx = x + smer.dx, ny = y + smer.dy;
+        if (nx < 0 || ny < 0 || nx >= sirka || ny >= vyska) continue;
+
+        var n = ny * sirka + nx;
+        if (uvnitr[n] || zdi[n]) continue;
+        uvnitr[n] = 1;
+        fronta.push(n);
+      }
+    }
+
+    return uvnitr;
+  }
+
+  /* ---------------------------------------------------------------
+     Stav hry
+     --------------------------------------------------------------- */
+  var hra = {
+    index: 0,          // pořadí úrovně v seznamu, -1 u vygenerované
+    id: '0',           // identita pro rekordy (číslo, nebo g + semínko)
+    nazev: '',
+    uroven: null,      // načtená úroveň (statická část)
+    bedny: [],         // souřadnice beden, pořadí je nepodstatné
+    hrac: 0,           // souřadnice skladníka
+    tahy: 0,
+    posuny: 0,
+    zpet: [],          // zásobník tahů, viz tah() a krokZpet()
+    stav: 'hraje'      // 'hraje' | 'vyhra'
+  };
+
+  /* Posun souřadnice o jedno pole. Vrací -1, když by se vyšlo z mřížky.
+
+     Počítá se přes x a y, ne přičtením k plochému indexu: krok doleva
+     z prvního sloupce by jinak skončil na konci předchozího řádku.
+     U těchhle úrovní by se to neprojevilo (všechny jsou obehnané zdí),
+     ale spoléhat na tvar dat tam, kde stačí podmínka, se nevyplácí. */
+  function posunV(L, i, smer) {
+    var x = (i % L.sirka) + smer.dx;
+    var y = ((i / L.sirka) | 0) + smer.dy;
+    if (x < 0 || y < 0 || x >= L.sirka || y >= L.vyska) return -1;
+    return y * L.sirka + x;
+  }
+
+  // Totéž pro rozehranou úroveň; hra jinou než tu svoji nepotřebuje.
+  function posunIndex(i, smer) {
+    return posunV(hra.uroven, i, smer);
+  }
+
+  /* Bedna na daném poli, nebo -1. Průchod polem beden je při šesti
+     bednách levnější než udržovat druhou mřížku, kterou by bylo nutné
+     držet v souladu se seznamem. */
+  function bednaNa(i) {
+    for (var b = 0; b < hra.bedny.length; b++) {
+      if (hra.bedny[b] === i) return b;
+    }
+    return -1;
+  }
+
+  function hotovychBeden() {
+    var n = 0;
+    for (var b = 0; b < hra.bedny.length; b++) {
+      if (hra.uroven.cile[hra.bedny[b]]) n++;
+    }
+    return n;
+  }
+
+  /* ---------------------------------------------------------------
+     Tah
+
+     Skladník se posune o pole. Stojí-li v cestě bedna a za ní je volno,
+     bedna se posune s ním; je-li za ní zeď nebo další bedna, neděje se
+     nic — ani skladník se nepohne.
+     --------------------------------------------------------------- */
+  function tah(smerId) {
+    if (hra.stav !== 'hraje') return false;
+
+    var smer = SMERY[smerId];
+    var cil = posunIndex(hra.hrac, smer);
+    if (cil < 0 || hra.uroven.zdi[cil]) return false;
+
+    var b = bednaNa(cil);
+    var posunuta = false;
+
+    if (b !== -1) {
+      var za = posunIndex(cil, smer);
+      if (za < 0 || hra.uroven.zdi[za] || bednaNa(za) !== -1) return false;
+      hra.bedny[b] = za;
+      posunuta = true;
+    }
+
+    hra.hrac = cil;
+    hra.tahy++;
+    if (posunuta) hra.posuny++;
+
+    /* Do zásobníku jde jen směr a jestli se hnula bedna. Z toho se tah
+       odvine zpátky celý — kopírovat kvůli každému kroku rozestavení
+       beden by bylo o řád víc dat za tutéž informaci. */
+    hra.zpet.push({ smer: smerId, bedna: posunuta });
+
+    if (hotovychBeden() === hra.bedny.length) vyhra();
+
+    kresli();
+    return true;
+  }
+
+  /* Krok zpět. Skladník couvne o pole a bedna, kterou tím tahem tlačil,
+     se vrátí na jeho místo — tedy o pole zpátky proti směru tahu.
+
+     Pořadí je podstatné: bedna se posouvá dřív, než skladník couvne,
+     protože se stěhuje právě na pole, kde teď stojí on. */
+  function krokZpet() {
+    if (!hra.zpet.length) return false;
+
+    var t = hra.zpet.pop();
+    var smer = SMERY[t.smer];
+
+    if (t.bedna) {
+      var b = bednaNa(posunIndex(hra.hrac, smer));
+      if (b !== -1) hra.bedny[b] = hra.hrac;
+      hra.posuny--;
+    }
+
+    hra.hrac = posunIndex(hra.hrac, SMERY[OPACNY[t.smer]]);
+    hra.tahy--;
+
+    // krok zpět z vyřešené pozice úroveň zase rozehraje
+    hra.stav = 'hraje';
+
+    kresli();
+    return true;
+  }
+
+  function vyhra() {
+    hra.stav = 'vyhra';
+
+    /* Obě disciplíny se hodnotí zvlášť a obě z téhož dohraného řešení:
+       tohle konkrétní může být rekord v tazích, v posunech, v obojím,
+       nebo v ničem. */
+    var nejTahy   = nactiRekord(hra.id, 'tahy');
+    var nejPosuny = nactiRekord(hra.id, 'posuny');
+
+    if (!nejTahy   || hra.tahy   < nejTahy)   ulozRekord(hra.id, 'tahy',   hra.tahy);
+    if (!nejPosuny || hra.posuny < nejPosuny) ulozRekord(hra.id, 'posuny', hra.posuny);
+  }
+
+  /* ---------------------------------------------------------------
+     Start úrovně
+
+     Zabudovaná i vygenerovaná úroveň jde stejnou cestou; liší se jen
+     tím, čím se hlásí. index je pořadí v seznamu, u vygenerované -1;
+     id je klíč rekordů, u vygenerované semínko.
+     --------------------------------------------------------------- */
+  function zacniPredpis(predpis, index, id) {
+    hra.index = index;
+    hra.id = id;
+    hra.nazev = predpis.nazev;
+    hra.uroven = nactiUroven(predpis);
+
+    restart();
+    postavDesku();
+    oznacVyber();
+  }
+
+  function zacniUroven(index) {
+    zacniPredpis(UROVNE[index], index, String(index));
+    ulozUroven(index);
+  }
+
+  function zacniVlastni(vlastni) {
+    zacniPredpis(
+      { nazev: vlastni.nazev, mapa: vlastni.mapa },
+      -1,
+      'g' + semenoNaText(vlastni.semeno)
+    );
+    ulozUroven('vlastni');
+    ukazSemeno(vlastni.semeno);
+  }
+
+  /* Restart staví jen pohyblivé věci — zdi a cíle se nemají z čeho
+     změnit, takže se úroveň znovu neparsuje. Bedny se kopírují: seznam
+     v úrovni je výchozí rozestavení a to musí zůstat nedotčené. */
+  function restart() {
+    hra.bedny = hra.uroven.bedny.slice();
+    hra.hrac = hra.uroven.hrac;
+    hra.tahy = 0;
+    hra.posuny = 0;
+    hra.zpet = [];
+    hra.stav = 'hraje';
+    kresli();
+  }
+
+  /* Za poslední úrovní se seznam otočí na začátek, ať se dá jet pořád.
+     Z vygenerované úrovně (index -1) se tím vrátí na první — ta do
+     řady zabudovaných nepatří a nemá kam pokračovat. */
+  function dalsiUroven() {
+    zacniUroven((hra.index + 1 + UROVNE.length) % UROVNE.length);
+  }
+
+  /* ---------------------------------------------------------------
+     Prvky stránky
+     --------------------------------------------------------------- */
+  var elHra     = document.getElementById('hra');
+  var elDeska   = document.getElementById('deska');
+  var elStav    = document.getElementById('stav');
+  var elZona    = document.getElementById('swipe-zona');
+  var elDpad    = document.getElementById('dpad');
+  var elVolba   = document.getElementById('volba-uroven');
+
+  var elUroven  = document.getElementById('hud-uroven');
+  var elTahy    = document.getElementById('hud-tahy');
+  var elPosuny  = document.getElementById('hud-posuny');
+  var elRekT    = document.getElementById('hud-rekord-tahy');
+  var elRekP    = document.getElementById('hud-rekord-posuny');
+  var elNejHodnoty = document.getElementById('hud-nej-hodnoty');
+  var elNejNic     = document.getElementById('hud-nej-nic');
+
+  var elBtnZpet    = document.getElementById('btn-zpet');
+  var elBtnRestart = document.getElementById('btn-restart');
+  var elBtnDalsi   = document.getElementById('btn-dalsi');
+  var elBtnSmazat  = document.getElementById('btn-smazat');
+
+  /* ---------------------------------------------------------------
+     Deska
+
+     Pole se staví jednou na úroveň a pak se jen přepisují: překreslit
+     stovku prvků po každém tahu je levnější než je bourat a stavět
+     znovu. Každé pole má jedno dítě (.znak) pro bednu nebo skladníka —
+     obsah se tak mění třídou, ne přestavbou stromu.
+     --------------------------------------------------------------- */
+  var pole = [];        // { el, znak } pro každé pole mřížky
+  var otisky = [];      // co je na poli teď nakreslené, viz kresli()
+
+  function postavDesku() {
+    var L = hra.uroven;
+
+    elDeska.textContent = '';
+    pole = [];
+    otisky = [];
+
+    elDeska.style.setProperty('--sloupcu', L.sirka);
+    elDeska.style.setProperty('--radku', L.vyska);
+
+    for (var i = 0; i < L.sirka * L.vyska; i++) {
+      var p = document.createElement('div');
+      p.className = 'pole';
+
+      var z = document.createElement('i');
+      z.className = 'znak';
+      p.appendChild(z);
+
+      elDeska.appendChild(p);
+      pole.push({ el: p, znak: z });
+      otisky.push(null);
+    }
+
+    nastavPole();
+    kresli();
+  }
+
+  /* Přepočet strany pole. Měří se místo, které má sloupec hry
+     k dispozici — tedy <main>, ne sama deska: šířka desky z --pole
+     vychází, takže měřit ji by znamenalo měřit vlastní výsledek.
+
+     Na výšku se počítá s podílem okna, ne se zbytkem po HUDu: HUD i
+     tlačítka mají výšku danou písmem a ta se během hry nemění, takže
+     pevný podíl vyjde stabilněji než měření, které by samo záviselo na
+     tom, co se zrovna vykreslilo. */
+  function nastavPole() {
+    if (!hra.uroven) return;
+
+    var L = hra.uroven;
+    var dotyk = window.matchMedia('(pointer: coarse)').matches;
+    var dno = dotyk ? POLE_MIN_DOTYK : POLE_MIN;
+
+    /* 4 px jsou rám desky. Rezerva pásma kolem ní se neodečítá: přetéká
+       do odsazení stránky, takže o šířku desky nesoupeří. */
+    var sirka = elHra.parentNode.clientWidth - 4;
+    var vyska = window.innerHeight * PODIL_VYSKY;
+
+    var strana = Math.floor(Math.min(sirka / L.sirka, vyska / L.vyska));
+    strana = Math.max(dno, Math.min(POLE_MAX, strana));
+
+    elHra.style.setProperty('--pole', strana + 'px');
+  }
+
+  /* Okno se dá zvětšit, otočit i rozdělit na půl obrazovky. Přepočet je
+     levný (jedno nastavení proměnné), takže se nijak neomezuje. */
+  window.addEventListener('resize', nastavPole);
+  window.addEventListener('orientationchange', nastavPole);
+
+  /* Jedno pole se překreslí, jen když se opravdu změnilo. Otisk je
+     řetězec popisující, co na poli je — porovnat dva krátké řetězce je
+     levnější než sahat na třídy prvku, a hlavně to nechá prohlížeč na
+     pokoji u polí, kterými tah nehnul. */
+  function kresli() {
+    var L = hra.uroven;
+    if (!L || !pole.length) return;
+
+    for (var i = 0; i < pole.length; i++) {
+      var otisk;
+
+      if (L.zdi[i]) {
+        otisk = 'zed';
+      } else if (!L.uvnitr[i]) {
+        otisk = 'venku';
+      } else {
+        var cil = L.cile[i] ? 'c' : '-';
+        var obsah = '-';
+        if (hra.hrac === i) obsah = 'h';
+        else if (bednaNa(i) !== -1) obsah = 'b';
+        otisk = cil + obsah;
+      }
+
+      if (otisk === otisky[i]) continue;
+      otisky[i] = otisk;
+
+      var p = pole[i];
+      p.el.className = 'pole'
+        + (otisk === 'zed' ? ' pole--zed' : '')
+        + (otisk === 'venku' ? ' pole--venku' : '')
+        + (otisk.charAt(0) === 'c' ? ' pole--cil' : '');
+
+      p.znak.className = 'znak'
+        + (otisk.charAt(1) === 'b'
+            ? ' znak--bedna' + (otisk.charAt(0) === 'c' ? ' znak--bedna-hotova' : '')
+            : '')
+        + (otisk.charAt(1) === 'h' ? ' znak--hrac' : '');
+    }
+
+    kresliUdaje();
+  }
+
+  /* HUD, hláška a stav tlačítek. Odděleno od mřížky schválně: mění se
+     po každém tahu, kdežto polí se tah dotkne nanejvýš tří. */
+  function kresliUdaje() {
+    var hotovo = hotovychBeden();
+    var celkem = hra.bedny.length;
+
+    // vygenerovaná úroveň v řadě zabudovaných nestojí, tak se hlásí jménem
+    elUroven.textContent = hra.index >= 0
+      ? (hra.index + 1) + '/' + UROVNE.length
+      : 'náhodná';
+    elTahy.textContent   = hra.tahy;
+    elPosuny.textContent = hra.posuny;
+
+    /* Rekordy vznikají oba naráz při první výhře, takže se buď ukážou
+       oba, nebo ani jeden. „— tahů · — posunů“ by u nedohrané úrovně
+       vypadalo jako porucha, ne jako prázdno. */
+    var nejT = nactiRekord(hra.id, 'tahy');
+    var nejP = nactiRekord(hra.id, 'posuny');
+    var jsou = nejT > 0 && nejP > 0;
+
+    elRekT.textContent = nejT;
+    elRekP.textContent = nejP;
+    elNejHodnoty.hidden = !jsou;
+    elNejNic.hidden = jsou;
+
+    elDeska.classList.toggle('deska--vyhra', hra.stav === 'vyhra');
+    elDeska.setAttribute('aria-label', hra.nazev
+      + ': ' + hotovo + ' z ' + celkem + ' beden na místě');
+
+    elBtnZpet.disabled = !hra.zpet.length;
+
+    /* Po dohrání je Další úroveň hlavní akcí — dostane výraznou podobu
+       i zaostření, aby se dalo pokračovat klávesnicí bez hledání myší. */
+    elBtnDalsi.classList.toggle('btn--primary', hra.stav === 'vyhra');
+
+    if (hra.stav === 'vyhra') {
+      elStav.className = 'stav stav--vyhra';
+      elStav.textContent = 'Hotovo — ' + hra.nazev + ' za '
+        + hra.tahy + ' ' + sklonuj(hra.tahy, 'tah', 'tahy', 'tahů') + ' a '
+        + hra.posuny + ' ' + sklonuj(hra.posuny, 'posun', 'posuny', 'posunů') + '.';
+    } else {
+      elStav.className = 'stav';
+      elStav.textContent = hra.nazev + ' — na místě '
+        + hotovo + ' z ' + celkem + ' ' + sklonuj(celkem, 'bedny', 'beden', 'beden') + '.';
+    }
+
+    oznacVyber();
+  }
+
+  /* České číslovky: jeden tah, dva tahy, pět tahů. Bez toho by hláška
+     po každé úrovni skřípala. */
+  function sklonuj(n, jedna, dve, pet) {
+    if (n === 1) return jedna;
+    if (n >= 2 && n <= 4) return dve;
+    return pet;
+  }
+
+  /* ---------------------------------------------------------------
+     Výběr úrovně
+     --------------------------------------------------------------- */
+  function postavVyber() {
+    for (var i = 0; i < UROVNE.length; i++) {
+      var b = document.createElement('button');
+      b.type = 'button';
+      b.className = 'uroven';
+      b.textContent = i + 1;
+      b.dataset.index = i;
+
+      /* Název úrovně se do tlačítka nevejde, ale čtečka i bublina ho
+         unesou — a hráč podle něj úroveň pozná dřív než podle čísla. */
+      b.title = UROVNE[i].nazev;
+      b.setAttribute('aria-label', 'Úroveň ' + (i + 1) + ': ' + UROVNE[i].nazev);
+
+      elVolba.appendChild(b);
+    }
+
+    elVolba.addEventListener('click', function (e) {
+      var btn = e.target.closest('.uroven');
+      if (!btn) return;
+      zacniUroven(parseInt(btn.dataset.index, 10));
+    });
+  }
+
+  /* Které tlačítko svítí a které má tečku vyřešené úrovně. Vyřešená je
+     ta, která má uložený rekord — jiný záznam o dohrání se nevede
+     a druhý by musel říkat totéž. */
+  function oznacVyber() {
+    var btny = elVolba.children;
+    for (var i = 0; i < btny.length; i++) {
+      btny[i].setAttribute('aria-current', i === hra.index ? 'true' : 'false');
+      btny[i].classList.toggle('uroven--hotova', !!nactiRekord(String(i), 'tahy'));
+    }
+  }
+
+  /* ---------------------------------------------------------------
+     Klávesnice
+     --------------------------------------------------------------- */
+  var KLAVESY_SMERU = {
+    arrowup:    'nahoru',
+    arrowdown:  'dolu',
+    arrowleft:  'vlevo',
+    arrowright: 'vpravo',
+    w: 'nahoru',
+    s: 'dolu',
+    a: 'vlevo',
+    d: 'vpravo'
+  };
+
+  window.addEventListener('keydown', function (e) {
+    // s modifikátorem jde o zkratku prohlížeče, do té se neplete
+    if (e.ctrlKey || e.metaKey || e.altKey) return;
+
+    var key = e.key.toLowerCase();
+    var smer = KLAVESY_SMERU[key];
+
+    if (smer) {
+      e.preventDefault();        // šipky by jinak rolovaly stránkou
+      tah(smer);
+      return;
+    }
+
+    if (key === 'z') {
+      e.preventDefault();
+      krokZpet();
+      return;
+    }
+
+    if (key === 'r') {
+      e.preventDefault();
+      restart();
+      return;
+    }
+  });
+
+  /* ---------------------------------------------------------------
+     Dotyk a myš: tah po desce
+
+     Pointer events pokrývají prst i myš jedním kódem. Posluchače nese
+     pásmo s rezervou kolem desky (.swipe-zona), ne mřížka — citlivá
+     plocha je tím o rezervu větší na každé straně a tah nemusí začít
+     ani skončit přesně na desce.
+
+     Jeden tah prstem znamená jeden krok, ne posun až na konec: v Sokobanu
+     se počítají kroky a hráč musí mít nad každým kontrolu.
+     --------------------------------------------------------------- */
+  var zacatek = null;
+
+  elZona.addEventListener('pointerdown', function (e) {
+    zacatek = { x: e.clientX, y: e.clientY, id: e.pointerId };
+    elZona.setPointerCapture(e.pointerId);   // ať dotah mimo pásmo nezmizí
+  });
+
+  elZona.addEventListener('pointerup', function (e) {
+    if (!zacatek || e.pointerId !== zacatek.id) return;
+
+    var dx = e.clientX - zacatek.x;
+    var dy = e.clientY - zacatek.y;
+    zacatek = null;
+
+    if (Math.abs(dx) < SWIPE_MIN && Math.abs(dy) < SWIPE_MIN) return;
+
+    if (Math.abs(dx) > Math.abs(dy)) {
+      tah(dx > 0 ? 'vpravo' : 'vlevo');
+    } else {
+      tah(dy > 0 ? 'dolu' : 'nahoru');
+    }
+  });
+
+  elZona.addEventListener('pointercancel', function () {
+    zacatek = null;
+  });
+
+  /* Směrová tlačítka. Reagují na pointerdown, ne na click: odezva má
+     přijít hned, ne až prst odejde.
+
+     preventDefault drží zaostření na těle stránky — kdyby ho tlačítko
+     převzalo, mezerník nebo Enter by ho mačkaly znovu. */
+  Array.prototype.forEach.call(
+    elDpad.querySelectorAll('.dpad__btn'),
+    function (btn) {
+      btn.addEventListener('pointerdown', function (e) {
+        e.preventDefault();
+        tah(btn.getAttribute('data-smer'));
+      });
+    }
+  );
+
+  /* ---------------------------------------------------------------
+     Tlačítka pod deskou
+     --------------------------------------------------------------- */
+  elBtnZpet.addEventListener('click', function () {
+    krokZpet();
+  });
+
+  elBtnRestart.addEventListener('click', function () {
+    restart();
+  });
+
+  elBtnDalsi.addEventListener('click', function () {
+    dalsiUroven();
+  });
+
+  /* Vymazání rekordů se ptá: je to jediná nevratná akce na stránce
+     a klepnout na ni omylem jde stejně snadno jako na cokoliv jiného. */
+  elBtnSmazat.addEventListener('click', function () {
+    if (!window.confirm('Opravdu vymazat nejlepší výsledky všech úrovní?')) return;
+    smazRekordy();
+    kresliUdaje();
+  });
+
+  /* ===============================================================
+     Řešič
+
+     Nemá vlastní ovládání — sahá se na něj z konzole:
+
+         sokobanResic.vyres(9)         // desátá úroveň: seznam tlačení
+         sokobanResic.jeResitelna(9)   // jen ano/ne, zato rychle
+         sokobanTesty()                // změří všech deset
+
+     Jak je to postavené:
+
+     Stav je rozestavení beden plus oblast, ve které stojí hráč. Ne
+     jeho pole — na tom nezáleží. Když se hráč prochází po volném
+     prostoru mezi dvěma tlačeními, úloha se tím nemění, takže by se
+     jedno a totéž rozestavení počítalo tolikrát, kolik má oblast polí.
+     Ukládá se proto nejmenší souřadnice oblasti; ta je pro celou
+     oblast stejná a slouží jako její jméno.
+
+     Tahy se generují jako tlačení, ne jako kroky hráče: zajímá nás,
+     kterou bednu kam posunout. Kudy k ní hráč došel, se dopočítá až
+     nakonec prohledáním do šířky.
+
+     Hledá A* nad prioritní frontou. Cena je počet tlačení, odhad je
+     součet vzdáleností beden k nejbližšímu cíli. Ten odhad nikdy
+     nepřestřelí — jedno tlačení posune jednu bednu o jedno pole —
+     takže je řešení optimální v posunech. V tazích optimální být
+     nemusí: mezi dvěma posuny se chodí nejkratší cestou, ale pořadí
+     posunů je vybrané podle jejich počtu, ne podle nachozených kroků.
+     =============================================================== */
+
+  var RESIC_LIMIT_STAVU = 300000;
+  var RESIC_LIMIT_MS    = 10000;
+
+  /* Váha heuristiky pro jeResitelna(). Přetížený odhad žene hledání
+     rovnou k cíli a přestane se rozhlížet po kratších cestách —
+     řešení najde mnohem dřív, ale nemusí být nejkratší. */
+  var RESIC_VAHA_RYCHLE = 6;
+
+  /* Úroveň se dá řešiči podat v jakékoli podobě, ve které se s ní jde
+     potkat: pořadím v seznamu, předpisem, samotnými řádky mapy, nebo
+     už načtenou úrovní. Z konzole se pak zkouší cokoliv. */
+  function jakoUroven(co) {
+    if (typeof co === 'number') return nactiUroven(UROVNE[co]);
+    if (Array.isArray(co)) return nactiUroven({ nazev: 'vlastní', mapa: co });
+    if (co && co.mapa) return nactiUroven(co);
+    if (co && co.zdi) return co;
+    throw new TypeError('Neznámý tvar úrovně.');
+  }
+
+  function vzestupne(a, b) { return a - b; }
+
+  /* ---------------------------------------------------------------
+     Průchod deskou
+
+     Dosah hráče i normalizace jeho pozice jsou tentýž průchod: projdi
+     volná pole od hráče a vezmi z nich nejmenší souřadnici. Volající
+     dostane jméno oblasti a v razítkách zůstane celá — takže rovnou
+     ví i to, kam se hráč dostane.
+
+     Razítka místo nulování pole: průchod se dělá u každého uzlu a
+     zvýšit čítač je levnější než přepsat celou desku.
+     --------------------------------------------------------------- */
+  function novyPruchod(N) {
+    // fronta je předalokovaná: víc než N polí se do ní nikdy nevejde
+    return { znacky: new Int32Array(N), fronta: new Int32Array(N), gen: 0 };
+  }
+
+  function projdiOblast(L, obsazeno, start, pruchod) {
+    var znacky = pruchod.znacky;
+    var fronta = pruchod.fronta;
+    var gen = ++pruchod.gen;
+    var konec = 0, hlava = 0, nej = start;
+
+    znacky[start] = gen;
+    fronta[konec++] = start;
+
+    while (hlava < konec) {
+      var p = fronta[hlava++];
+      if (p < nej) nej = p;
+
+      for (var s = 0; s < SMERY_SEZNAM.length; s++) {
+        var n = posunV(L, p, SMERY[SMERY_SEZNAM[s]]);
+        if (n < 0 || znacky[n] === gen || L.zdi[n] || obsazeno[n]) continue;
+        znacky[n] = gen;
+        fronta[konec++] = n;
+      }
+    }
+
+    return nej;
+  }
+
+  function jeVOblasti(pruchod, i) {
+    return pruchod.znacky[i] === pruchod.gen;
+  }
+
+  /* ---------------------------------------------------------------
+     Zablokované sestavy
+
+     Mrtvá pole z tabulky nestačí — bedny se umí zablokovat i navzájem,
+     a to se pozná až podle jejich rozestavení. Obojí se kontroluje při
+     každém tlačení, ale jen u bedny, se kterou se hnulo: ostatní
+     stojí, kde stály, a ty už prošly.
+     --------------------------------------------------------------- */
+
+  /* Čtverec 2×2, ve kterém je každé pole zeď nebo bedna. Žádná z těch
+     beden se už nikdy nepohne: ve dvou směrech jí stojí v cestě obsah
+     čtverce a ve zbylých dvou by hráč musel stát právě v něm.
+
+     Zdi se počítají stejně jako bedny — zeď blokuje nejmíň tak dobře.
+     Výjimkou je čtverec, jehož bedny stojí všechny na cílech: ty se
+     hýbat nepotřebují, takže je to v pořádku. */
+  function ctverecZablokovan(L, obsazeno, p) {
+    var x = p % L.sirka, y = (p / L.sirka) | 0;
+
+    // čtyři čtverce 2×2, ve kterých pole p leží
+    for (var dy = -1; dy <= 0; dy++) {
+      for (var dx = -1; dx <= 0; dx++) {
+        var rx = x + dx, ry = y + dy;
+        if (rx < 0 || ry < 0 || rx + 1 >= L.sirka || ry + 1 >= L.vyska) continue;
+
+        var plny = true, vseNaCili = true;
+        for (var a = 0; a < 2 && plny; a++) {
+          for (var b = 0; b < 2; b++) {
+            var i = (ry + a) * L.sirka + (rx + b);
+            if (L.zdi[i]) continue;
+            if (!obsazeno[i]) { plny = false; break; }
+            if (!L.cile[i]) vseNaCili = false;
+          }
+        }
+
+        if (plny && !vseNaCili) return true;
+      }
+    }
+
+    return false;
+  }
+
+  /* Bedna u zdi. Kolmo od zdi se posunout nedá — hráč by musel stát
+     ve zdi — a do zdi taky ne, takže smí klouzat jen podél ní. Projde
+     se celý úsek, kam doklouže: když v něm nikde není cíl a zeď se
+     nikde nepřeruší (jinak by bednu šlo z toho místa odtlačit pryč),
+     je bedna mrtvá.
+
+     Ostatní bedny se do toho nepočítají. Ty by dosah jen zmenšily,
+     takže úsek vyjde větší, než jaký doopravdy je — a to je ta
+     bezpečná strana: mrtvá se hlásí jen tam, kde to platí jistě. */
+  function mrtvaPodelZdi(L, p, vodorovne) {
+    var kolmo = vodorovne ? ['nahoru', 'dolu'] : ['vlevo', 'vpravo'];
+    var podel = vodorovne ? ['vlevo', 'vpravo'] : ['nahoru', 'dolu'];
+
+    for (var s = 0; s < 2; s++) {
+      var uZdi = posunV(L, p, SMERY[kolmo[s]]);
+      if (uZdi >= 0 && !L.zdi[uZdi]) continue;      // z téhle strany zeď není
+
+      var mrtva = true;
+      for (var d = 0; d < 2 && mrtva; d++) {
+        var i = p;
+        while (i >= 0) {
+          if (L.cile[i]) { mrtva = false; break; }
+
+          var vedle = posunV(L, i, SMERY[kolmo[s]]);
+          if (vedle < 0 || !L.zdi[vedle]) { mrtva = false; break; }   // zeď se přerušila
+
+          var dalsi = posunV(L, i, SMERY[podel[d]]);
+          if (dalsi < 0 || L.zdi[dalsi]) break;      // konec úseku
+          i = dalsi;
+        }
+      }
+
+      if (mrtva) return true;
+    }
+
+    return false;
+  }
+
+  // Souhrn: bedna na poli p je v téhle sestavě ztracená.
+  function bednaZtracena(L, obsazeno, p) {
+    if (!L.cile[p]) {
+      if (L.mrtva[p]) return true;
+      if (mrtvaPodelZdi(L, p, true) || mrtvaPodelZdi(L, p, false)) return true;
+    }
+    // bedna na cíli může být mrtvá jen tak, že zamrzne ve čtverci
+    return ctverecZablokovan(L, obsazeno, p);
+  }
+
+  /* ---------------------------------------------------------------
+     Prioritní fronta (binární halda)
+
+     Při shodě f se sahá po uzlu s menším odhadem — ten je blíž
+     k cíli, takže se řešení dokončí dřív a fronta míň nabobtná.
+     --------------------------------------------------------------- */
+  function haldaPred(a, b) {
+    if (a.f !== b.f) return a.f < b.f;
+    return a.h < b.h;
+  }
+
+  function haldaVloz(halda, uzel) {
+    halda.push(uzel);
+    var i = halda.length - 1;
+
+    while (i > 0) {
+      var rodic = (i - 1) >> 1;
+      if (!haldaPred(halda[i], halda[rodic])) break;
+      var t = halda[rodic]; halda[rodic] = halda[i]; halda[i] = t;
+      i = rodic;
+    }
+  }
+
+  function haldaVyber(halda) {
+    var vrchol = halda[0];
+    var posledni = halda.pop();
+
+    if (halda.length) {
+      halda[0] = posledni;
+      var i = 0;
+
+      for (;;) {
+        var levy = 2 * i + 1, pravy = levy + 1, nej = i;
+        if (levy < halda.length && haldaPred(halda[levy], halda[nej])) nej = levy;
+        if (pravy < halda.length && haldaPred(halda[pravy], halda[nej])) nej = pravy;
+        if (nej === i) break;
+        var t = halda[nej]; halda[nej] = halda[i]; halda[i] = t;
+        i = nej;
+      }
+    }
+
+    return vrchol;
+  }
+
+  /* ---------------------------------------------------------------
+     Hledání
+     --------------------------------------------------------------- */
+
+  /* Odhad zbývajících tlačení: každá bedna potřebuje aspoň tolik
+     posunů, kolik je od nejbližšího cíle daleko. Že si na to bedny
+     můžou překážet a že se hráč musí nachodit, odhad neřeší — a právě
+     proto nikdy nepřestřelí. */
+  function odhad(L, bedny) {
+    var soucet = 0;
+    for (var i = 0; i < bedny.length; i++) soucet += L.kCili[bedny[i]];
+    return soucet;
+  }
+
+  function doreseno(L, bedny) {
+    for (var i = 0; i < bedny.length; i++) {
+      if (!L.cile[bedny[i]]) return false;
+    }
+    return true;
+  }
+
+  function klicStavu(bedny, hrac) {
+    return bedny.join(',') + '|' + hrac;
+  }
+
+  function rekonstruuj(uzel) {
+    var tlaceni = [];
+    while (uzel && uzel.tlaceni) {
+      tlaceni.push(uzel.tlaceni);
+      uzel = uzel.odkud;
+    }
+    return tlaceni.reverse();
+  }
+
+  function ted() {
+    return (typeof performance !== 'undefined' && performance.now)
+      ? performance.now() : Date.now();
+  }
+
+  /* Hlavní vstup. Vrací podrobnosti o běhu, ne jen řešení: konzolové
+     testy potřebují vědět i kolik stavů to stálo a proč to případně
+     skončilo bez výsledku.
+
+     duvod je jedno ze: 'reseno', 'neresitelna', 'limit-stavu',
+     'limit-casu'. Rozlišovat poslední dvě od 'neresitelna' je
+     podstatné — „nenašel jsem" a „neexistuje" nejsou totéž. */
+  function vyresPodrobne(co, volby) {
+    var L = jakoUroven(co);
+    volby = volby || {};
+
+    var limitStavu = volby.limitStavu || RESIC_LIMIT_STAVU;
+    var limitMs    = volby.limitMs    || RESIC_LIMIT_MS;
+    var vaha       = volby.vaha       || 1;
+
+    var zacatek = ted();
+    var stavu = 0;
+    var i, s;
+
+    function hotovo(duvod, tlaceni) {
+      var v = {
+        uroven: L.nazev,
+        duvod: duvod,
+        tlaceni: tlaceni || null,
+        posuny: tlaceni ? tlaceni.length : null,
+        tahy: null,
+        stavu: stavu,
+        cas: Math.round((ted() - zacatek) * 100) / 100
+      };
+      if (tlaceni) {
+        var kroky = rozvinTahy(L, tlaceni);
+        v.tahy = kroky ? kroky.length : null;
+        v.kroky = kroky;
+      }
+      return v;
+    }
+
+    // Zadání, které nedává smysl, se nemá ani rozjíždět.
+    var pocetCilu = 0;
+    for (i = 0; i < L.cile.length; i++) pocetCilu += L.cile[i];
+    if (L.hrac < 0 || !L.bedny.length || L.bedny.length !== pocetCilu) {
+      return hotovo('neresitelna', null);
+    }
+
+    var N = L.sirka * L.vyska;
+    var bedny0 = L.bedny.slice().sort(vzestupne);
+    var obsazeno = new Uint8Array(N);
+    for (i = 0; i < bedny0.length; i++) obsazeno[bedny0[i]] = 1;
+
+    /* Výchozí rozestavení se prověří celé. Dál už stačí kontrolovat
+       bednu, se kterou se hnulo — ostatní se od minule nezměnily. */
+    for (i = 0; i < bedny0.length; i++) {
+      if (bednaZtracena(L, obsazeno, bedny0[i])) return hotovo('neresitelna', null);
+    }
+
+    var pruchodDosah  = novyPruchod(N);
+    var pruchodOblast = novyPruchod(N);
+
+    var start = {
+      bedny: bedny0,
+      hrac: projdiOblast(L, obsazeno, L.hrac, pruchodOblast),
+      g: 0,
+      odkud: null,
+      tlaceni: null
+    };
+    start.h = odhad(L, bedny0);
+    start.f = start.g + vaha * start.h;
+
+    var navstiveno = Object.create(null);
+    navstiveno[klicStavu(start.bedny, start.hrac)] = 0;
+
+    var halda = [];
+    haldaVloz(halda, start);
+
+    while (halda.length) {
+      if (stavu >= limitStavu) return hotovo('limit-stavu', null);
+      if ((stavu & 1023) === 0 && ted() - zacatek > limitMs) {
+        return hotovo('limit-casu', null);
+      }
+
+      var uzel = haldaVyber(halda);
+      stavu++;
+
+      if (doreseno(L, uzel.bedny)) return hotovo('reseno', rekonstruuj(uzel));
+
+      // obsazenost a dosah hráče pro tenhle uzel
+      obsazeno.fill(0);
+      for (i = 0; i < uzel.bedny.length; i++) obsazeno[uzel.bedny[i]] = 1;
+      projdiOblast(L, obsazeno, uzel.hrac, pruchodDosah);
+
+      for (i = 0; i < uzel.bedny.length; i++) {
+        var bedna = uzel.bedny[i];
+
+        for (s = 0; s < SMERY_SEZNAM.length; s++) {
+          var nazev = SMERY_SEZNAM[s];
+
+          var za = posunV(L, bedna, SMERY[nazev]);
+          if (za < 0 || L.zdi[za] || obsazeno[za]) continue;
+
+          // hráč musí umět stát na opačné straně bedny
+          var zad = posunV(L, bedna, SMERY[OPACNY[nazev]]);
+          if (zad < 0 || L.zdi[zad] || obsazeno[zad]) continue;
+          if (!jeVOblasti(pruchodDosah, zad)) continue;
+
+          if (L.mrtva[za]) continue;
+
+          /* Zbytek se posuzuje až na desce po tlačení, tak se bedna
+             na okamžik přesune a hned vrátí. */
+          obsazeno[bedna] = 0;
+          obsazeno[za] = 1;
+          var ztracena = bednaZtracena(L, obsazeno, za);
+          var novyHrac = ztracena ? -1 : projdiOblast(L, obsazeno, bedna, pruchodOblast);
+          obsazeno[bedna] = 1;
+          obsazeno[za] = 0;
+
+          if (ztracena) continue;
+
+          var nove = uzel.bedny.slice();
+          nove[i] = za;
+          nove.sort(vzestupne);
+
+          var noveG = uzel.g + 1;
+          var klic = klicStavu(nove, novyHrac);
+          if (klic in navstiveno && navstiveno[klic] <= noveG) continue;
+          navstiveno[klic] = noveG;
+
+          var potomek = {
+            bedny: nove,
+            hrac: novyHrac,
+            g: noveG,
+            odkud: uzel,
+            tlaceni: { z: bedna, na: za, smer: nazev }
+          };
+          potomek.h = odhad(L, nove);
+          potomek.f = potomek.g + vaha * potomek.h;
+
+          haldaVloz(halda, potomek);
+        }
+      }
+    }
+
+    // fronta došla, aniž by se na cíl přišlo — řešení tedy neexistuje
+    return hotovo('neresitelna', null);
+  }
+
+  /* ---------------------------------------------------------------
+     Z tlačení na kroky
+
+     Řešič říká, kterou bednu kam posunout. Cesta hráče mezi dvěma
+     posuny se dopočítá až tady, prohledáním do šířky přes volná pole.
+     --------------------------------------------------------------- */
+  function cestaHrace(L, obsazeno, z, na) {
+    if (z === na) return [];
+
+    var N = L.sirka * L.vyska;
+    var odkud = new Int32Array(N);
+    var smerem = new Array(N);
+    var videno = new Uint8Array(N);
+    var fronta = [z], hlava = 0;
+
+    videno[z] = 1;
+
+    while (hlava < fronta.length) {
+      var p = fronta[hlava++];
+
+      for (var s = 0; s < SMERY_SEZNAM.length; s++) {
+        var nazev = SMERY_SEZNAM[s];
+        var n = posunV(L, p, SMERY[nazev]);
+        if (n < 0 || videno[n] || L.zdi[n] || obsazeno[n]) continue;
+
+        videno[n] = 1;
+        odkud[n] = p;
+        smerem[n] = nazev;
+
+        if (n === na) {
+          var cesta = [];
+          for (var i = n; i !== z; i = odkud[i]) cesta.push(smerem[i]);
+          return cesta.reverse();
+        }
+
+        fronta.push(n);
+      }
+    }
+
+    return null;
+  }
+
+  /* Celá posloupnost kroků hráče: k bedně dojdi, pak zatlač. Vrací
+     null, když se posloupnost tlačení nedá odehrát — to by znamenalo
+     chybu v řešiči, a testy si toho mají všimnout. */
+  function rozvinTahy(L, tlaceni) {
+    var N = L.sirka * L.vyska;
+    var bedny = L.bedny.slice();
+    var obsazeno = new Uint8Array(N);
+    var hrac = L.hrac;
+    var kroky = [];
+    var i;
+
+    for (i = 0; i < bedny.length; i++) obsazeno[bedny[i]] = 1;
+
+    for (i = 0; i < tlaceni.length; i++) {
+      var t = tlaceni[i];
+      var zad = posunV(L, t.z, SMERY[OPACNY[t.smer]]);
+      if (zad < 0) return null;
+
+      var cesta = cestaHrace(L, obsazeno, hrac, zad);
+      if (!cesta) return null;
+
+      for (var k = 0; k < cesta.length; k++) kroky.push(cesta[k]);
+      kroky.push(t.smer);
+
+      var kde = bedny.indexOf(t.z);
+      if (kde === -1) return null;
+      bedny[kde] = t.na;
+      obsazeno[t.z] = 0;
+      obsazeno[t.na] = 1;
+      hrac = t.z;
+    }
+
+    return kroky;
+  }
+
+  /* ---------------------------------------------------------------
+     Veřejné rozhraní řešiče
+     --------------------------------------------------------------- */
+
+  // Posloupnost tlačení, nebo null (neřešitelná i nedořešená v limitu).
+  function vyres(uroven, limitStavu) {
+    return vyresPodrobne(uroven, { limitStavu: limitStavu }).tlaceni;
+  }
+
+  /* Stačí jedno řešení, nemusí být nejkratší — proto přetížená
+     heuristika. false znamená „v limitu se řešení nenašlo“; že
+     neexistuje, říká až duvod === 'neresitelna' z vyresPodrobne. */
+  function jeResitelna(uroven, limitStavu) {
+    return vyresPodrobne(uroven, {
+      vaha: RESIC_VAHA_RYCHLE,
+      limitStavu: limitStavu
+    }).duvod === 'reseno';
+  }
+
+  /* Řešení s vynuceným pořadím beden: bednou se smí hnout, teprve když
+     všechny dřívější v pořadí stojí na cíli. Slouží generátoru jako
+     měřítko struktury — úroveň, kterou takhle svázanou vyřešíš stejně
+     krátce jako volnou, žádné pořadí nevynucuje a je nudná.
+
+     Má vlastní hledání, ne přepínač ve vyresPodrobne, protože se liší
+     v tom nejzákladnějším: musí rozlišovat bedny mezi sebou. Volný
+     řešič je drží setříděné (dvě rozestavení se stejnými poli jsou
+     tentýž stav), tady na tom, která bedna je která, záleží.
+
+     Vrací počet tlačení, nebo null (neřešitelné v daném pořadí i
+     nedořešené v limitu — pro generátor je obojí totéž: „neumí to
+     stejně krátce"). */
+  function vyresVPoradi(L, poradi, limitStavu) {
+    var N = L.sirka * L.vyska;
+    var pocet = L.bedny.length;
+    var i, s;
+
+    // poradi[k] = identita bedny, která je na řadě jako k-tá
+    var rada = new Array(pocet);
+    for (i = 0; i < pocet; i++) rada[poradi[i]] = i;
+
+    var bedny0 = L.bedny.slice().sort(vzestupne);   // identita = pořadí tady
+    var obsazeno = new Uint8Array(N);
+    for (i = 0; i < pocet; i++) obsazeno[bedny0[i]] = 1;
+
+    var pruchodDosah  = novyPruchod(N);
+    var pruchodOblast = novyPruchod(N);
+
+    var start = {
+      bedny: bedny0,
+      hrac: projdiOblast(L, obsazeno, L.hrac, pruchodOblast),
+      g: 0
+    };
+    start.h = odhad(L, bedny0);
+    start.f = start.h;
+
+    var navstiveno = Object.create(null);
+    navstiveno[bedny0.join(',') + '|' + start.hrac] = 0;
+
+    var halda = [];
+    haldaVloz(halda, start);
+    var stavu = 0;
+
+    while (halda.length) {
+      if (stavu >= limitStavu) return null;
+
+      var uzel = haldaVyber(halda);
+      stavu++;
+
+      if (doreseno(L, uzel.bedny)) return uzel.g;
+
+      obsazeno.fill(0);
+      for (i = 0; i < pocet; i++) obsazeno[uzel.bedny[i]] = 1;
+      projdiOblast(L, obsazeno, uzel.hrac, pruchodDosah);
+
+      for (i = 0; i < pocet; i++) {
+        // na řadu přijde, až všechny dřívější stojí na cíli
+        var smi = true;
+        for (var j = 0; j < pocet && smi; j++) {
+          if (rada[j] < rada[i] && !L.cile[uzel.bedny[j]]) smi = false;
+        }
+        if (!smi) continue;
+
+        var bedna = uzel.bedny[i];
+
+        for (s = 0; s < SMERY_SEZNAM.length; s++) {
+          var nazev = SMERY_SEZNAM[s];
+
+          var za = posunV(L, bedna, SMERY[nazev]);
+          if (za < 0 || L.zdi[za] || obsazeno[za]) continue;
+
+          var zad = posunV(L, bedna, SMERY[OPACNY[nazev]]);
+          if (zad < 0 || L.zdi[zad] || obsazeno[zad]) continue;
+          if (!jeVOblasti(pruchodDosah, zad)) continue;
+          if (L.mrtva[za]) continue;
+
+          obsazeno[bedna] = 0;
+          obsazeno[za] = 1;
+          var ztracena = bednaZtracena(L, obsazeno, za);
+          var novyHrac = ztracena ? -1 : projdiOblast(L, obsazeno, bedna, pruchodOblast);
+          obsazeno[bedna] = 1;
+          obsazeno[za] = 0;
+          if (ztracena) continue;
+
+          // bedny zůstávají v pořadí identit, ne setříděné
+          var nove = uzel.bedny.slice();
+          nove[i] = za;
+
+          var noveG = uzel.g + 1;
+          var klic = nove.join(',') + '|' + novyHrac;
+          if (klic in navstiveno && navstiveno[klic] <= noveG) continue;
+          navstiveno[klic] = noveG;
+
+          var potomek = { bedny: nove, hrac: novyHrac, g: noveG };
+          potomek.h = odhad(L, nove);
+          potomek.f = potomek.g + potomek.h;
+          haldaVloz(halda, potomek);
+        }
+      }
+    }
+
+    return null;
+  }
+
+  window.sokobanResic = {
+    vyres: vyres,
+    jeResitelna: jeResitelna,
+    vyresPodrobne: vyresPodrobne,
+    vyresVPoradi: vyresVPoradi,
+    rozvinTahy: rozvinTahy,
+    nactiUroven: nactiUroven
+  };
+
+  /* ===============================================================
+     Generátor úrovní
+
+     Staví se od konce. Náhodně rozestavět bedny a doufat, že z toho
+     vyjde řešitelná úloha, nemá cenu — drtivá většina rozestavění
+     řešení nemá. Začne se proto u vyřešeného stavu (bedny na cílech)
+     a bedny se prohledáváním do šířky TÁHNOU zpátky. Každý stav, na
+     který se takhle přijde, je z definice řešitelný: cesta zpátky do
+     vyřešeného stavu je hotová, stačí ji obrátit.
+
+     Táhnout se dá tak, že hráč stojí u bedny a couvne: bedna se
+     posune na jeho místo. Potřebuje k tomu volné pole za bednou (kam
+     se bedna posune) i za sebou (kam couvne on sám).
+
+     Hloubka prohledávání je zároveň optimální počet tlačení v řešení —
+     nejkratší cesta z vyřešeného stavu je táž jako nejkratší cesta do
+     něj, jen obráceně. Řešič z etapy 2 to pak nezávisle potvrdí.
+     =============================================================== */
+
+  /* Vlastní generátor pseudonáhodných čísel. Math.random() semínko
+     nepřijímá, takže by se stejná úroveň nedala vyvolat znovu.
+     Mulberry32: jeden 32bitový stav, krátký a na míchání úrovní víc
+     než dost. */
+  function generatorNahod(semeno) {
+    var stav = semeno >>> 0;
+
+    return function () {
+      stav = (stav + 0x6D2B79F5) >>> 0;
+      var t = stav;
+      t = Math.imul(t ^ (t >>> 15), t | 1);
+      t ^= t + Math.imul(t ^ (t >>> 7), t | 61);
+      return ((t ^ (t >>> 14)) >>> 0) / 4294967296;
+    };
+  }
+
+  var OBTIZNOSTI = {
+    lehka: {
+      id: 'lehka', nazev: 'Lehká', detail: '7×7, 2 bedny',
+      sirka: 7, vyska: 7, beden: 2, minPosunu: 10,
+      hustotaZdi: 0.16, limitStavu: 40000, shlukCilu: false
+    },
+    stredni: {
+      id: 'stredni', nazev: 'Střední', detail: '9×9, 3 bedny',
+      sirka: 9, vyska: 9, beden: 3, minPosunu: 20,
+      hustotaZdi: 0.18, limitStavu: 90000, shlukCilu: true
+    },
+    tezka: {
+      id: 'tezka', nazev: 'Těžká', detail: '11×11, 4 bedny',
+      sirka: 11, vyska: 11, beden: 4, minPosunu: 35,
+      hustotaZdi: 0.20, limitStavu: 160000, shlukCilu: true
+    }
+  };
+
+  var OBTIZNOSTI_SEZNAM = ['lehka', 'stredni', 'tezka'];
+
+  /* Váhy ceny stavu. Prostá hloubka dává nudné úrovně — bedna
+     dotlačená rovně přes deset polí je deset posunů a nula přemýšlení.
+     Připlácí se proto za to, co dělá úlohu úlohou: za zatáčky a za to,
+     že se musí sáhnout na každou bednu. Bedna, která stojí na cíli už
+     v zadání, je naopak vada. */
+  var CENA_POSUN        = 1;
+  var CENA_ZMENA_SMERU  = 0.6;
+  var CENA_RUZNE_BEDNY  = 4;
+  var CENA_NA_CILI      = -10;
+
+  var GEN_MAX_POKUSU  = 400;      // kolik map se smí zahodit, než to vzdáme
+  var GEN_MAX_MS      = 20000;    // pojistka, ať se karta nezasekne
+  var GEN_KANDIDATU   = 12;       // kolik nejlepších stavů se protřídí
+  var GEN_LIMIT_PORADI = 40000;   // strop pro jedno svázané řešení
+  var GEN_MAX_ZDI     = 1 / 3;    // víc už je bludiště, ne sklad
+
+  /* ---------------------------------------------------------------
+     1. Mapa: obdélník, náhodné zdi uvnitř, jedna souvislá oblast
+     --------------------------------------------------------------- */
+  function nahodnaMapa(O, nahoda) {
+    var sirka = O.sirka, vyska = O.vyska;
+    var N = sirka * vyska;
+    var zdi = new Uint8Array(N);
+    var volna = [];
+    var x, y, i;
+
+    for (y = 0; y < vyska; y++) {
+      for (x = 0; x < sirka; x++) {
+        i = y * sirka + x;
+        var okraj = (x === 0 || y === 0 || x === sirka - 1 || y === vyska - 1);
+
+        if (okraj || nahoda() < O.hustotaZdi) {
+          zdi[i] = 1;
+        } else {
+          volna.push(i);
+        }
+      }
+    }
+
+    if (!volna.length) return null;
+
+    // Rozdělená mapa je k ničemu: bedna z jedné části se do druhé
+    // nedostane a půlka desky by byla jen na ozdobu.
+    var videno = new Uint8Array(N);
+    var fronta = [volna[0]], hlava = 0, dosazeno = 1;
+    videno[volna[0]] = 1;
+
+    var L = { sirka: sirka, vyska: vyska };
+    while (hlava < fronta.length) {
+      var p = fronta[hlava++];
+      for (var s = 0; s < SMERY_SEZNAM.length; s++) {
+        var n = posunV(L, p, SMERY[SMERY_SEZNAM[s]]);
+        if (n < 0 || videno[n] || zdi[n]) continue;
+        videno[n] = 1;
+        dosazeno++;
+        fronta.push(n);
+      }
+    }
+
+    if (dosazeno !== volna.length) return null;
+
+    // Podíl zdí se počítá z vnitřku — obvodová zeď je daná a do
+    // dojmu „bludiště" nemluví.
+    var vnitrnich = (sirka - 2) * (vyska - 2);
+    var zdiUvnitr = vnitrnich - volna.length;
+    if (zdiUvnitr > vnitrnich * GEN_MAX_ZDI) return null;
+
+    return { sirka: sirka, vyska: vyska, zdi: zdi, volna: volna };
+  }
+
+  /* Kam s cíli.
+
+     Rozházet je po celé desce je první nápad a je špatný: každá bedna
+     má pak ke svému cíli blízko a nejdelší řešení, jaké z mapy vyleze,
+     je krátké. Cíle namačkané k sobě naopak nutí bedny putovat přes
+     půl skladu — a sklad to i připomíná, bedny se skládají na jednu
+     hromadu, ne do rohů.
+
+     Naměřeno na těžké obtížnosti: rozházené cíle dosáhly meze 35
+     tlačení u 4 map ze 14, namačkané u 7 ze 14, a průměrná nejhlubší
+     úloha vyrostla z 25 na 33 tlačení.
+
+     Střed shluku je náhodné volné pole a cíle se berou z jeho okolí —
+     ne prostě nejbližší, aby nevycházel pokaždé týž tvar. */
+  function vyberCile(mapa, kolik, nahoda, shluk) {
+    if (mapa.volna.length < kolik) return null;
+
+    /* Na malé desce shluk nefunguje: bedny se v ní nemají kam rozejít
+       a nejdelší úloha vyjde kratší, ne delší. Lehká obtížnost proto
+       rozhazuje cíle po celé desce. */
+    if (!shluk) {
+      var kopie = mapa.volna.slice();
+      var vybrane = [];
+      for (var j = 0; j < kolik && kopie.length; j++) {
+        var m = Math.floor(nahoda() * kopie.length);
+        vybrane.push(kopie[m]);
+        kopie.splice(m, 1);
+      }
+      return vybrane.length === kolik ? vybrane : null;
+    }
+
+    var stred = mapa.volna[Math.floor(nahoda() * mapa.volna.length)];
+    var sx = stred % mapa.sirka, sy = (stred / mapa.sirka) | 0;
+
+    var podle = mapa.volna.slice().sort(function (a, b) {
+      var da = Math.abs(a % mapa.sirka - sx) + Math.abs(((a / mapa.sirka) | 0) - sy);
+      var db = Math.abs(b % mapa.sirka - sx) + Math.abs(((b / mapa.sirka) | 0) - sy);
+      return da - db;
+    });
+
+    var okoli = podle.slice(0, Math.min(podle.length, kolik * 3));
+    var cile = [];
+
+    for (var i = 0; i < kolik && okoli.length; i++) {
+      var k = Math.floor(nahoda() * okoli.length);
+      cile.push(okoli[k]);
+      okoli.splice(k, 1);
+    }
+
+    return cile.length === kolik ? cile : null;
+  }
+
+  /* ---------------------------------------------------------------
+     2.–4. Táhni bedny zpátky
+
+     Prohledávání do šířky od vyřešeného stavu. Stav je rozestavení
+     beden plus normalizovaná pozice hráče, stejně jako u řešiče —
+     bez normalizace by se totéž rozestavení počítalo tolikrát, kolik
+     má oblast polí.
+
+     Vrací nejlepších pár stavů podle ceny, ne jeden: nejlepší nemusí
+     projít protříděním a přegenerovat kvůli tomu celou mapu by byla
+     škoda.
+     --------------------------------------------------------------- */
+  /* ---------------------------------------------------------------
+     Levné síto před drahým tažením
+
+     Tažení na těžké obtížnosti stojí kolem dvou vteřin a většina map
+     na něm skončí mělko — celý prostor se vyčerpá dřív, než se dojde
+     na požadovaný počet tlačení. Vyplatí se proto napřed odhadnout,
+     jestli má vůbec cenu do toho jít.
+
+     Odhad: pro každý cíl se spočítá, jak daleko se z něj dá bedna
+     odtáhnout, kdyby na desce byla sama. Součet přes všechny cíle je
+     optimistický — bedny si navzájem překážejí. Není to přesná horní
+     mez (kvůli překážejícím bednám se cesta může naopak protáhnout),
+     ale jako síto to stačí: mapa, jejíž optimistický součet nesahá ani
+     na mez, se zahodí za zlomek milisekundy místo za dvě vteřiny.
+     --------------------------------------------------------------- */
+  function nejdelsiTazeni(L, obsazeno, cil, pruchodDosah, pruchodOblast) {
+    var videno = Object.create(null);
+    var fronta = [], hlava = 0, nej = 0;
+    var s, oblast, klic;
+
+    obsazeno[cil] = 1;
+    for (s = 0; s < SMERY_SEZNAM.length; s++) {
+      var vedle = posunV(L, cil, SMERY[SMERY_SEZNAM[s]]);
+      if (vedle < 0 || L.zdi[vedle]) continue;
+
+      oblast = projdiOblast(L, obsazeno, vedle, pruchodOblast);
+      klic = cil + '|' + oblast;
+      if (videno[klic]) continue;
+      videno[klic] = true;
+      fronta.push({ b: cil, h: oblast, d: 0 });
+    }
+
+    while (hlava < fronta.length) {
+      var uzel = fronta[hlava++];
+      if (uzel.d > nej) nej = uzel.d;
+
+      obsazeno[cil] = 0;
+      obsazeno[uzel.b] = 1;
+      projdiOblast(L, obsazeno, uzel.h, pruchodDosah);
+
+      for (s = 0; s < SMERY_SEZNAM.length; s++) {
+        var smer = SMERY[SMERY_SEZNAM[s]];
+
+        var kam = posunV(L, uzel.b, smer);
+        if (kam < 0 || L.zdi[kam] || !jeVOblasti(pruchodDosah, kam)) continue;
+
+        var zaHracem = posunV(L, kam, smer);
+        if (zaHracem < 0 || L.zdi[zaHracem]) continue;
+
+        obsazeno[uzel.b] = 0;
+        obsazeno[kam] = 1;
+        oblast = projdiOblast(L, obsazeno, zaHracem, pruchodOblast);
+        obsazeno[kam] = 0;
+        obsazeno[uzel.b] = 1;
+
+        klic = kam + '|' + oblast;
+        if (videno[klic]) continue;
+        videno[klic] = true;
+        fronta.push({ b: kam, h: oblast, d: uzel.d + 1 });
+      }
+
+      obsazeno[uzel.b] = 0;
+    }
+
+    return nej;
+  }
+
+  function odhadNejvetsiHloubky(mapa, cile) {
+    var L = { sirka: mapa.sirka, vyska: mapa.vyska, zdi: mapa.zdi };
+    var N = L.sirka * L.vyska;
+    var obsazeno = new Uint8Array(N);
+    var pruchodDosah = novyPruchod(N);
+    var pruchodOblast = novyPruchod(N);
+    var soucet = 0;
+
+    for (var c = 0; c < cile.length; c++) {
+      soucet += nejdelsiTazeni(L, obsazeno, cile[c], pruchodDosah, pruchodOblast);
+    }
+
+    return soucet;
+  }
+
+  /* Klíč stavu tažení. Prohledávání jich vyrobí statisíce, takže je to
+     měřitelně horké místo: bedny.join(',') + hráč skládá řetězec z čísel
+     a oddělovačů, kdežto tohle z každé souřadnice udělá jeden znak.
+     Pole má nanejvýš pár set, takže se do znaku pohodlně vejde. */
+  function klicTazeni(bedny, hrac) {
+    var s = String.fromCharCode(hrac);
+    for (var i = 0; i < bedny.length; i++) s += String.fromCharCode(bedny[i]);
+    return s;
+  }
+
+  function tahniZpatky(mapa, cile, limitStavu) {
+    // jen tolik úrovně, kolik průchod deskou potřebuje
+    var L = { sirka: mapa.sirka, vyska: mapa.vyska, zdi: mapa.zdi };
+    var N = L.sirka * L.vyska;
+    var pocet = cile.length;
+
+    var obsazeno = new Uint8Array(N);
+    for (var i = 0; i < pocet; i++) obsazeno[cile[i]] = 1;
+
+    var pruchodDosah  = novyPruchod(N);
+    var pruchodOblast = novyPruchod(N);
+
+    /* Rozjezd: hráč stojí u některé bedny. Oblastí, ze kterých se dá
+       vůbec něco táhnout, může být víc — vezmou se všechny, ať hloubka
+       opravdu odpovídá nejkratšímu řešení. */
+    var bedny0 = cile.slice().sort(vzestupne);
+    var zacatky = Object.create(null);
+    var fronta = [];
+
+    for (i = 0; i < bedny0.length; i++) {
+      for (var s = 0; s < SMERY_SEZNAM.length; s++) {
+        var vedle = posunV(L, bedny0[i], SMERY[SMERY_SEZNAM[s]]);
+        if (vedle < 0 || L.zdi[vedle] || obsazeno[vedle]) continue;
+
+        var oblast = projdiOblast(L, obsazeno, vedle, pruchodOblast);
+        if (zacatky[oblast]) continue;
+        zacatky[oblast] = true;
+
+        fronta.push({
+          bedny: bedny0, hrac: oblast, hracSkutecny: vedle,
+          hloubka: 0, odkud: null, tah: null
+        });
+      }
+    }
+
+    if (!fronta.length) return [];
+
+    var navstiveno = Object.create(null);
+    for (i = 0; i < fronta.length; i++) {
+      navstiveno[klicTazeni(bedny0, fronta[i].hrac)] = true;
+    }
+
+    var nejlepsi = [];
+    var hlava = 0, stavu = 0;
+
+    while (hlava < fronta.length && stavu < limitStavu) {
+      var uzel = fronta[hlava++];
+      stavu++;
+
+      if (uzel.hloubka > 0) zvazKandidata(cile, uzel, pocet, nejlepsi);
+
+      obsazeno.fill(0);
+      for (i = 0; i < pocet; i++) obsazeno[uzel.bedny[i]] = 1;
+      projdiOblast(L, obsazeno, uzel.hrac, pruchodDosah);
+
+      for (i = 0; i < pocet; i++) {
+        var bedna = uzel.bedny[i];
+
+        for (s = 0; s < SMERY_SEZNAM.length; s++) {
+          var nazev = SMERY_SEZNAM[s];
+          var smer = SMERY[nazev];
+
+          /* Hráč stojí na poli, kam se bedna potáhne, a couvá o další
+             pole dál. Obojí musí být volné a na to první se musí umět
+             dostat. */
+          var kam = posunV(L, bedna, smer);
+          if (kam < 0 || L.zdi[kam] || obsazeno[kam]) continue;
+          if (!jeVOblasti(pruchodDosah, kam)) continue;
+
+          var zaHracem = posunV(L, kam, smer);
+          if (zaHracem < 0 || L.zdi[zaHracem] || obsazeno[zaHracem]) continue;
+
+          var nove = uzel.bedny.slice();
+          nove[i] = kam;
+          nove.sort(vzestupne);
+
+          obsazeno[bedna] = 0;
+          obsazeno[kam] = 1;
+          var novyHrac = projdiOblast(L, obsazeno, zaHracem, pruchodOblast);
+          obsazeno[bedna] = 1;
+          obsazeno[kam] = 0;
+
+          var klic = klicTazeni(nove, novyHrac);
+          if (navstiveno[klic]) continue;
+          navstiveno[klic] = true;
+
+          fronta.push({
+            bedny: nove,
+            hrac: novyHrac,
+            hracSkutecny: zaHracem,
+            hloubka: uzel.hloubka + 1,
+            odkud: uzel,
+            /* směr zapisujeme tak, jak se bedna hýbe při GENEROVÁNÍ,
+               tedy z pohledu tažení; hráč pak tutéž bednu tlačí opačně */
+            tah: { z: bedna, na: kam, smer: nazev }
+          });
+        }
+      }
+    }
+
+    return nejlepsi;
+  }
+
+  /* Cena stavu a zařazení mezi nejlepší. Metriky se čtou z cesty od
+     vyřešeného stavu — ta je z prohledávání do šířky nejkratší, takže
+     hloubka je rovnou optimální počet tlačení. */
+  function zvazKandidata(cilePole, uzel, pocetBeden, nejlepsi) {
+    var kroky = [];
+    for (var u = uzel; u && u.tah; u = u.odkud) kroky.push(u.tah);
+    kroky.reverse();
+
+    /* Která bedna je která. Ve stavu jsou bedny setříděné, takže se
+       identita ze samotného rozestavení nepozná — sleduje se proto po
+       cestě od vyřešeného stavu, kde má každá bedna svůj cíl. Bedna se
+       pozná podle pole, na kterém právě stojí. */
+    var poloha = Object.create(null);      // pole -> identita bedny
+    var i;
+    for (i = 0; i < cilePole.length; i++) poloha[cilePole[i]] = cilePole[i];
+
+    var identity = Object.create(null);    // identity, se kterými se hnulo
+    var zmenySmeru = 0;
+    var predchoziSmer = null;
+
+    for (i = 0; i < kroky.length; i++) {
+      var k = kroky[i];
+      var kdo = poloha[k.z];
+      delete poloha[k.z];
+      poloha[k.na] = kdo;
+      identity[kdo] = 1;
+
+      if (predchoziSmer !== null && k.smer !== predchoziSmer) zmenySmeru++;
+      predchoziSmer = k.smer;
+    }
+
+    var ruznychBeden = Object.keys(identity).length;
+
+    /* Bedna, se kterou se za celé řešení nehne, je stejná jako bedna,
+       která na desce není — úloha je pak ve skutečnosti menší, než jak
+       vypadá. Takový stav se nebere vůbec. */
+    if (ruznychBeden < pocetBeden) return;
+
+    var naCili = 0;
+    for (i = 0; i < uzel.bedny.length; i++) {
+      if (cilePole.indexOf(uzel.bedny[i]) !== -1) naCili++;
+    }
+
+    var cena = uzel.hloubka * CENA_POSUN
+      + zmenySmeru * CENA_ZMENA_SMERU
+      + ruznychBeden * CENA_RUZNE_BEDNY
+      + naCili * CENA_NA_CILI;
+
+    var kandidat = {
+      bedny: uzel.bedny.slice(),
+      hrac: uzel.hracSkutecny,
+      posuny: uzel.hloubka,
+      zmenySmeru: zmenySmeru,
+      ruznychBeden: ruznychBeden,
+      naCili: naCili,
+      cena: cena
+    };
+
+    // vložení do krátkého setříděného seznamu nejlepších
+    var kam = nejlepsi.length;
+    while (kam > 0 && nejlepsi[kam - 1].cena < cena) kam--;
+    if (kam >= GEN_KANDIDATU) return;
+
+    nejlepsi.splice(kam, 0, kandidat);
+    if (nejlepsi.length > GEN_KANDIDATU) nejlepsi.pop();
+  }
+
+  /* ---------------------------------------------------------------
+     Ze stavu na textovou mapu
+     --------------------------------------------------------------- */
+  function stavNaMapu(mapa, cile, bedny, hrac) {
+    var radky = [];
+
+    for (var y = 0; y < mapa.vyska; y++) {
+      var radek = '';
+      for (var x = 0; x < mapa.sirka; x++) {
+        var i = y * mapa.sirka + x;
+        var jeCil = cile.indexOf(i) !== -1;
+        var jeBedna = bedny.indexOf(i) !== -1;
+
+        if (mapa.zdi[i]) radek += '#';
+        else if (i === hrac) radek += jeCil ? '+' : '@';
+        else if (jeBedna) radek += jeCil ? '*' : '$';
+        else radek += jeCil ? '.' : ' ';
+      }
+      radky.push(radek);
+    }
+
+    return radky;
+  }
+
+  /* ---------------------------------------------------------------
+     Protřídění
+
+     Úroveň je řešitelná z konstrukce, ale to samo nestačí. Musí být
+     dost dlouhá a musí mít strukturu: když se bedny dají uklidit
+     v libovolném pořadí a stejně krátce, není to úloha, jen několik
+     nezávislých bedýnek vedle sebe.
+     --------------------------------------------------------------- */
+  function vsechnyPermutace(n) {
+    var vysledek = [];
+
+    function krok(zbytek, sestaveno) {
+      if (!zbytek.length) { vysledek.push(sestaveno); return; }
+      for (var i = 0; i < zbytek.length; i++) {
+        krok(zbytek.slice(0, i).concat(zbytek.slice(i + 1)),
+             sestaveno.concat([zbytek[i]]));
+      }
+    }
+
+    var vse = [];
+    for (var i = 0; i < n; i++) vse.push(i);
+    krok(vse, []);
+
+    return vysledek;
+  }
+
+  /* Vrací true, když úroveň žádné pořadí nevynucuje — tedy když se
+     každé zkoušené svázané pořadí trefí do délky volného řešení.
+     Stačí jedno pořadí, které to nedokáže, a úroveň strukturu má;
+     na to se hned skáče ven.
+
+     Svázané hledání, které narazí na strop, se počítá jako „nedokázalo
+     to stejně krátce". Bezpečnější směr: úroveň se spíš nechá, než aby
+     se zahodila kvůli tomu, že na ni nebyl čas. */
+  function bezPoradi(L, volnePosuny) {
+    var permutace = vsechnyPermutace(L.bedny.length);
+
+    for (var i = 0; i < permutace.length; i++) {
+      var svazane = vyresVPoradi(L, permutace[i], GEN_LIMIT_PORADI);
+      if (svazane === null || svazane > volnePosuny) return false;
+    }
+
+    return true;
+  }
+
+  /* ---------------------------------------------------------------
+     Generování
+     --------------------------------------------------------------- */
+  function nahodneSemeno() {
+    return (Math.random() * 0x100000000) >>> 0;
+  }
+
+  function semenoNaText(semeno) {
+    return ('0000000' + (semeno >>> 0).toString(16)).slice(-8);
+  }
+
+  function textNaSemeno(text) {
+    var v = parseInt(String(text).trim().replace(/^0x/i, ''), 16);
+    return isFinite(v) ? (v >>> 0) : null;
+  }
+
+  /* Hlavní vstup. Vrací objekt s textovou mapou a s tím, co o úrovni
+     víme; null, když se v mezích nepodařilo nic sestavit.
+
+     Se stejným semínkem vyjde stejná úroveň — všechna náhoda teče
+     z generatorNahod. Časový strop je jen pojistka proti zamrznutí;
+     kdyby se do něj trefilo, přestala by být shoda zaručená. */
+  function generuj(obtiznost, semeno) {
+    var O = OBTIZNOSTI[obtiznost] || OBTIZNOSTI.stredni;
+    if (semeno === undefined || semeno === null) semeno = nahodneSemeno();
+    semeno = semeno >>> 0;
+
+    var nahoda = generatorNahod(semeno);
+    var zacatek = ted();
+    var pokusu = 0;
+    var zahozeno = { mapa: 0, melka: 0, kratke: 0, bezStruktury: 0, zadnyKandidat: 0 };
+
+    while (pokusu < GEN_MAX_POKUSU && ted() - zacatek < GEN_MAX_MS) {
+      pokusu++;
+
+      var mapa = nahodnaMapa(O, nahoda);
+      if (!mapa) { zahozeno.mapa++; continue; }
+
+      var cile = vyberCile(mapa, O.beden, nahoda, O.shlukCilu);
+      if (!cile) { zahozeno.mapa++; continue; }
+
+      // levné síto: nemá cenu táhnout na mapě, kde ani v nejlepším
+      // případě není na požadovaný počet tlačení dost místa
+      if (odhadNejvetsiHloubky(mapa, cile) < O.minPosunu) {
+        zahozeno.melka++;
+        continue;
+      }
+
+      var kandidati = tahniZpatky(mapa, cile, O.limitStavu);
+      if (!kandidati.length) { zahozeno.zadnyKandidat++; continue; }
+
+      for (var k = 0; k < kandidati.length; k++) {
+        var kand = kandidati[k];
+        if (kand.posuny < O.minPosunu) { zahozeno.kratke++; continue; }
+
+        var radky = stavNaMapu(mapa, cile, kand.bedny, kand.hrac);
+        var L = nactiUroven({ nazev: 'náhodná', mapa: radky });
+
+        // Řešič z etapy 2 má poslední slovo — konstrukce sice
+        // řešitelnost slibuje, ale slib není důkaz.
+        var reseni = vyresPodrobne(L);
+        if (reseni.duvod !== 'reseno') { zahozeno.zadnyKandidat++; continue; }
+        if (reseni.posuny < O.minPosunu) { zahozeno.kratke++; continue; }
+
+        if (bezPoradi(L, reseni.posuny)) { zahozeno.bezStruktury++; continue; }
+
+        var vnitrnich = (O.sirka - 2) * (O.vyska - 2);
+
+        return {
+          obtiznost: O.id,
+          nazev: 'Náhodná — ' + O.nazev,
+          semeno: semeno,
+          semenoText: semenoNaText(semeno),
+          mapa: radky,
+          text: radky.join('\n'),
+          beden: O.beden,
+          posuny: reseni.posuny,
+          tahy: reseni.tahy,
+          cena: Math.round(kand.cena * 10) / 10,
+          zmenySmeru: kand.zmenySmeru,
+          naCili: kand.naCili,
+          podilZdi: Math.round((1 - mapa.volna.length / vnitrnich) * 100) / 100,
+          pokusu: pokusu,
+          zahozeno: zahozeno,
+          cas: Math.round((ted() - zacatek) * 10) / 10
+        };
+      }
+
+      zahozeno.kratke++;
+    }
+
+    return null;
+  }
+
+  window.sokobanGenerator = {
+    generuj: generuj,
+    OBTIZNOSTI: OBTIZNOSTI,
+    generatorNahod: generatorNahod,
+    semenoNaText: semenoNaText,
+    textNaSemeno: textNaSemeno
+  };
+
+  /* ---------------------------------------------------------------
+     Testy do konzole
+
+     Nevolají se samy — do konzole při každém načtení hry nic patřit
+     nemá. Spustí se z konzole jako sokobanTesty().
+     --------------------------------------------------------------- */
+
+  /* Kontrola, že vrácená posloupnost opravdu vede k výhře: odehraje
+     se od výchozí pozice a na konci musí každá bedna stát na cíli.
+     Řešič, který si výsledek jen spočítá a nikdo ho neodehraje, se
+     mýlí tiše. */
+  function overRezeni(L, tlaceni) {
+    if (!tlaceni) return false;
+
+    var N = L.sirka * L.vyska;
+    var obsazeno = new Uint8Array(N);
+    var bedny = L.bedny.slice();
+    var hrac = L.hrac;
+    var i;
+
+    for (i = 0; i < bedny.length; i++) obsazeno[bedny[i]] = 1;
+
+    for (i = 0; i < tlaceni.length; i++) {
+      var t = tlaceni[i];
+      var zad = posunV(L, t.z, SMERY[OPACNY[t.smer]]);
+
+      // hráč se musí mít jak dostat za bednu a pole před ní musí být volné
+      if (zad < 0 || L.zdi[zad] || obsazeno[zad]) return false;
+      if (!cestaHrace(L, obsazeno, hrac, zad)) return false;
+      if (posunV(L, t.z, SMERY[t.smer]) !== t.na) return false;
+      if (t.na < 0 || L.zdi[t.na] || obsazeno[t.na]) return false;
+
+      var kde = bedny.indexOf(t.z);
+      if (kde === -1) return false;
+      bedny[kde] = t.na;
+      obsazeno[t.z] = 0;
+      obsazeno[t.na] = 1;
+      hrac = t.z;
+    }
+
+    for (i = 0; i < bedny.length; i++) if (!L.cile[bedny[i]]) return false;
+    return true;
+  }
+
+  /* Úrovně jen pro testy — do hry nepatří, tak nejsou v UROVNE. */
+  var TESTOVACI = {
+    rohMimoCil: {
+      nazev: 'bedna v rohu',
+      mapa: [
+        '######',
+        '#$   #',
+        '#  @ #',
+        '#   .#',
+        '######'
+      ]
+    },
+    uZdiBezCile: {
+      nazev: 'bedna u zdi bez cíle',
+      mapa: [
+        '########',
+        '#  $   #',
+        '#  @   #',
+        '#      #',
+        '#.     #',
+        '########'
+      ]
+    },
+    sestBeden: {
+      nazev: 'šest beden',
+      mapa: [
+        '##########',
+        '#  ####  #',
+        '# $....$ #',
+        '#  $..$  #',
+        '# $    $ #',
+        '#   @    #',
+        '##########'
+      ]
+    }
+  };
+
+  window.sokobanTesty = function () {
+    var i, v, L;
+
+    console.log('--- 1. Deset zabudovaných úrovní ---');
+    var radky = [];
+    var vsechnyOk = true;
+
+    for (i = 0; i < UROVNE.length; i++) {
+      L = nactiUroven(UROVNE[i]);
+      v = vyresPodrobne(L);
+      var sedi = v.duvod === 'reseno' && overRezeni(L, v.tlaceni);
+      if (!sedi) vsechnyOk = false;
+
+      radky.push({
+        '#': i + 1,
+        'úroveň': UROVNE[i].nazev,
+        'beden': L.bedny.length,
+        'tahy': v.tahy,
+        'posuny': v.posuny,
+        'stavů': v.stavu,
+        'čas [ms]': v.cas,
+        'odehráno': sedi ? 'ano' : v.duvod
+      });
+    }
+    console.table(radky);
+    console.log(vsechnyOk
+      ? 'Všech ' + UROVNE.length + ' vyřešeno a řešení odehráno do výhry.'
+      : 'POZOR: některá úroveň nevyšla.');
+
+    console.log('--- 2. Zjevně neřešitelné se mají poznat hned ---');
+    var slepe = [];
+    ['rohMimoCil', 'uZdiBezCile'].forEach(function (id) {
+      var u = TESTOVACI[id];
+      var r = vyresPodrobne(u);
+      slepe.push({
+        'úroveň': u.nazev,
+        'důvod': r.duvod,
+        'stavů': r.stavu,
+        'čas [ms]': r.cas,
+        'jeResitelna()': jeResitelna(u)
+      });
+    });
+    console.table(slepe);
+    console.log('Stavů má být 0 — mrtvé pole se pozná z tabulky, ne hledáním.');
+
+    console.log('--- 3. Šest beden ---');
+    L = nactiUroven(TESTOVACI.sestBeden);
+    var optimalni = vyresPodrobne(L);
+    var rychle = vyresPodrobne(L, { vaha: RESIC_VAHA_RYCHLE });
+    console.table([
+      {
+        'režim': 'A* (optimální)',
+        'tahy': optimalni.tahy, 'posuny': optimalni.posuny,
+        'stavů': optimalni.stavu, 'čas [ms]': optimalni.cas,
+        'odehráno': overRezeni(L, optimalni.tlaceni) ? 'ano' : optimalni.duvod
+      },
+      {
+        'režim': 'přetížený odhad (jen najít)',
+        'tahy': rychle.tahy, 'posuny': rychle.posuny,
+        'stavů': rychle.stavu, 'čas [ms]': rychle.cas,
+        'odehráno': overRezeni(L, rychle.tlaceni) ? 'ano' : rychle.duvod
+      }
+    ]);
+
+    console.log('--- 4. Limit se má dodržet, ne zamrznout ---');
+    var utnuto = vyresPodrobne(TESTOVACI.sestBeden, { limitStavu: 50 });
+    console.log('limitStavu 50 →', utnuto.duvod, '|', utnuto.stavu, 'stavů,',
+                utnuto.cas, 'ms, tlaceni =', utnuto.tlaceni);
+
+    return 'hotovo';
+  };
+
+  /* Testy generátoru. Stojí zvlášť — trvají řádově déle než testy
+     řešiče a nemá smysl je pouštět pokaždé.
+
+     sokobanGenTesty()      // 20 úrovní od každé obtížnosti
+     sokobanGenTesty(3)     // rychlejší náhled */
+  window.sokobanGenTesty = function (kolik) {
+    kolik = kolik || 20;
+    var souhrn = [];
+    var vseOk = true;
+
+    OBTIZNOSTI_SEZNAM.forEach(function (id) {
+      var O = OBTIZNOSTI[id];
+      var casy = [], posuny = [], tahy = [], pokusy = [], ceny = [];
+      var zahozeno = { mapa: 0, melka: 0, kratke: 0, bezStruktury: 0, zadnyKandidat: 0 };
+      var selhalo = 0, neresitelnych = 0, kratkych = 0, hloubkaSedi = 0;
+
+      for (var i = 0; i < kolik; i++) {
+        var u = generuj(id);
+        if (!u) { selhalo++; vseOk = false; continue; }
+
+        // každou úroveň nezávisle prožene řešič
+        var L = nactiUroven({ nazev: u.nazev, mapa: u.mapa });
+        var r = vyresPodrobne(L);
+
+        if (r.duvod !== 'reseno' || !overRezeni(L, r.tlaceni)) {
+          neresitelnych++; vseOk = false;
+        }
+        if (r.posuny < O.minPosunu) { kratkych++; vseOk = false; }
+        if (r.posuny === u.posuny) hloubkaSedi++;
+
+        casy.push(u.cas);
+        posuny.push(r.posuny);
+        tahy.push(r.tahy);
+        pokusy.push(u.pokusu);
+        ceny.push(u.cena);
+        Object.keys(zahozeno).forEach(function (k) { zahozeno[k] += u.zahozeno[k]; });
+      }
+
+      function prumer(pole) {
+        if (!pole.length) return null;
+        var s = 0;
+        for (var j = 0; j < pole.length; j++) s += pole[j];
+        return Math.round((s / pole.length) * 10) / 10;
+      }
+
+      souhrn.push({
+        'obtížnost': O.nazev,
+        'rozměr': O.sirka + '×' + O.vyska,
+        'beden': O.beden,
+        'min. tlačení': O.minPosunu,
+        'vygenerováno': kolik - selhalo,
+        'ø čas [ms]': prumer(casy),
+        'ø posunů': prumer(posuny),
+        'ø tahů': prumer(tahy),
+        'ø zahozeno': prumer(pokusy.map(function (p) { return p - 1; })),
+        'ø cena': prumer(ceny),
+        'neřešitelných': neresitelnych,
+        'pod mezí': kratkych,
+        'hloubka = řešič': hloubkaSedi + '/' + (kolik - selhalo)
+      });
+
+      console.log(O.nazev + ' — proč se pokusy zahazovaly:', zahozeno);
+    });
+
+    console.table(souhrn);
+
+    console.log('--- Semínko dává pokaždé tutéž úroveň ---');
+    var a = generuj('stredni', 12345);
+    var b = generuj('stredni', 12345);
+    var c = generuj('stredni', 12346);
+    console.log('stejné semínko →', a && b && a.text === b.text ? 'shodná úroveň' : 'ROZCHÁZÍ SE');
+    console.log('jiné semínko  →', a && c && a.text !== c.text ? 'jiná úroveň' : 'shodná (podezřelé)');
+    if (!a || !b || a.text !== b.text) vseOk = false;
+
+    console.log('--- Ukázka (střední, semínko 12345) ---');
+    if (a) {
+      console.log(a.text);
+      console.log(a.posuny + ' tlačení, ' + a.tahy + ' tahů, cena ' + a.cena
+        + ', zeď na ' + Math.round(a.podilZdi * 100) + ' % vnitřku');
+    }
+
+    console.log(vseOk ? 'Vše v pořádku.' : 'POZOR: něco nevyšlo, viz sloupce výš.');
+    return 'hotovo';
+  };
+
+  /* ---------------------------------------------------------------
+     Náhodná úroveň ve hře
+
+     Generování běží na hlavním vlákně a na těžké obtížnosti trvá
+     vteřiny — po tu dobu stránka nereaguje. Tlačítko se proto napřed
+     přepne do „Generuji…", nechá prohlížeč překreslit a teprve pak se
+     pustí do práce; jinak by hráč koukal na mrtvé okno, aniž by věděl
+     proč.
+     --------------------------------------------------------------- */
+  var elVolbaNahodna = document.getElementById('volba-nahodna');
+  var elSemenoRadek  = document.getElementById('semeno-radek');
+  var elSemenoPole   = document.getElementById('semeno-pole');
+  var elBtnSemeno    = document.getElementById('btn-semeno');
+
+  var generuje = false;
+
+  function postavVolbuNahodne() {
+    OBTIZNOSTI_SEZNAM.forEach(function (id) {
+      var O = OBTIZNOSTI[id];
+      var b = document.createElement('button');
+      b.type = 'button';
+      b.className = 'prepinac';
+      b.dataset.obtiznost = id;
+
+      var nazev = document.createElement('span');
+      nazev.className = 'prepinac__nazev';
+      nazev.textContent = O.nazev;
+
+      var detail = document.createElement('span');
+      detail.className = 'prepinac__detail';
+      detail.textContent = O.detail;
+
+      b.appendChild(nazev);
+      b.appendChild(detail);
+      elVolbaNahodna.appendChild(b);
+    });
+
+    elVolbaNahodna.addEventListener('click', function (e) {
+      var btn = e.target.closest('.prepinac');
+      if (!btn || generuje) return;
+      spustGenerovani(btn.dataset.obtiznost, null, btn);
+    });
+
+    elBtnSemeno.addEventListener('click', function () {
+      if (generuje) return;
+      var semeno = textNaSemeno(elSemenoPole.value);
+      if (semeno === null) { elSemenoPole.focus(); return; }
+
+      /* Obtížnost se bere z rozehrané náhodné úrovně, jinak ze střední:
+         semínko samo o sobě neříká, jak velká deska z něj má vzniknout. */
+      var vlastni = nactiVlastni();
+      var obtiznost = (vlastni && OBTIZNOSTI[vlastni.obtiznost])
+        ? vlastni.obtiznost : 'stredni';
+      spustGenerovani(obtiznost, semeno, null);
+    });
+
+    elSemenoPole.addEventListener('keydown', function (e) {
+      if (e.key === 'Enter') { e.preventDefault(); elBtnSemeno.click(); }
+    });
+  }
+
+  function ukazSemeno(semeno) {
+    elSemenoRadek.hidden = false;
+    elSemenoPole.value = semenoNaText(semeno);
+  }
+
+  function spustGenerovani(obtiznost, semeno, btn) {
+    generuje = true;
+    elVolbaNahodna.setAttribute('aria-disabled', 'true');
+    if (btn) btn.setAttribute('aria-busy', 'true');
+
+    elStav.className = 'stav';
+    elStav.textContent = 'Generuji ' + OBTIZNOSTI[obtiznost].nazev.toLowerCase()
+      + ' úroveň… stránka chvíli nereaguje.';
+
+    /* Odklad na příští snímek: bez něj se hláška výš nestihne vykreslit
+       a hledání zablokuje vlákno dřív, než by se ukázala. */
+    setTimeout(function () {
+      var uroven = null;
+      try {
+        uroven = generuj(obtiznost, semeno);
+      } finally {
+        generuje = false;
+        elVolbaNahodna.removeAttribute('aria-disabled');
+        if (btn) btn.removeAttribute('aria-busy');
+      }
+
+      if (!uroven) {
+        elStav.className = 'stav';
+        elStav.textContent = 'Úroveň se v limitu nepodařilo sestavit — zkus to znovu.';
+        return;
+      }
+
+      ulozVlastni(uroven);
+      zacniVlastni(uroven);
+    }, 40);
+  }
+
+  /* ---------------------------------------------------------------
+     Rozjezd
+     --------------------------------------------------------------- */
+  postavVyber();
+  postavVolbuNahodne();
+  /* Rozehraná úroveň se obnoví i tehdy, když to byla vygenerovaná —
+     ta se ukládá celá, takže se nemusí znovu hledat. Semínko se ukáže
+     vždycky, když nějaká vygenerovaná úroveň v úložišti leží: hráč se
+     tak k ní dostane i po přepnutí na zabudovanou. */
+  (function obnovStav() {
+    var vlastni = nactiVlastni();
+    if (vlastni) ukazSemeno(vlastni.semeno);
+
+    var kde = nactiUlozenouUroven();
+    if (kde === 'vlastni' && vlastni) zacniVlastni(vlastni);
+    else zacniUroven(typeof kde === 'number' ? kde : 0);
+  })();
+})();
+</script>
+</body>
+</html>

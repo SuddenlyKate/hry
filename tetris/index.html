@@ -1,0 +1,2214 @@
+<!DOCTYPE html>
+<html lang="cs">
+<head>
+  <meta charset="utf-8">
+  <meta name="viewport"
+        content="width=device-width, initial-scale=1, maximum-scale=1, user-scalable=no, viewport-fit=cover">
+  <title>Tetris — Hry v prohlížeči</title>
+  <!-- Pojistka pro případ, že se sdílený styl nenačte (jiný server,
+       špatný MIME typ, offline). Stránka pak není holý bílý dokument. -->
+  <style>
+    :root {
+      --bg:   #0f1115;
+      --text: #e6e9ef;
+      --font: system-ui, -apple-system, "Segoe UI", Roboto, "Helvetica Neue", Arial, sans-serif;
+    }
+    html { color-scheme: dark; background: #0f1115; }
+    body {
+      margin: 0;
+      background: var(--bg);
+      color: var(--text);
+      font-family: var(--font);
+    }
+  </style>
+  <link rel="stylesheet" href="../shared/style.css">
+  <style>
+    /* Barvy tetromin podle Guideline. Odstíny jsou proti předpisu
+       ztlumené: čisté #00FF00 nebo #0000FF na tmavém podkladu září
+       a modrá se navíc mizerně čte. Odstín každé barvy ale zůstává,
+       takže kus poznáš stejně jako v každém jiném Tetrisu.
+
+       Do sdílené palety nepatří, tak sedí tady — JS si je vyzvedne
+       stejnou cestou jako had. */
+    :root {
+      --kus-i: #22d3ee;   /* tyrkysový */
+      --kus-o: #eab308;   /* žlutý */
+      --kus-t: #a855f7;   /* fialový */
+      --kus-s: #4ade80;   /* zelený */
+      --kus-z: #ef4444;   /* červený */
+      --kus-j: #3b82f6;   /* modrý */
+      --kus-l: #f97316;   /* oranžový */
+
+      /* Mřížka prázdné desky. Musí být znát, ať je vidět, kam kus
+         zapadne, ale nesmí přebít samotné kusy. */
+      --mrizka: #191d26;
+    }
+
+    /* Na herní stránce nechceme přiblížení dvojklikem ani tažení
+       stránky pod prstem. */
+    html, body {
+      overscroll-behavior: none;
+      -webkit-text-size-adjust: 100%;
+    }
+
+    /* Pruh na posuvník je rezervovaný pořád, i když stránka zrovna
+       rolovat nejde — jinak by se šířka stránky měnila a plocha
+       by při každém startu poskočila. */
+    html {
+      scrollbar-gutter: stable;
+    }
+
+    /* Herní stránka je užší než rozcestník a drží se uprostřed. */
+    .wrap {
+      max-width: 720px;
+      margin-inline: auto;
+    }
+
+    main {
+      display: flex;
+      flex-direction: column;
+      align-items: center;
+      touch-action: manipulation;     /* zabije double-tap zoom */
+      user-select: none;
+      -webkit-user-select: none;
+      -webkit-touch-callout: none;
+    }
+
+    /* Sloupec hry — šířku určuje řádek s plochou, takže se HUD
+       i legenda zarovnají na jeho levý okraj. */
+    .hra {
+      display: flex;
+      flex-direction: column;
+      width: fit-content;
+    }
+
+    /* HUD nad plochou.
+
+       Mřížka s pevnými sloupci, ne volný text s mezerami: každý údaj
+       má vlastní sloupec, takže přibývající cifra skóre neposune
+       sousedy do stran. Sloupce drží šířku díky min-width na číslech
+       níž — max-content se pak nemá podle čeho měnit. */
+    .hud {
+      display: grid;
+      grid-template-columns: repeat(5, max-content);
+      gap: 0.3rem 1.5rem;
+      margin-bottom: 0.75rem;
+      font-family: var(--font-mono);
+      font-variant-numeric: tabular-nums;   /* pojistka, kdyby --font-mono
+                                               spadlo na náhradní písmo */
+      font-size: 0.9rem;
+      color: var(--text-dim);
+    }
+
+    /* Na úzkém displeji by pět sloupců přeteklo, tak tři a dva.
+       Tři, ne dva: pět položek by se do dvou sloupců vešlo až na tři
+       řádky a HUD by ukrojil výšku ploše. */
+    @media (max-width: 600px) {
+      .hud {
+        grid-template-columns: repeat(3, max-content);
+        gap: 0.3rem 1rem;
+      }
+    }
+
+    .hud__cislo {
+      display: inline-block;
+      text-align: right;
+      color: var(--text);
+      font-weight: 600;
+    }
+
+    /* Šířka podle nejdelší hodnoty, jaká může padnout. Skóre roste
+       do statisíců, řádky a úroveň zůstanou u tří cifer. */
+    .hud__cislo--skore,
+    .hud__cislo--rekord { min-width: 6ch; }
+
+    .hud__cislo--radky,
+    .hud__cislo--uroven { min-width: 3ch; }
+
+    /* Kolik řádků zbývá do další úrovně. Sedí ve stejné buňce jako
+       úroveň, aby HUD zůstal na pěti sloupcích, a je potlačené —
+       je to doplněk k číslu vedle, ne šestý údaj. */
+    .hud__zbyva {
+      margin-left: 0.4rem;
+      color: var(--text-dim);
+      font-size: 0.85em;
+    }
+
+    .hud__cislo--zbyva {
+      min-width: 2ch;
+      color: inherit;
+      font-weight: 400;
+    }
+
+    /* Na úzkém displeji se doplněk zalomí pod úroveň. Vedle ní je
+       nejširší buňka HUDu a řádek Skóre–Úroveň–Řádky by se na telefon
+       nevešel; takhle stojí HUD o řádek víc, ale nic nepřetéká. */
+    @media (max-width: 600px) {
+      .hud__zbyva {
+        display: block;
+        margin-left: 0;
+      }
+    }
+
+    /* Řetěz se neschovává přes display, ale přes visibility: buňka si
+       tak drží místo v mřížce a HUD při jeho naskočení nepodskočí.
+       Skrytý prvek navíc vypadne i z přístupnostního stromu, takže
+       ho čtečka nepřečte, dokud řetěz neběží. */
+    .hud__retez {
+      visibility: hidden;
+      color: var(--accent);
+    }
+
+    .hud__retez strong {
+      color: var(--accent);
+      font-weight: 700;
+    }
+
+    .hud__retez.je-videt {
+      visibility: visible;
+    }
+
+    /* Plocha a panel s frontou vedle sebe. Panel zůstává vpravo
+       i na telefonu: deska je deset sloupců široká a náhled jen něco
+       přes čtyři, takže se dvojice vejde i na úzký displej — a hlavně
+       se rozvržení mezi telefonem a stolním počítačem nemění. */
+    .plocha-radek {
+      display: flex;
+      align-items: flex-start;
+      gap: 0.75rem;
+      align-self: center;
+    }
+
+    /* Rám obepne plátno. align-self je tu podstatné: obal je flex
+       položka, takže by se bez něj natáhl na výšku panelu a pod
+       plochou by v rámu zbyl pruh pozadí. flex: none brání smrštění:
+       rozměry plátna počítá JS a rozvržení do nich mluvit nesmí. */
+    .plocha-obal {
+      position: relative;
+      align-self: flex-start;
+      flex: none;
+      border: 1px solid var(--border);
+      border-radius: var(--radius-sm);
+      overflow: hidden;
+      background: var(--board);
+      line-height: 0;                 /* ať pod canvasem nezůstane mezera */
+    }
+
+    canvas {
+      display: block;
+      background: var(--board);
+      /* rozměry nastavuje JS podle okna a devicePixelRatio */
+    }
+
+    /* Panel s frontou. Šířku mu dává plátno uvnitř, takže se zmenší
+       spolu s plochou — pevná šířka v pixelech by na telefonu ukrojila
+       desce místo. */
+    .panel {
+      flex: none;
+      padding: 0.6rem;
+      border: 1px solid var(--border);
+      border-radius: var(--radius-sm);
+      background: var(--bg-elev);
+      line-height: 0;
+    }
+
+    .panel__nadpis {
+      margin: 0 0 0.45rem;
+      font-size: 0.72rem;
+      font-weight: 600;
+      line-height: 1.2;
+      letter-spacing: 0.06em;
+      text-transform: uppercase;
+      color: var(--text-dim);
+    }
+
+    .panel canvas {
+      background: none;   /* panel má vlastní podklad, plátno je průhledné */
+    }
+
+    /* Hláška o T-spinu. Leží nad plochou, ale nesmí spolknout kliknutí
+       určené tlačítku v překrytí pod ní — proto pointer-events: none.
+       Sedí v horní třetině, ať nepřekrývá místo, kde kus zrovna zapadl. */
+    .hlaska {
+      position: absolute;
+      top: 18%;
+      left: 0;
+      right: 0;
+      display: flex;
+      flex-direction: column;
+      align-items: center;
+      gap: 0.1rem;
+      pointer-events: none;
+      text-align: center;
+      line-height: 1.2;
+      opacity: 0;
+      transition: opacity 0.25s ease, transform 0.25s ease;
+      transform: translateY(0.4rem);
+    }
+
+    .hlaska.je-videt {
+      opacity: 1;
+      transform: translateY(0);
+    }
+
+    .hlaska__nadpis {
+      font-size: clamp(1rem, 4.5vw, 1.25rem);
+      font-weight: 700;
+      letter-spacing: 0.02em;
+      color: var(--kus-t);
+      text-shadow: 0 0.05em 0.35em rgba(0, 0, 0, 0.85);
+    }
+
+    .hlaska__body {
+      font-family: var(--font-mono);
+      font-size: 0.9rem;
+      font-weight: 600;
+      color: var(--text);
+      text-shadow: 0 0.05em 0.35em rgba(0, 0, 0, 0.85);
+    }
+
+    /* Jediné překrytí pro všechny stavy. Mění se jen texty a třída,
+       prvky uvnitř zůstávají. Pozadí je neprůhledné, aby přes ně
+       nebyla vidět rozehraná deska — v pauze by to bylo schovávání
+       zadarmo. */
+    .overlay {
+      position: absolute;
+      inset: 0;
+      display: none;
+      flex-direction: column;
+      align-items: center;
+      justify-content: center;
+      gap: 0.7rem;
+      padding: 0.9rem;
+      text-align: center;
+      line-height: 1.5;
+      background: var(--board);
+      overflow-y: auto;
+    }
+
+    .overlay.je-videt {
+      display: flex;
+    }
+
+    .overlay h2 {
+      margin: 0;
+      font-size: clamp(1.2rem, 5vw, 1.6rem);
+      letter-spacing: -0.01em;
+    }
+
+    .overlay__skore {
+      margin: 0;
+      font-family: var(--font-mono);
+      font-size: 1rem;
+      color: var(--text);
+    }
+
+    /* Řádek statistiky pod skóre — tlumenější, je to doplněk. */
+    .overlay__staty {
+      margin: -0.4rem 0 0;
+      font-family: var(--font-mono);
+      font-size: 0.85rem;
+      color: var(--text-dim);
+    }
+
+    .rekord {
+      margin: 0;
+      color: var(--accent);
+      font-weight: 600;
+    }
+
+    .je-skryte {
+      display: none;
+    }
+
+    /* ---------- dotykové ovládání ----------
+
+       Tetris se bez kláves neobejde, takže na dotyku musí být
+       tlačítka — jinak by se hra na telefonu nedala hrát vůbec.
+       Skrytá všude, kde ukazatel není hrubý: na myši by jen
+       ukrajovala výšku ploše. */
+    .pad {
+      display: none;
+    }
+
+    @media (pointer: coarse) {
+      .pad {
+        display: grid;
+        /* 56px je spodní hranice pro pohodlný zásah palcem. Přes max()
+           drží i tehdy, když si uživatel zmenší výchozí písmo. */
+        grid-template-columns: repeat(3, max(3.5rem, 56px));
+        grid-auto-rows: max(3.5rem, 56px);
+        gap: 0.6rem;
+        align-self: center;
+        margin-top: 0.8rem;
+      }
+    }
+
+    /* Prostřední řada otáčí a pokládá, spodní posouvá. Dělí se podle
+       významu, ne podle tvaru šipek: pohyb je pod prsty pohromadě
+       a nedá se splést s rotací. Držení je nahoře přes celou šířku —
+       je to nejvzácnější akce a takhle si nesedne pod palec, který
+       míří na rotaci. */
+    .pad__btn--drzet      { grid-column: 1 / -1; grid-row: 1; }
+    .pad__btn--rot-vlevo  { grid-column: 1; grid-row: 2; }
+    .pad__btn--pad        { grid-column: 2; grid-row: 2; }
+    .pad__btn--rot-vpravo { grid-column: 3; grid-row: 2; }
+    .pad__btn--vlevo      { grid-column: 1; grid-row: 3; }
+    .pad__btn--dolu       { grid-column: 2; grid-row: 3; }
+    .pad__btn--vpravo     { grid-column: 3; grid-row: 3; }
+
+    /* Držení nese slovo, ne značku — na rozdíl od šipek pro ni není
+       ustálený symbol, který by se dal uhodnout. */
+    .pad__btn--drzet {
+      font-size: 0.95rem;
+    }
+
+    .pad__btn {
+      display: flex;
+      align-items: center;
+      justify-content: center;
+      border: 1px solid var(--border);
+      border-radius: var(--radius-sm);
+      background: var(--bg-elev);
+      color: var(--text-dim);
+      font: inherit;
+      font-size: 1.35rem;
+      line-height: 1;
+      cursor: pointer;
+      touch-action: manipulation;     /* žádné přiblížení dvojklikem */
+    }
+
+    /* Odezva na stisk musí být vidět hned — tlačítko zabírá už při
+       pointerdown, ne až po zvednutí prstu. Třídu drží JS u tlačítek,
+       která se dají podržet (posun, měkký pád). */
+    .pad__btn:active,
+    .pad__btn.je-drzene {
+      background: var(--accent-soft);
+      border-color: var(--accent);
+      color: var(--accent);
+    }
+
+    /* Nastavení pod plochou. Zatím jediná volba, ale řádek je stavěný
+       jako u ostatních her — popis vlevo, přepínač vedle. */
+    .nastaveni {
+      display: flex;
+      align-items: center;
+      flex-wrap: wrap;
+      gap: 0.5rem 0.7rem;
+      margin-top: 0.9rem;
+      font-size: 0.85rem;
+    }
+
+    .nastaveni__popis {
+      color: var(--text-dim);
+    }
+
+    .prepinac {
+      padding: 0.3rem 0.75rem;
+      border: 1px solid var(--border);
+      border-radius: var(--radius-sm);
+      background: var(--bg-elev);
+      color: var(--text-dim);
+      font: inherit;
+      font-size: 0.78rem;
+      font-weight: 600;
+      line-height: 1.3;
+      cursor: pointer;
+      touch-action: manipulation;
+      transition: background 0.15s ease, border-color 0.15s ease, color 0.15s ease;
+    }
+
+    .prepinac:hover {
+      background: var(--bg-elev-hover);
+      border-color: var(--border-hover);
+      color: var(--text);
+    }
+
+    /* Zapnuto — jiná barva, rám i výplň, ne jen odstín textu. */
+    .prepinac[aria-pressed="true"] {
+      background: var(--accent-soft);
+      border-color: var(--accent);
+      color: var(--accent);
+    }
+
+    /* Legenda ovládání pod plochou. Sloupec kláves má šířku podle
+       nejširšího řádku, takže popisy začínají všechny na stejné ose. */
+    .ovladani {
+      display: grid;
+      grid-template-columns: max-content 1fr;
+      gap: 0.35rem 0.9rem;
+      align-items: center;
+      margin: 0.9rem 0 0;
+      font-size: 0.85rem;
+    }
+
+    .ovladani dt {
+      justify-self: start;
+      display: flex;
+      gap: 0.15rem;
+      align-items: center;
+      flex-wrap: wrap;
+    }
+
+    .ovladani dd {
+      justify-self: start;
+      margin: 0;
+      color: var(--text-dim);
+    }
+
+    .ovladani kbd {
+      padding: 0.1rem 0.35rem;
+      border: 1px solid var(--border-hover);
+      border-radius: 4px;
+      background: var(--bg-elev);
+      font-family: var(--font-mono);
+      font-size: 0.9em;
+      line-height: 1.4;
+      color: var(--text);
+    }
+
+    .dotyk {
+      margin: 0.6rem 0 0;
+      max-width: 40ch;
+      color: var(--text-dim);
+      font-size: 0.85rem;
+    }
+
+    /* nenápadné tlačítko pod legendou — nemá vypadat jako akce hry */
+    .smazat {
+      align-self: flex-start;   /* jinak by se v .hra roztáhlo na plnou šířku */
+      margin-top: 1rem;
+      padding: 0;
+      border: 0;
+      background: none;
+      color: var(--text-dim);
+      font: inherit;
+      font-size: 0.78rem;
+      text-decoration: underline;
+      text-underline-offset: 3px;
+      cursor: pointer;
+    }
+
+    .smazat:hover,
+    .smazat:focus-visible {
+      color: var(--danger);
+    }
+
+    /* touch-action se nedědí, takže ho každý ovládací prvek potřebuje
+       vlastní — jinak dvojklik na tlačítko stránku přiblíží. */
+    .btn,
+    .smazat {
+      touch-action: manipulation;
+    }
+  </style>
+</head>
+<body>
+  <div class="wrap">
+
+    <a class="back-link" href="../">← Zpět na rozcestník</a>
+
+    <header class="site-header">
+      <h1>Tetris</h1>
+      <p>Skládej padající kostky do plných řádků.</p>
+    </header>
+
+    <main>
+      <div class="hra" id="hra">
+        <div class="hud">
+          <span>Skóre: <strong class="hud__cislo hud__cislo--skore" id="hud-skore">0</strong></span>
+          <span>Úroveň: <strong class="hud__cislo hud__cislo--uroven" id="hud-uroven">1</strong><span
+                class="hud__zbyva">(<strong class="hud__cislo hud__cislo--zbyva" id="hud-zbyva">10</strong> do další)</span></span>
+          <span>Řádky: <strong class="hud__cislo hud__cislo--radky" id="hud-radky">0</strong></span>
+          <span>Rekord: <strong class="hud__cislo hud__cislo--rekord" id="hud-rekord">0</strong></span>
+
+          <!-- Řetěz svítí, jen když běží. Buňka v mřížce zůstává i tak,
+               takže se HUD při jeho naskočení nehne. -->
+          <span class="hud__retez" id="hud-retez">Řetěz: <strong>×1,5</strong></span>
+        </div>
+
+        <div class="plocha-radek" id="plocha-radek">
+          <aside class="panel">
+            <h2 class="panel__nadpis">Držení</h2>
+            <canvas id="drzeni"></canvas>
+          </aside>
+
+          <div class="plocha-obal" id="plocha-obal">
+            <canvas id="plocha"></canvas>
+
+            <!-- Hláška o T-spinu. Leží nad plochou, ale pod překrytím,
+                 a nesmí brát kliknutí tlačítku pod sebou. -->
+            <div class="hlaska" id="hlaska" aria-live="polite">
+              <strong class="hlaska__nadpis" id="hlaska-nadpis"></strong>
+              <span class="hlaska__body je-skryte" id="hlaska-body"></span>
+            </div>
+
+            <!-- Jedno překrytí pro všechny stavy; JS mění jen texty
+                 a třídu je-videt, prvky zůstávají na místě. -->
+            <div class="overlay je-videt" id="prekryti">
+              <h2 id="prekryti-nadpis">Tetris</h2>
+              <p class="overlay__skore je-skryte" id="prekryti-skore">Skóre: <strong id="prekryti-skore-hodnota">0</strong></p>
+              <p class="overlay__staty je-skryte" id="prekryti-retez">Nejdelší řetěz: <strong id="prekryti-retez-hodnota">0</strong></p>
+              <p class="rekord je-skryte" id="prekryti-rekord">Nový rekord!</p>
+              <button class="btn btn--primary" id="prekryti-btn" type="button">Hrát</button>
+            </div>
+          </div>
+
+          <aside class="panel">
+            <h2 class="panel__nadpis">Další</h2>
+            <canvas id="fronta"></canvas>
+          </aside>
+        </div>
+
+        <!-- Dotyková tlačítka. Skrytá v CSS všude, kde ukazatel není
+             hrubý. Posun a měkký pád se dají držet, ostatní reagují
+             na jeden stisk. -->
+        <div class="pad" id="pad" role="group" aria-label="Ovládání">
+          <button class="pad__btn pad__btn--drzet" type="button"
+                  data-akce="drzet" aria-label="Odložit kus stranou">držet</button>
+          <button class="pad__btn pad__btn--rot-vlevo" type="button"
+                  data-akce="rot-vlevo" aria-label="Otočit doleva">⟲</button>
+          <button class="pad__btn pad__btn--pad" type="button"
+                  data-akce="pad" aria-label="Rychle položit">⤓</button>
+          <button class="pad__btn pad__btn--rot-vpravo" type="button"
+                  data-akce="rot-vpravo" aria-label="Otočit doprava">⟳</button>
+          <button class="pad__btn pad__btn--vlevo" type="button"
+                  data-akce="vlevo" aria-label="Doleva">←</button>
+          <button class="pad__btn pad__btn--dolu" type="button"
+                  data-akce="dolu" aria-label="Dolů">↓</button>
+          <button class="pad__btn pad__btn--vpravo" type="button"
+                  data-akce="vpravo" aria-label="Doprava">→</button>
+        </div>
+
+        <!-- Nastavení stojí mimo překrytí, takže se dá přepnout i za hry. -->
+        <div class="nastaveni">
+          <span class="nastaveni__popis" id="popis-duch">Duch</span>
+          <button class="prepinac" id="volba-duch" type="button"
+                  aria-pressed="true" aria-labelledby="popis-duch volba-duch">Zapnutý</button>
+        </div>
+
+        <dl class="ovladani">
+          <dt><kbd>←</kbd><kbd>→</kbd></dt>
+          <dd>posun do stran</dd>
+          <dt><kbd>↓</kbd></dt>
+          <dd>zrychlit pád</dd>
+          <dt><kbd>↑</kbd><kbd>X</kbd>&nbsp;&nbsp;<kbd>Z</kbd><kbd>Ctrl</kbd></dt>
+          <dd>otočit doprava / doleva</dd>
+          <dt><kbd>mezerník</kbd></dt>
+          <dd>položit kus rovnou dolů</dd>
+          <dt><kbd>C</kbd><kbd>Shift</kbd></dt>
+          <dd>odložit kus stranou (jednou za kus)</dd>
+          <dt><kbd>P</kbd><kbd>Esc</kbd></dt>
+          <dd>pauza</dd>
+        </dl>
+
+        <p class="dotyk">Na dotykových zařízeních ovládej tlačítky pod plochou. Šipky do stran a dolů se dají držet.</p>
+
+        <button class="smazat" id="btn-smazat" type="button">Vymazat rekord</button>
+      </div>
+    </main>
+
+  </div>
+
+<script>
+(function () {
+  'use strict';
+
+  /* ---------------------------------------------------------------
+     Deska.
+
+     10 sloupců, 20 viditelných řádků a nad nimi 20 skrytých. Kusy se
+     rodí ve skryté části, takže je nad plochou vždycky místo — deska
+     je jedno pole o 40 řádcích a kreslí se z něj jen spodních 20.
+
+     Souřadnice: y = 0 je nejvyšší skrytý řádek, y = 20 první viditelný,
+     y = 39 dno. Skrytá část je nahoře, aby indexy rostly směrem dolů
+     stejně jako na plátně.
+     --------------------------------------------------------------- */
+  var SLOUPCU   = 10;
+  var VIDITELNE = 20;
+  var SKRYTE    = 20;
+  var RADKU     = VIDITELNE + SKRYTE;
+
+  var CELL_MIN = 12;             // pod tím už je hra nečitelná
+  var CELL_MAX = 30;             // nad tím zbytečně velká na desktopu
+  var REZERVA  = 24;             // ať se plocha nelepí na spodek okna
+
+  // Náhled vedle plochy: velikost buňky vůči herní a kolik kusů dopředu.
+  var NAHLED_PODIL = 0.55;
+  var FRONTA_DELKA = 5;
+
+  /* Zamykání. Po dopadu má hráč půl vteřiny na doladění; časovač se
+     vynuluje po každém úspěšném pohybu i rotaci, ale nejvýš patnáctkrát
+     na jeden kus — jinak by se dal kus u dna držet donekonečna.
+     Počítadlo se navíc nuluje, když kus klesne níž, než kde už byl:
+     to je skutečný postup dolů, ne zdržování. */
+  var LOCK_MS         = 500;
+  var LOCK_RESETU_MAX = 15;
+
+  /* Automatické opakování posunu do stran (DAS/ARR podle Guideline).
+     Bez něj by se muselo spoléhat na opakování kláves z operačního
+     systému: první opakování přijde až po půl vteřině a rychlost si
+     hráč nastavit nemůže. */
+  var DAS_MS = 170;              // prodleva před opakováním
+  var ARR_MS = 45;               // perioda opakování
+
+  /* Bodování podle Guideline. Za smazané řádky se platí podle toho,
+     kolik jich padlo naráz — čtyři naráz vynesou víc než čtyřikrát
+     jeden. Násobí se úrovní.
+
+     Pády se platí zvlášť: měkký pád bod za řádek, rychlý dva. Je to
+     odměna za to, že hráč nečeká na gravitaci. */
+  var BODY_ZA_RADKY = [0, 100, 300, 500, 800];
+  var BODY_SOFT = 1;
+  var BODY_HARD = 2;
+
+  /* T-spin se platí jinou sazbou než obyčejné řádky — indexem je zase
+     počet smazaných řádků. Platí se i za T-spin, po kterém nezmizel
+     ani řádek: je to odměna za samotné zakroucení kusu do díry.
+
+     Mini nad dva řádky ze své geometrie nejde, takže tabulka končí
+     u dvojky; kdyby takový případ přece jen nastal, spadne se na
+     běžnou sazbu, ať se za víc řádků nikdy neplatí míň. */
+  var BODY_TSPIN      = [400, 800, 1200, 1600];
+  var BODY_TSPIN_MINI = [100, 200, 400];
+
+  /* Back-to-back: dvě těžká smazání za sebou bez obyčejného mezi nimi.
+     Těžké je tetris a každý T-spin, po kterém zmizel aspoň jeden
+     řádek. Bonus dostává až to druhé a každé další v řadě. */
+  var B2B_NASOBITEL = 1.5;
+
+  var RADKU_NA_UROVEN = 10;
+
+  /* Strop platí jen pro rychlost, ne pro číslo úrovně. Na patnácté je
+     pád 7 ms na řádek, tedy rychlejší než jeden snímek — kus proletí
+     celou desku dřív, než se stihne vykreslit, a zrychlovat výš nemá
+     co. Hra se od té chvíle drží jen na lock delay.
+
+     Úroveň sama roste dál: je v ní násobitel skóre a hráč po dvou
+     stech řádcích čeká, že HUD poskočí. Kdyby se zastavila taky,
+     vypadal by dlouhý zápas jako zaseknutý. */
+  var UROVEN_RYCHLOST_MAX = 15;
+
+  /* ---------------------------------------------------------------
+     Kusy.
+
+     Každý kus má čtyři rotační stavy vypsané jako seznam buněk, ne
+     jako matici, kterou by šlo otočit. Otáčení matice by dalo jiné
+     výsledky než SRS: kus se v ní podle předpisu neotáčí kolem svého
+     středu, ale kolem bodu, který u každého kusu leží jinde. Na to
+     navazuje tabulka kicků níž — váže se právě na dvojici výchozího
+     a cílového stavu.
+
+     Buňka je dvojice [x, y] uvnitř obálky kusu (4×4 pro I a O,
+     3×3 pro zbytek). Pořadí stavů je 0 → R → 2 → L, tedy po směru
+     hodinových ručiček.
+     --------------------------------------------------------------- */
+  var KUSY = {
+    I: {
+      barva: '--kus-i',
+      obalka: 4,
+      stavy: [
+        [[0, 1], [1, 1], [2, 1], [3, 1]],
+        [[2, 0], [2, 1], [2, 2], [2, 3]],
+        [[0, 2], [1, 2], [2, 2], [3, 2]],
+        [[1, 0], [1, 1], [1, 2], [1, 3]]
+      ]
+    },
+    /* O se neotáčí. Všechny čtyři stavy jsou schválně vypsané stejně,
+       ať se s ním pracuje jako s ostatními — rotace pak nikde nemusí
+       řešit výjimku. */
+    O: {
+      barva: '--kus-o',
+      obalka: 4,
+      stavy: [
+        [[1, 0], [2, 0], [1, 1], [2, 1]],
+        [[1, 0], [2, 0], [1, 1], [2, 1]],
+        [[1, 0], [2, 0], [1, 1], [2, 1]],
+        [[1, 0], [2, 0], [1, 1], [2, 1]]
+      ]
+    },
+    T: {
+      barva: '--kus-t',
+      obalka: 3,
+      stavy: [
+        [[1, 0], [0, 1], [1, 1], [2, 1]],
+        [[1, 0], [1, 1], [2, 1], [1, 2]],
+        [[0, 1], [1, 1], [2, 1], [1, 2]],
+        [[1, 0], [0, 1], [1, 1], [1, 2]]
+      ]
+    },
+    S: {
+      barva: '--kus-s',
+      obalka: 3,
+      stavy: [
+        [[1, 0], [2, 0], [0, 1], [1, 1]],
+        [[1, 0], [1, 1], [2, 1], [2, 2]],
+        [[1, 1], [2, 1], [0, 2], [1, 2]],
+        [[0, 0], [0, 1], [1, 1], [1, 2]]
+      ]
+    },
+    Z: {
+      barva: '--kus-z',
+      obalka: 3,
+      stavy: [
+        [[0, 0], [1, 0], [1, 1], [2, 1]],
+        [[2, 0], [1, 1], [2, 1], [1, 2]],
+        [[0, 1], [1, 1], [1, 2], [2, 2]],
+        [[1, 0], [0, 1], [1, 1], [0, 2]]
+      ]
+    },
+    J: {
+      barva: '--kus-j',
+      obalka: 3,
+      stavy: [
+        [[0, 0], [0, 1], [1, 1], [2, 1]],
+        [[1, 0], [2, 0], [1, 1], [1, 2]],
+        [[0, 1], [1, 1], [2, 1], [2, 2]],
+        [[1, 0], [1, 1], [0, 2], [1, 2]]
+      ]
+    },
+    L: {
+      barva: '--kus-l',
+      obalka: 3,
+      stavy: [
+        [[2, 0], [0, 1], [1, 1], [2, 1]],
+        [[1, 0], [1, 1], [1, 2], [2, 2]],
+        [[0, 1], [1, 1], [2, 1], [0, 2]],
+        [[0, 0], [1, 0], [1, 1], [1, 2]]
+      ]
+    }
+  };
+
+  var TYPY = ['I', 'O', 'T', 'S', 'Z', 'J', 'L'];
+
+  /* ---------------------------------------------------------------
+     Wall kicks podle SRS.
+
+     Rotace se nezkouší jen na místě: pro každý přechod mezi stavy je
+     pět posunů a bere se první, se kterým se kus vejde. Teprve když
+     neprojde ani jeden, rotace se neprovede. Díky tomu se kus otočí
+     i těsně u zdi, u jiného kusu nebo v úzké prohlubni — a právě
+     z toho žijí T-spiny.
+
+     Stavy se v předpisu značí 0, R, 2, L: výchozí, po otočení
+     doprava, o 180 stupňů a po otočení doleva. To je pořadí indexů
+     0, 1, 2, 3 v KUSY.stavy.
+
+     I má vlastní tabulku, protože se otáčí kolem jiného bodu než
+     ostatní. O se neotáčí, jeho čtyři stavy jsou stejné.
+
+     POZOR NA OSU Y. Čísla jsou opsaná z předpisu, kde +y míří NAHORU.
+     Deska tady má +y dolů, takže se svislá složka při použití otáčí —
+     děje se to na jediném místě v otoc() a je tam o tom poznámka.
+     Tabulka díky tomu zůstává znak po znaku porovnatelná s předpisem.
+     --------------------------------------------------------------- */
+  var KICKY = {
+    '0>R': [[0, 0], [-1, 0], [-1,  1], [0, -2], [-1, -2]],
+    'R>0': [[0, 0], [ 1, 0], [ 1, -1], [0,  2], [ 1,  2]],
+    'R>2': [[0, 0], [ 1, 0], [ 1, -1], [0,  2], [ 1,  2]],
+    '2>R': [[0, 0], [-1, 0], [-1,  1], [0, -2], [-1, -2]],
+    '2>L': [[0, 0], [ 1, 0], [ 1,  1], [0, -2], [ 1, -2]],
+    'L>2': [[0, 0], [-1, 0], [-1, -1], [0,  2], [-1,  2]],
+    'L>0': [[0, 0], [-1, 0], [-1, -1], [0,  2], [-1,  2]],
+    '0>L': [[0, 0], [ 1, 0], [ 1,  1], [0, -2], [ 1, -2]]
+  };
+
+  var KICKY_I = {
+    '0>R': [[0, 0], [-2, 0], [ 1, 0], [-2, -1], [ 1,  2]],
+    'R>0': [[0, 0], [ 2, 0], [-1, 0], [ 2,  1], [-1, -2]],
+    'R>2': [[0, 0], [-1, 0], [ 2, 0], [-1,  2], [ 2, -1]],
+    '2>R': [[0, 0], [ 1, 0], [-2, 0], [ 1, -2], [-2,  1]],
+    '2>L': [[0, 0], [ 2, 0], [-1, 0], [ 2,  1], [-1, -2]],
+    'L>2': [[0, 0], [-2, 0], [ 1, 0], [-2, -1], [ 1,  2]],
+    'L>0': [[0, 0], [ 1, 0], [-2, 0], [ 1, -2], [-2,  1]],
+    '0>L': [[0, 0], [-1, 0], [ 2, 0], [-1,  2], [ 2, -1]]
+  };
+
+  // O nemá kam uhnout — jeho stavy jsou shodné, takže stačí rotace na místě.
+  var KICKY_O = [[0, 0]];
+
+  var STAVY_JMENA = ['0', 'R', '2', 'L'];
+
+  function kicky(typ, z, na) {
+    if (typ === 'O') return KICKY_O;
+
+    var klic = STAVY_JMENA[z] + '>' + STAVY_JMENA[na];
+    return (typ === 'I' ? KICKY_I : KICKY)[klic];
+  }
+
+  /* Startovní pozice obálky. Vodorovně doprostřed se zaokrouhlením
+     doleva — u obou šířek obálky vyjde 3, takže tříbuňkové kusy
+     obsadí sloupce 3 až 5, I sloupce 3 až 6 a O sloupce 4 a 5.
+
+     Svisle tak, aby kus stál v posledních skrytých řádcích těsně nad
+     viditelnou plochou. Po vzniku zkusí Guideline kus hned posunout
+     o řádek dolů, takže hráč vidí, co přijelo, a nemusí čekat celý
+     interval gravitace. */
+  var SPAWN_X = 3;
+  var SPAWN_Y = SKRYTE - 2;
+
+  /* ---------------------------------------------------------------
+     Prvky stránky.
+     --------------------------------------------------------------- */
+  var canvas   = document.getElementById('plocha');
+  var ctx      = canvas.getContext('2d');
+  var nahled   = document.getElementById('fronta');
+  var nctx     = nahled.getContext('2d');
+  var drzeniEl = document.getElementById('drzeni');
+  var dctx     = drzeniEl.getContext('2d');
+
+  var main         = document.querySelector('main');
+  var hraEl        = document.getElementById('hra');
+  var obal         = document.getElementById('plocha-obal');
+  var radek        = document.getElementById('plocha-radek');
+  var panel        = nahled.parentNode;
+  var panelDrzeni  = drzeniEl.parentNode;
+
+  var elSkore  = document.getElementById('hud-skore');
+  var elUroven = document.getElementById('hud-uroven');
+  var elZbyva  = document.getElementById('hud-zbyva');
+  var elRadky  = document.getElementById('hud-radky');
+  var elRekord = document.getElementById('hud-rekord');
+
+  var elPrekryti      = document.getElementById('prekryti');
+  var elNadpis        = document.getElementById('prekryti-nadpis');
+  var elSkoreRadek    = document.getElementById('prekryti-skore');
+  var elSkoreHodnota  = document.getElementById('prekryti-skore-hodnota');
+  var elRekordHlaska  = document.getElementById('prekryti-rekord');
+  var elBtn           = document.getElementById('prekryti-btn');
+
+  var elRetez        = document.getElementById('hud-retez');
+  var elRetezStat    = document.getElementById('prekryti-retez');
+  var elRetezHodnota = document.getElementById('prekryti-retez-hodnota');
+
+  var elPad     = document.getElementById('pad');
+  var elSmazat  = document.getElementById('btn-smazat');
+  var elDuch    = document.getElementById('volba-duch');
+  var elHlaska  = document.getElementById('hlaska');
+  var elHlaskaNadpis = document.getElementById('hlaska-nadpis');
+  var elHlaskaBody   = document.getElementById('hlaska-body');
+
+  /* Barvy se čtou ze stylu, ne z konstant v JS — jinak by se paleta
+     vedla na dvou místech a mohla se rozejít. */
+  function cssVar(jmeno, zaloha) {
+    var v = getComputedStyle(document.documentElement)
+              .getPropertyValue(jmeno).trim();
+    return v || zaloha;
+  }
+
+  var BARVY = {
+    plocha: cssVar('--board',  '#0a0c10'),
+    mrizka: cssVar('--mrizka', '#191d26'),
+    I: cssVar('--kus-i', '#22d3ee'),
+    O: cssVar('--kus-o', '#eab308'),
+    T: cssVar('--kus-t', '#a855f7'),
+    S: cssVar('--kus-s', '#4ade80'),
+    Z: cssVar('--kus-z', '#ef4444'),
+    J: cssVar('--kus-j', '#3b82f6'),
+    L: cssVar('--kus-l', '#f97316')
+  };
+
+  /* ---------------------------------------------------------------
+     Úložiště: nejlepší skóre a nastavení.
+
+     Všechna volání jsou v try/catch: v privátním okně a při zakázaném
+     úložišti localStorage vyhazuje výjimku už při čtení. Hra pak běží
+     dál, jen si nic nepamatuje.
+     --------------------------------------------------------------- */
+  var KLIC_REKORD    = 'tetris:best';
+  var KLIC_NASTAVENI = 'tetris:nastaveni';
+
+  /* Duch se čte jako přepínač, ne jako libovolná hodnota: cokoli
+     jiného než uložené false znamená zapnuto. Ručně upravený nebo
+     starý záznam tak hru nerozbije. */
+  function nactiNastaveni() {
+    try {
+      var ulozene = JSON.parse(localStorage.getItem(KLIC_NASTAVENI));
+      if (ulozene && typeof ulozene === 'object') {
+        return { duch: ulozene.duch !== false };
+      }
+    } catch (e) {
+      /* poškozený nebo nepřístupný záznam — jede se na výchozím */
+    }
+    return { duch: true };
+  }
+
+  function ulozNastaveni() {
+    try {
+      localStorage.setItem(KLIC_NASTAVENI, JSON.stringify(nastaveni));
+    } catch (e) {
+      /* nevadí, volba vydrží jen do konce sezení */
+    }
+  }
+
+  function nactiRekord() {
+    try {
+      var v = parseInt(localStorage.getItem(KLIC_REKORD), 10);
+      return isFinite(v) && v > 0 ? v : 0;
+    } catch (e) {
+      return 0;
+    }
+  }
+
+  function ulozRekord(skore) {
+    try {
+      localStorage.setItem(KLIC_REKORD, String(skore));
+    } catch (e) {
+      /* nevadí, rekord vydrží jen do konce sezení */
+    }
+  }
+
+  function smazRekord() {
+    try {
+      localStorage.removeItem(KLIC_REKORD);
+    } catch (e) {
+      /* nevadí */
+    }
+  }
+
+  // Rekord i nastavení stojí mimo objekt hra schválně — restart je nesmí smazat.
+  var rekord = nactiRekord();
+  var novyRekord = false;
+  var nastaveni = nactiNastaveni();
+
+  /* ---------------------------------------------------------------
+     Stav hry — jediný zdroj pravdy. Nic jiného si stav nedrží.
+     --------------------------------------------------------------- */
+  var hra = {
+    /* deska[y][x] je null, nebo písmeno kusu, ze kterého buňka zbyla.
+       Držíme písmeno, ne barvu: barva se dohledá v BARVY a dá se
+       kdykoli změnit v CSS, aniž by se přepisovala rozehraná deska. */
+    deska: null,
+
+    /* Padající kus. x a y je levý horní roh jeho obálky na desce,
+       rot je index rotačního stavu. */
+    kus: null,
+
+    fronta: [],                  // dalších FRONTA_DELKA kusů
+    pytel: [],                   // zbytek rozdávané sedmice
+
+    /* Odložený kus a pojistka proti nekonečnému přehazování: dokud
+       se aktuální kus nezamkne, jde držení použít jen jednou. Bez
+       toho by šlo dvěma kusy točit dokola a hra by se zastavila. */
+    drzeny: null,
+    drzeniPouzito: false,
+
+    /* Byla poslední povedená akce rotace? Jen podle toho se pozná
+       T-spin — kus, který na své místo dojel posunem, se nepočítá.
+       Spolu s tím se pamatuje index kicku, kterým rotace prošla:
+       pátý kick dělá z mini plný T-spin (viz tspinTyp). */
+    posledniRotace: false,
+    posledniKick: -1,
+
+    /* Back-to-back. b2b říká, že poslední bodované smazání bylo těžké
+       a další těžké dostane bonus. delka je počet těžkých smazání
+       v aktuální řadě, max nejdelší řada za celou hru — to je jen
+       do statistiky po konci hry. */
+    b2b: false,
+    b2bDelka: 0,
+    b2bMax: 0,
+
+    skore: 0,
+    radky: 0,
+    uroven: 1,
+
+    // 'menu' | 'running' | 'paused' | 'over'
+    stav: 'menu',
+
+    padCas: 0,                   // akumulátor gravitace
+    lockCas: 0,                  // odležené milisekundy u dna
+    lockResetu: 0,               // kolikrát se časovač už nuloval
+    nejnizsi: -1                 // nejnižší řádek, na kterém kus stál
+  };
+
+  // rozměry vykreslení — patří k zobrazení, ne ke stavu hry
+  var cell = CELL_MAX;
+  var nahledCell = Math.round(CELL_MAX * NAHLED_PODIL);
+
+  // čas smyčky a stisknuté klávesy — taky mimo stav hry
+  var posledni = 0;
+  var drzeni = { vlevo: false, vpravo: false, dolu: false };
+  var dasSmer = 0;
+  var dasCas = 0;
+
+  function prazdnaDeska() {
+    var d = new Array(RADKU);
+    for (var y = 0; y < RADKU; y++) {
+      d[y] = new Array(SLOUPCU);
+      for (var x = 0; x < SLOUPCU; x++) d[y][x] = null;
+    }
+    return d;
+  }
+
+  /* ---------------------------------------------------------------
+     Generátor 7-bag.
+
+     Zamíchaná sedmice všech kusů se rozdá celá, teprve pak přijde
+     další. Čistě náhodné losování by dovolilo pětkrát za sebou S
+     a jednou za čas taky dvacet tahů bez I — s pytlem je nejdelší
+     mezera mezi dvěma stejnými kusy dvanáct tahů a hra je pro každého
+     stejně spravedlivá.
+     --------------------------------------------------------------- */
+  function novyPytel() {
+    var p = TYPY.slice();
+
+    // Fisher-Yates: každé pořadí má stejnou pravděpodobnost
+    for (var i = p.length - 1; i > 0; i--) {
+      var j = Math.floor(Math.random() * (i + 1));
+      var t = p[i];
+      p[i] = p[j];
+      p[j] = t;
+    }
+    return p;
+  }
+
+  function dalsiTyp() {
+    if (!hra.pytel.length) hra.pytel = novyPytel();
+    return hra.pytel.pop();
+  }
+
+  // Fronta je pořád plná, ať má náhled co ukazovat i na začátku hry.
+  function dopnFrontu() {
+    while (hra.fronta.length < FRONTA_DELKA) hra.fronta.push(dalsiTyp());
+  }
+
+  /* ---------------------------------------------------------------
+     Kus na desce.
+     --------------------------------------------------------------- */
+
+  // Absolutní buňky kusu. Bere se stav i pozice zvlášť, aby se dal
+  // otestovat i posun nebo rotace, která se teprve chystá.
+  function bunky(typ, rot, x, y) {
+    var stav = KUSY[typ].stavy[rot];
+    var out = new Array(4);
+
+    for (var i = 0; i < 4; i++) {
+      out[i] = { x: x + stav[i][0], y: y + stav[i][1] };
+    }
+    return out;
+  }
+
+  /* Vejde se kus na tuhle pozici? Ven z desky nesmí do stran ani pod
+     dno, na obsazenou buňku nesmí nikam. Nad horní hranu naopak smí:
+     kus se rodí ve skryté části a při rotaci u stropu se tam smí
+     vracet. */
+  function sedi(typ, rot, x, y) {
+    var b = bunky(typ, rot, x, y);
+
+    for (var i = 0; i < 4; i++) {
+      if (b[i].x < 0 || b[i].x >= SLOUPCU) return false;
+      if (b[i].y >= RADKU) return false;
+      if (b[i].y >= 0 && hra.deska[b[i].y][b[i].x]) return false;
+    }
+    return true;
+  }
+
+  /* Postaví daný kus na startovní pozici. Vrací false, když se tam
+     nevejde — to je konec hry.
+
+     Drží se odděleně od fronty, protože kus na start nedává jen
+     fronta, ale i držení. Co se nesmí nulovat, je drzeniPouzito:
+     nový kus z přihrádky se nesmí odložit znovu. */
+  function nasadKus(typ) {
+    hra.kus = { typ: typ, rot: 0, x: SPAWN_X, y: SPAWN_Y };
+    hra.padCas = 0;
+    hra.lockCas = 0;
+    hra.lockResetu = 0;
+    hra.posledniRotace = false;
+    hra.posledniKick = -1;
+    hra.nejnizsi = SPAWN_Y;
+
+    if (!sedi(typ, 0, SPAWN_X, SPAWN_Y)) return false;
+
+    // Guideline: hned po vzniku kus spadne o řádek, pokud může.
+    if (sedi(typ, 0, SPAWN_X, SPAWN_Y + 1)) hra.kus.y = SPAWN_Y + 1;
+
+    hra.nejnizsi = hra.kus.y;
+    return true;
+  }
+
+  // Nový kus z fronty.
+  function novyKus() {
+    dopnFrontu();
+
+    var typ = hra.fronta.shift();
+    dopnFrontu();
+
+    return nasadKus(typ);
+  }
+
+  /* Držení: aktuální kus jde odložit stranou a nasadit ten, co tam
+     ležel předtím. Když je přihrádka prázdná, přijde další z fronty.
+
+     Podruhé se stejným kusem to nejde — jinak by šlo dvěma kusy točit
+     dokola a nikdy nic nepoložit. Zámek pouští až zamknutí kusu. */
+  function odloz() {
+    if (!hra.kus || hra.drzeniPouzito) return false;
+
+    var odlozeny = hra.drzeny;
+
+    hra.drzeny = hra.kus.typ;
+    hra.drzeniPouzito = true;
+
+    /* I z držení se dá vyjet z hry ven: když se vrácený kus nevejde
+       na start, je konec stejně jako u kusu z fronty. */
+    if (!(odlozeny ? nasadKus(odlozeny) : novyKus())) konec();
+    return true;
+  }
+
+  // Stojí kus na dně nebo na jiném kusu?
+  function stoji() {
+    return !sedi(hra.kus.typ, hra.kus.rot, hra.kus.x, hra.kus.y + 1);
+  }
+
+  /* Kam kus dopadne, kdyby se teď pustil rovnou dolů. Slouží duchovi
+     i rychlému pádu, takže obojí ukazuje a dělá totéž — duch nemůže
+     lhát, počítá se z něj samotný pád.
+
+     Nic si nepamatuje a volá se při kreslení i při pádu, takže po
+     každém posunu i rotaci vyjde znovu a nemá jak zastarat. */
+  function dopadY() {
+    var y = hra.kus.y;
+    while (sedi(hra.kus.typ, hra.kus.rot, hra.kus.x, y + 1)) y++;
+    return y;
+  }
+
+  /* Po každém povedeném pohybu i rotaci. Dvě různé věci:
+
+     Když se kus dostal níž, než kde kdy byl, je to postup dolů —
+     počítadlo resetů se vynuluje a hráč má u nového dna zase plných
+     patnáct.
+
+     Když se jen posunul u dna, spotřebuje jeden reset. Po patnácti
+     už časovač běží dál a kus zamkne, i kdyby hráč mačkal dál. */
+  function poPohybu() {
+    if (hra.kus.y > hra.nejnizsi) {
+      hra.nejnizsi = hra.kus.y;
+      hra.lockResetu = 0;
+      hra.lockCas = 0;
+      return;
+    }
+
+    if (stoji() && hra.lockResetu < LOCK_RESETU_MAX) {
+      hra.lockResetu++;
+      hra.lockCas = 0;
+    }
+  }
+
+  function posun(dx, dy) {
+    if (!hra.kus) return false;
+    if (!sedi(hra.kus.typ, hra.kus.rot, hra.kus.x + dx, hra.kus.y + dy)) return false;
+
+    hra.kus.x += dx;
+    hra.kus.y += dy;
+    hra.posledniRotace = false;    // posunem se T-spin ztrácí
+    poPohybu();
+    return true;
+  }
+
+  /* Rotace s wall kicky. Projde se pět posunů z tabulky pro daný
+     přechod a bere se první, se kterým se kus vejde; když neprojde
+     ani jeden, rotace se neprovede a kus zůstane, jak byl.
+
+     Tady je to jediné místo, kde se otáčí znaménko svislé složky:
+     v tabulce míří +y nahoru, na desce dolů. */
+  function otoc(smer) {
+    if (!hra.kus) return false;
+
+    var kus = hra.kus;
+    var rot = (kus.rot + smer + 4) % 4;
+    var seznam = kicky(kus.typ, kus.rot, rot);
+
+    for (var i = 0; i < seznam.length; i++) {
+      var dx = seznam[i][0];
+      var dy = -seznam[i][1];
+
+      if (!sedi(kus.typ, rot, kus.x + dx, kus.y + dy)) continue;
+
+      kus.rot = rot;
+      kus.x += dx;
+      kus.y += dy;
+      hra.posledniRotace = true;
+      hra.posledniKick = i;        // pátý kick má vliv na T-spin, viz tspinTyp
+      poPohybu();
+      return true;
+    }
+
+    return false;
+  }
+
+  /* ---------------------------------------------------------------
+     T-spin.
+
+     Poznává se ze dvou věcí naráz: poslední povedená akce musí být
+     rotace (kus, který na místo dojel posunem, se nepočítá) a kolem
+     středu T musí být obsazené aspoň tři ze čtyř rohů. Zeď a dno se
+     počítají jako obsazené — o zeď se dá kus zapřít stejně jako
+     o jiný kus. Nad horní hranou desky je naopak volno, tam žádná
+     zeď není.
+
+     Střed T je prostřední buňka obálky 3×3, rohy jsou její čtyři
+     úhlopříční sousedé. Žádný z nich není buňkou samotného T, takže
+     se dají číst rovnou z desky.
+     --------------------------------------------------------------- */
+  var ROHY = [[0, 0], [2, 0], [0, 2], [2, 2]];   // LH, PH, LD, PD
+
+  /* Index posledního kicku v tabulce. Pátý (tedy index 4) posune kus
+     o sloupec do strany a o dva řádky dolů — jinam než do pořádně
+     zakroucené díry se s ním kus nedostane, takže se takové zamknutí
+     počítá jako plný T-spin bez ohledu na rohy. */
+  var KICK_PATY = 4;
+
+  /* Přední rohy jsou ty dva, kam se dívá špička T. Když jsou obsazené
+     oba, je to plný T-spin; když jen jeden, mini. */
+  var PREDNI_ROHY = [
+    [0, 1],   // stav 0: špička nahoru  -> oba horní
+    [1, 3],   // stav R: doprava        -> oba pravé
+    [2, 3],   // stav 2: dolů           -> oba dolní
+    [0, 2]    // stav L: doleva         -> oba levé
+  ];
+
+  function rohObsazen(x, y) {
+    if (x < 0 || x >= SLOUPCU || y >= RADKU) return true;   // zeď a dno
+    if (y < 0) return false;                                // nad deskou je volno
+    return !!hra.deska[y][x];
+  }
+
+  // Vrací 'plny', 'mini', nebo null.
+  function tspinTyp() {
+    var kus = hra.kus;
+    if (!kus || kus.typ !== 'T' || !hra.posledniRotace) return null;
+
+    var obsazene = [];
+    var pocet = 0;
+
+    for (var i = 0; i < 4; i++) {
+      obsazene[i] = rohObsazen(kus.x + ROHY[i][0], kus.y + ROHY[i][1]);
+      if (obsazene[i]) pocet++;
+    }
+
+    if (pocet < 3) return null;
+
+    // Pátý kick dělá z mini plný T-spin, ať jsou rohy jakékoli.
+    if (hra.posledniKick === KICK_PATY) return 'plny';
+
+    var predni = PREDNI_ROHY[kus.rot];
+    return obsazene[predni[0]] && obsazene[predni[1]] ? 'plny' : 'mini';
+  }
+
+  /* ---------------------------------------------------------------
+     Zamknutí kusu a mazání řádků.
+     --------------------------------------------------------------- */
+  function zamkni() {
+    // Ještě než kus přibude na desku: rohy se čtou k pozici, kde stojí.
+    var tspin = tspinTyp();
+
+    var b = bunky(hra.kus.typ, hra.kus.rot, hra.kus.x, hra.kus.y);
+    var i;
+
+    for (i = 0; i < 4; i++) {
+      if (b[i].y >= 0) hra.deska[b[i].y][b[i].x] = hra.kus.typ;
+    }
+
+    smazPlneRadky(tspin);
+
+    // Zámek držení pouští až položený kus — o to v tom pravidle jde.
+    hra.drzeniPouzito = false;
+
+    if (!novyKus()) konec();
+  }
+
+  /* Plné řádky zmizí a všechno nad nimi spadne. Jde se odspodu
+     nahoru a plné řádky se prostě nekopírují — o kolik řádků se
+     spadlo, o tolik se liší cílový index od zdrojového. Řeší to
+     i řádky, které nejsou vedle sebe. */
+  function smazPlneRadky(tspin) {
+    var cil = RADKU - 1;
+    var pocet = 0;
+    var y, x;
+
+    for (y = RADKU - 1; y >= 0; y--) {
+      var plny = true;
+      for (x = 0; x < SLOUPCU; x++) {
+        if (!hra.deska[y][x]) { plny = false; break; }
+      }
+
+      if (plny) {
+        pocet++;
+      } else {
+        if (cil !== y) hra.deska[cil] = hra.deska[y];
+        cil--;
+      }
+    }
+
+    // Nahoře se o smazané řádky doplní prázdné.
+    for (y = cil; y >= 0; y--) {
+      hra.deska[y] = new Array(SLOUPCU);
+      for (x = 0; x < SLOUPCU; x++) hra.deska[y][x] = null;
+    }
+
+    // Bez řádků a bez T-spinu není co počítat ani co hlásit.
+    if (!pocet && !tspin) return;
+
+    /* Těžké smazání: tetris, nebo T-spin, po kterém zmizel řádek.
+       Bonus platí, když těžké přijde na těžké — proto se čte b2b
+       ještě před tím, než ho tohle smazání přepíše. */
+    var tezke = pocet === 4 || (!!tspin && pocet > 0);
+    var retez = tezke && hra.b2b;
+
+    var body = sazba(tspin, pocet) * hra.uroven;
+
+    // Guideline zaokrouhluje dolů; při násobiteli 1,5 na to sice nedojde,
+    // ale ať se skóre nikdy nestane desetinným.
+    if (retez) body = Math.floor(body * B2B_NASOBITEL);
+
+    /* Řetěz drží jen těžká smazání. Obyčejné ho utne, smazání nula
+       řádků na něj nesahá — položený kus sám o sobě řetěz nepřerušuje,
+       takže se dá mezi dvěma tetrisy normálně stavět. */
+    if (tezke) {
+      hra.b2b = true;
+      hra.b2bDelka++;
+      if (hra.b2bDelka > hra.b2bMax) hra.b2bMax = hra.b2bDelka;
+    } else if (pocet > 0) {
+      hra.b2b = false;
+      hra.b2bDelka = 0;
+    }
+
+    hra.skore += body;
+    hra.radky += pocet;
+
+    /* Úroveň se počítá z celkového počtu řádků, ne přičítáním po
+       desítkách: jedna čtveřice může přehoupnout rovnou přes hranici
+       a přičítání by o skok přišlo. */
+    hra.uroven = Math.floor(hra.radky / RADKU_NA_UROVEN) + 1;
+
+    if (tspin) ukazHlasku(tspin, body, retez);
+  }
+
+  /* Sazba za jeden zámek, ještě bez úrovně a bez řetězu. T-spin má
+     vlastní tabulku, mini svoji; mini s víc řádky, než na kolik je
+     tabulka stavěná, spadne na běžnou sazbu, ať se za víc řádků
+     neplatí míň. */
+  function sazba(tspin, pocet) {
+    if (tspin === 'plny') return BODY_TSPIN[pocet];
+    if (tspin === 'mini' && pocet < BODY_TSPIN_MINI.length) {
+      return BODY_TSPIN_MINI[pocet];
+    }
+    return BODY_ZA_RADKY[pocet];
+  }
+
+  /* Rychlý pád: kus spadne až na dno a zamkne se okamžitě, bez lock
+     delay. To je celý smysl — hráč tím říká, že o doladění nestojí. */
+  function rychlyPad() {
+    var cil = dopadY();
+    var radku = cil - hra.kus.y;
+
+    hra.kus.y = cil;
+
+    /* Rotace se ztrácí jen tehdy, když kus opravdu klesl. Zapadlý
+       T-spin se rychlým pádem nezruší — kus už níž nemůže, takže
+       stisk mezerníku jen uspíší zámek. */
+    if (radku > 0) hra.posledniRotace = false;
+
+    hra.skore += radku * BODY_HARD;
+    zamkni();
+  }
+
+  /* ---------------------------------------------------------------
+     Rychlost pádu podle Guideline:
+
+         (0,8 − (úroveň − 1) × 0,007) ^ (úroveň − 1)  vteřin na řádek
+
+     Na první úrovni je to vteřina na řádek, na páté 355 ms, na desáté
+     64 ms a na patnácté 7 ms. Mocnina, ne lineární ubývání: to je
+     zpočátku nudné a kolem deváté úrovně spadne do nehratelna.
+
+     Výš než na UROVEN_RYCHLOST_MAX se nezrychluje — pád už je kratší
+     než snímek a hru drží jen lock delay, který zůstává na 500 ms
+     na všech úrovních.
+     --------------------------------------------------------------- */
+  function padIntervalProUroven(uroven) {
+    var u = Math.min(uroven, UROVEN_RYCHLOST_MAX) - 1;
+    return Math.pow(0.8 - u * 0.007, u) * 1000;
+  }
+
+  function padInterval() {
+    return padIntervalProUroven(hra.uroven);
+  }
+
+  /* Kolik řádků chybí do další úrovně. Počítá se ze zbytku po dělení,
+     ne z rozdílu proti hranici — po přeskočení hranice čtveřicí
+     najednou tak vyjde správně i tak. */
+  function zbyvaDoUrovne() {
+    return RADKU_NA_UROVEN - (hra.radky % RADKU_NA_UROVEN);
+  }
+
+  // Měkký pád je podle Guideline dvacetkrát rychlejší než gravitace.
+  function krokInterval() {
+    var zaklad = padInterval();
+    return drzeni.dolu ? zaklad / 20 : zaklad;
+  }
+
+  /* ---------------------------------------------------------------
+     Jeden snímek logiky. Jen mění stav, nic nekreslí.
+     --------------------------------------------------------------- */
+  function krok(dt) {
+    posunPodleDrzeni(dt);
+
+    var interval = krokInterval();
+
+    hra.padCas += dt;
+    while (hra.padCas >= interval) {
+      hra.padCas -= interval;
+
+      if (!posun(0, 1)) {
+        /* Kus stojí. Akumulátor se nuluje, aby po odjetí zdola
+           nepřišlo několik pádů naráz — o zbytek se stará lock delay
+           níž. */
+        hra.padCas = 0;
+        break;
+      }
+
+      if (drzeni.dolu) hra.skore += BODY_SOFT;
+    }
+
+    /* Lock delay. Časovač běží jen tehdy, když kus na něčem stojí;
+       jakmile se pod ním uvolní místo (třeba posunem do strany nad
+       díru), zahodí se a kus zase padá. */
+    if (stoji()) {
+      hra.lockCas += dt;
+      if (hra.lockCas >= LOCK_MS) zamkni();
+    } else {
+      hra.lockCas = 0;
+    }
+  }
+
+  /* Automatické opakování posunu. První krok udělal už stisk, tady
+     se řeší jen držení: po DAS_MS se kus posouvá každých ARR_MS.
+
+     Odečítá se ARR_MS, ne DAS_MS — po prvním opakování tak zbývá do
+     dalšího jen perioda, ne celá prodleva. */
+  function posunPodleDrzeni(dt) {
+    var smer = 0;
+    if (drzeni.vlevo && !drzeni.vpravo) smer = -1;
+    if (drzeni.vpravo && !drzeni.vlevo) smer = 1;
+
+    // Změna směru (i na žádný) začíná odznova, ať se stisky nesčítají.
+    if (smer !== dasSmer) {
+      dasSmer = smer;
+      dasCas = 0;
+      return;
+    }
+
+    if (!smer || !hra.kus) return;
+
+    dasCas += dt;
+    while (dasCas >= DAS_MS) {
+      dasCas -= ARR_MS;
+      if (!posun(smer, 0)) {
+        // U zdi nemá smysl zkoušet víckrát za snímek
+        dasCas = DAS_MS;
+        break;
+      }
+    }
+  }
+
+  /* ---------------------------------------------------------------
+     Přechody stavů.
+     --------------------------------------------------------------- */
+  function novaHra() {
+    hra.deska = prazdnaDeska();
+    hra.pytel = [];
+    hra.fronta = [];
+    hra.skore = 0;
+    hra.radky = 0;
+    hra.uroven = 1;
+    hra.padCas = 0;
+    hra.lockCas = 0;
+    hra.lockResetu = 0;
+    hra.drzeny = null;
+    hra.drzeniPouzito = false;
+    hra.posledniRotace = false;
+    hra.posledniKick = -1;
+    hra.b2b = false;
+    hra.b2bDelka = 0;
+    hra.b2bMax = 0;
+
+    novyRekord = false;
+    pustKlavesy();
+    skryjHlasku();
+
+    dopnFrontu();
+    novyKus();
+
+    hra.stav = 'running';
+  }
+
+  function pauza() {
+    if (hra.stav !== 'running') return;
+    hra.stav = 'paused';
+    pustKlavesy();
+  }
+
+  function pokracuj() {
+    if (hra.stav !== 'paused') return;
+    hra.stav = 'running';
+  }
+
+  function konec() {
+    hra.stav = 'over';
+    pustKlavesy();
+
+    if (hra.skore > rekord) {
+      rekord = hra.skore;
+      novyRekord = true;
+      ulozRekord(rekord);
+    }
+  }
+
+  /* Po každé změně stavu se drženo nic nepočítá. Bez toho by šipka
+     držená ve chvíli konce hry rozjela nový kus hned po restartu. */
+  function pustKlavesy() {
+    drzeni.vlevo = false;
+    drzeni.vpravo = false;
+    drzeni.dolu = false;
+    dasSmer = 0;
+    dasCas = 0;
+    oznacDrzena();
+  }
+
+  // Tlačítko v překrytí dělá to, co zrovna dává smysl.
+  function hlavniAkce() {
+    if (hra.stav === 'paused') pokracuj();
+    else novaHra();
+  }
+
+  /* ---------------------------------------------------------------
+     Rozměry plátna.
+
+     Šířku si dělí deska s náhledem: náhled je čtyři buňky široký
+     a jeho buňka je zlomek herní, takže dohromady jde o pevný poměr
+     a stačí jedno dělení. Rám, mezera a výplň panelu se měří, ne
+     hádají — jinak by se čísla v JS musela držet v souladu s CSS.
+
+     Canvas má dvojí rozměr: atributy width/height jsou v zařízených
+     pixelech (CSS rozměr * devicePixelRatio), CSS width/height v CSS
+     pixelech. ctx.scale(dpr, dpr) pak vrátí souřadnice do CSS pixelů,
+     takže kreslení o devicePixelRatio nemusí vědět.
+     --------------------------------------------------------------- */
+  // Výplň a rám prvku vodorovně — všechno, co v něm zabírá jeho obsah.
+  function vodorovnaVypln(el) {
+    var s = getComputedStyle(el);
+    return (parseFloat(s.paddingLeft)     || 0) +
+           (parseFloat(s.paddingRight)    || 0) +
+           (parseFloat(s.borderLeftWidth) || 0) +
+           (parseFloat(s.borderRightWidth) || 0);
+  }
+
+  function prizpusob() {
+    var dpr = window.devicePixelRatio || 1;
+
+    // Rám kolem plochy má vlastní šířku (border). Kdyby se nezapočetl,
+    // je obal o 2 px širší než kontejner a stránka vodorovně přeteče.
+    var ramecek = obal.offsetWidth - obal.clientWidth;
+
+    /* Co v řádku zabírají oba panely mimo svá plátna, plus dvě mezery.
+       Čte se ze stylu, ne z offsetWidth: šířka panelu závisí na plátnu,
+       které se teprve chystáme přenastavit, takže by se rozpočet
+       počítal ze starých čísel. */
+    var mezera = parseFloat(getComputedStyle(radek).columnGap) || 0;
+    var panelRam = vodorovnaVypln(panel) + vodorovnaVypln(panelDrzeni);
+
+    var sirka = main.clientWidth - ramecek - 2 * mezera - panelRam;
+
+    /* Výškový rozpočet: okno bez hlavičky nad plochou a bez toho, co
+       je pod ní. Hlavička se měří od začátku dokumentu, ne od okraje
+       okna — s getBoundingClientRect().top by se po odscrollování
+       rozpočet nafoukl a plocha by rostla sama od sebe. */
+    var hlavicka = obal.getBoundingClientRect().top -
+                   document.documentElement.getBoundingClientRect().top;
+    var podPlochou = hraEl.getBoundingClientRect().bottom -
+                     obal.getBoundingClientRect().bottom;
+    var vyska = window.innerHeight - hlavicka - podPlochou - REZERVA - ramecek;
+
+    /* Buňka je celé číslo CSS pixelů, aby mřížka padla na pixely.
+       Šířku si dělí deska a dvě čtyřbuňková plátna po stranách —
+       držení vlevo, fronta vpravo. */
+    cell = Math.floor(Math.min(sirka / (SLOUPCU + 2 * 4 * NAHLED_PODIL),
+                               vyska / VIDITELNE));
+
+    if (cell < CELL_MIN) cell = CELL_MIN;
+    if (cell > CELL_MAX) cell = CELL_MAX;
+
+    nahledCell = Math.max(6, Math.round(cell * NAHLED_PODIL));
+
+    /* Plátno má rozměr přesně na mřížku — ani o pixel víc, jinak by
+       vedle ní zůstal nepokreslený pruh. */
+    var plochaSirka = SLOUPCU * cell;
+    var plochaVyska = VIDITELNE * cell;
+
+    canvas.style.width  = plochaSirka + 'px';
+    canvas.style.height = plochaVyska + 'px';
+    canvas.width  = Math.round(plochaSirka * dpr);
+    canvas.height = Math.round(plochaVyska * dpr);
+
+    // nastavení width/height transformaci resetuje, škálujeme načisto
+    ctx.setTransform(1, 0, 0, 1, 0, 0);
+    ctx.scale(dpr, dpr);
+
+    /* Náhled: každý kus dostane pole 4 × 3 buňky. Tři řádky proto, že
+       kusy jsou nejvýš dva vysoké a třetí řádek dělá mezeru, aby na
+       sebe sousední kusy nenavazovaly. */
+    var nSirka = 4 * nahledCell;
+    var nVyska = FRONTA_DELKA * 3 * nahledCell;
+
+    nahled.style.width  = nSirka + 'px';
+    nahled.style.height = nVyska + 'px';
+    nahled.width  = Math.round(nSirka * dpr);
+    nahled.height = Math.round(nVyska * dpr);
+
+    nctx.setTransform(1, 0, 0, 1, 0, 0);
+    nctx.scale(dpr, dpr);
+
+    // Držení: jedno stejné pole jako pro kus ve frontě.
+    var dVyska = 3 * nahledCell;
+
+    drzeniEl.style.width  = nSirka + 'px';
+    drzeniEl.style.height = dVyska + 'px';
+    drzeniEl.width  = Math.round(nSirka * dpr);
+    drzeniEl.height = Math.round(dVyska * dpr);
+
+    dctx.setTransform(1, 0, 0, 1, 0, 0);
+    dctx.scale(dpr, dpr);
+  }
+
+  /* Resize i otočení telefonu. Debounce, protože při tažení okna
+     přijdou desítky událostí a po orientationchange bývá innerHeight
+     ještě chvíli stará. Hned po přepočtu překreslíme aktuální stav,
+     ať plocha neproblikne prázdná — nastavení width/height ji smaže. */
+  var casovacResize = null;
+
+  function naZmenuOkna() {
+    if (casovacResize) clearTimeout(casovacResize);
+    casovacResize = setTimeout(function () {
+      casovacResize = null;
+      prizpusob();
+      draw();
+    }, 120);
+  }
+
+  window.addEventListener('resize', naZmenuOkna);
+  window.addEventListener('orientationchange', naZmenuOkna);
+
+  /* ---------------------------------------------------------------
+     Kreslení.
+     --------------------------------------------------------------- */
+  function zaobleny(c, x, y, w, h, r) {
+    c.beginPath();
+    if (c.roundRect) {
+      c.roundRect(x, y, w, h, r);
+    } else {
+      c.rect(x, y, w, h);          // starší prohlížeče: ostré rohy
+    }
+  }
+
+  /* Jedna kostka. Souřadnice jsou v pixelech, ne v buňkách — stejná
+     funkce kreslí desku i náhled, každý s jinou velikostí buňky. */
+  function kostka(c, px, py, velikost, barva) {
+    var mezera = Math.max(1, Math.round(velikost * 0.07));
+    var strana = velikost - 2 * mezera;
+
+    zaobleny(c, px + mezera, py + mezera, strana, strana, velikost * 0.18);
+    c.fillStyle = barva;
+    c.fill();
+
+    /* Světlejší proužek u horní hrany. Dává kostce objem, takže je
+       poznat, kde jedna končí a druhá začíná, i když leží vedle sebe
+       dvě stejně barevné. */
+    zaobleny(c, px + mezera, py + mezera, strana, strana * 0.32,
+             velikost * 0.18);
+    c.fillStyle = 'rgba(255, 255, 255, 0.22)';
+    c.fill();
+  }
+
+  function draw() {
+    /* Pozadí kreslíme přes celé plátno v zařízených pixelech, ne jen
+       přes mřížku v CSS pixelech: po zaokrouhlení width/height na celé
+       zařízené pixely může plátno o zlomek pixelu přesahovat a ten by
+       jinak zůstal průhledný. */
+    ctx.save();
+    ctx.setTransform(1, 0, 0, 1, 0, 0);
+    ctx.fillStyle = BARVY.plocha;
+    ctx.fillRect(0, 0, canvas.width, canvas.height);
+    ctx.restore();
+
+    var x, y;
+
+    /* Mřížka prázdné desky. Kreslí se jako obrysy buněk, ne jako síť
+       čar — díky tomu má stejné odsazení jako kostky a řádky pod
+       sebou nesplývají. */
+    ctx.strokeStyle = BARVY.mrizka;
+    ctx.lineWidth = 1;
+    for (y = 0; y < VIDITELNE; y++) {
+      for (x = 0; x < SLOUPCU; x++) {
+        // půl pixelu, ať čára padne na pixel a nerozmaže se
+        ctx.strokeRect(x * cell + 0.5, y * cell + 0.5, cell - 1, cell - 1);
+      }
+    }
+
+    // Zamknuté kostky. Skrytá část se nekreslí, začíná se na SKRYTE.
+    for (y = SKRYTE; y < RADKU; y++) {
+      for (x = 0; x < SLOUPCU; x++) {
+        var typ = hra.deska[y][x];
+        if (typ) kostka(ctx, x * cell, (y - SKRYTE) * cell, cell, BARVY[typ]);
+      }
+    }
+
+    // Padající kus. Po konci hry se nekreslí — leží mimo desku.
+    if (hra.kus && hra.stav !== 'over') {
+      /* Duch napřed, pod kus: když kus na svém dopadu už stojí, má
+         být vidět kus, ne obrys kolem něj. */
+      if (nastaveni.duch) nakresliDucha();
+
+      var b = bunky(hra.kus.typ, hra.kus.rot, hra.kus.x, hra.kus.y);
+      for (var i = 0; i < 4; i++) {
+        if (b[i].y < SKRYTE) continue;      // ta část je ještě nad plochou
+        kostka(ctx, b[i].x * cell, (b[i].y - SKRYTE) * cell, cell,
+               BARVY[hra.kus.typ]);
+      }
+    }
+  }
+
+  /* Duch: obrys na místě, kam kus dopadne. Jen obrys v barvě kusu,
+     ne vyplněná kostka — plný tvar by se pletl s tím, co na desce
+     opravdu leží. Cíl se počítá tady, takže je vždycky čerstvý. */
+  function nakresliDucha() {
+    var cil = dopadY();
+    if (cil === hra.kus.y) return;    // kus na svém dopadu už stojí
+
+    var b = bunky(hra.kus.typ, hra.kus.rot, hra.kus.x, cil);
+    var mezera = Math.max(1, Math.round(cell * 0.07));
+    var carka = Math.max(1, Math.round(cell * 0.08));
+    var odsazeni = mezera + carka / 2;
+
+    ctx.strokeStyle = BARVY[hra.kus.typ];
+    ctx.lineWidth = carka;
+    ctx.globalAlpha = 0.45;
+
+    for (var i = 0; i < 4; i++) {
+      if (b[i].y < SKRYTE) continue;
+
+      zaobleny(ctx,
+               b[i].x * cell + odsazeni,
+               (b[i].y - SKRYTE) * cell + odsazeni,
+               cell - 2 * odsazeni, cell - 2 * odsazeni,
+               cell * 0.18);
+      ctx.stroke();
+    }
+
+    ctx.globalAlpha = 1;
+  }
+
+  /* Kus v náhledovém poli 4 × 3 buňky. Kreslí se ve výchozím stavu
+     a centruje podle skutečně obsazených buněk, ne podle obálky:
+     I i O mají obálku 4×4, ale kostky jen v její části, takže by
+     jinak visely mimo střed.
+
+     Stejná funkce obsluhuje frontu i přihrádku držení — liší se jen
+     plátnem, svislým posunem pole a průsvitem. */
+  function nahledovyKus(c, typ, poleY, prusvit) {
+    var stav = KUSY[typ].stavy[0];
+    var minX = 4, maxX = 0, minY = 4, maxY = 0;
+    var j;
+
+    for (j = 0; j < 4; j++) {
+      if (stav[j][0] < minX) minX = stav[j][0];
+      if (stav[j][0] > maxX) maxX = stav[j][0];
+      if (stav[j][1] < minY) minY = stav[j][1];
+      if (stav[j][1] > maxY) maxY = stav[j][1];
+    }
+
+    var poleVyska = 3 * nahledCell;
+    var sirkaKusu = (maxX - minX + 1) * nahledCell;
+    var vyskaKusu = (maxY - minY + 1) * nahledCell;
+    var posunX = (4 * nahledCell - sirkaKusu) / 2 - minX * nahledCell;
+    var posunY = poleY + (poleVyska - vyskaKusu) / 2 - minY * nahledCell;
+
+    c.globalAlpha = prusvit;
+
+    for (j = 0; j < 4; j++) {
+      kostka(c,
+             posunX + stav[j][0] * nahledCell,
+             posunY + stav[j][1] * nahledCell,
+             nahledCell, BARVY[typ]);
+    }
+
+    c.globalAlpha = 1;
+  }
+
+  function vycisti(c, platno) {
+    c.save();
+    c.setTransform(1, 0, 0, 1, 0, 0);
+    c.clearRect(0, 0, platno.width, platno.height);
+    c.restore();
+  }
+
+  function drawFronta() {
+    vycisti(nctx, nahled);
+
+    for (var i = 0; i < hra.fronta.length && i < FRONTA_DELKA; i++) {
+      nahledovyKus(nctx, hra.fronta[i], i * 3 * nahledCell, 1);
+    }
+  }
+
+  /* Odložený kus. Po použití držení se vykreslí zeslabeně: je vidět,
+     co v přihrádce leží, i to, že se s ním do zámku už nedá hnout. */
+  function drawDrzeni() {
+    vycisti(dctx, drzeniEl);
+
+    if (!hra.drzeny) return;
+    nahledovyKus(dctx, hra.drzeny, 0, hra.drzeniPouzito ? 0.35 : 1);
+  }
+
+  /* ---------------------------------------------------------------
+     HUD a překrytí. Do DOMu saháme jen při skutečné změně, ne
+     šedesátkrát za vteřinu.
+     --------------------------------------------------------------- */
+  var ui = { skore: -1, uroven: -1, radky: -1, rekord: -1, stav: '',
+             fronta: '', drzeni: '', b2b: null };
+
+  /* Texty překrytí podle stavu. Běžící hra v tabulce není — tam se
+     překrytí schovává. */
+  var PREKRYTI = {
+    menu:   { nadpis: 'Tetris',    btn: 'Hrát',       skore: false },
+    paused: { nadpis: 'Pauza',     btn: 'Pokračovat', skore: true },
+    over:   { nadpis: 'Konec hry', btn: 'Hrát znovu', skore: true }
+  };
+
+  function drawUI() {
+    if (hra.skore !== ui.skore) {
+      ui.skore = hra.skore;
+      elSkore.textContent = hra.skore;
+    }
+    if (hra.uroven !== ui.uroven) {
+      ui.uroven = hra.uroven;
+      elUroven.textContent = hra.uroven;
+    }
+    /* Zbytek do další úrovně visí na počtu řádků, takže se přepisuje
+       spolu s ním — vlastní porovnání by bylo navíc. */
+    if (hra.radky !== ui.radky) {
+      ui.radky = hra.radky;
+      elRadky.textContent = hra.radky;
+      elZbyva.textContent = zbyvaDoUrovne();
+    }
+    if (rekord !== ui.rekord) {
+      ui.rekord = rekord;
+      elRekord.textContent = rekord;
+    }
+    if (hra.b2b !== ui.b2b) {
+      ui.b2b = hra.b2b;
+      elRetez.classList.toggle('je-videt', hra.b2b);
+    }
+
+    // Fronta se překresluje jen když se skutečně změnila.
+    var otisk = hra.fronta.join('');
+    if (otisk !== ui.fronta) {
+      ui.fronta = otisk;
+      drawFronta();
+    }
+
+    /* Do otisku držení patří i to, jestli je zámek spotřebovaný —
+       kus se pak kreslí zeslabeně, takže je to změna obrazu. */
+    var otiskD = (hra.drzeny || '-') + (hra.drzeniPouzito ? '!' : '');
+    if (otiskD !== ui.drzeni) {
+      ui.drzeni = otiskD;
+      drawDrzeni();
+    }
+
+    if (hra.stav === ui.stav) return;
+    ui.stav = hra.stav;
+
+    var p = PREKRYTI[hra.stav];
+
+    if (!p) {
+      elPrekryti.classList.remove('je-videt');
+      return;
+    }
+
+    elNadpis.textContent = p.nadpis;
+    elBtn.textContent = p.btn;
+
+    elSkoreRadek.classList.toggle('je-skryte', !p.skore);
+    if (p.skore) elSkoreHodnota.textContent = hra.skore;
+
+    /* Nejdelší řetěz se ukáže, jen když nějaký byl — tedy když po sobě
+       přišla aspoň dvě těžká smazání. Jedno samo o sobě řetěz není. */
+    var meloRetez = p.skore && hra.b2bMax >= 2;
+    elRetezStat.classList.toggle('je-skryte', !meloRetez);
+    if (meloRetez) elRetezHodnota.textContent = hra.b2bMax;
+
+    elRekordHlaska.classList.toggle('je-skryte',
+                                    !(hra.stav === 'over' && novyRekord));
+
+    elPrekryti.classList.add('je-videt');
+  }
+
+  /* ---------------------------------------------------------------
+     Hláška o T-spinu.
+
+     Vyskočí nad deskou a sama zmizí. Vlastní časovač, ne herní čas:
+     hlásí se výsledek jednoho zámku, takže na pauze ani na rychlosti
+     pádu nezáleží.
+     --------------------------------------------------------------- */
+  var HLASKA_MS = 1400;
+  var casovacHlasky = null;
+
+  function ukazHlasku(tspin, body, retez) {
+    elHlaskaNadpis.textContent = tspin === 'mini' ? 'Mini T-spin' : 'T-spin';
+
+    /* K bodům se píše i to, že je zvedl řetěz — jinak by hráč viděl
+       jen divné číslo a nevěděl, odkud se vzalo. */
+    elHlaskaBody.textContent = body
+      ? '+' + body + (retez ? '  ·  řetěz ×1,5' : '')
+      : '';
+    elHlaskaBody.classList.toggle('je-skryte', !body);
+
+    /* Třída se sundá a hned vrátí, aby animace naskočila znovu i při
+       dvou T-spinech těsně po sobě. Vynucené přečtení offsetWidth
+       mezi tím není zbytečné: bez něj prohlížeč obě změny sloučí
+       a animace se nerestartuje. */
+    elHlaska.classList.remove('je-videt');
+    void elHlaska.offsetWidth;
+    elHlaska.classList.add('je-videt');
+
+    if (casovacHlasky) clearTimeout(casovacHlasky);
+    casovacHlasky = setTimeout(skryjHlasku, HLASKA_MS);
+  }
+
+  function skryjHlasku() {
+    if (casovacHlasky) clearTimeout(casovacHlasky);
+    casovacHlasky = null;
+    elHlaska.classList.remove('je-videt');
+  }
+
+  /* ---------------------------------------------------------------
+     Nastavení: zatím jen duch.
+     --------------------------------------------------------------- */
+  function oznacDucha() {
+    elDuch.setAttribute('aria-pressed', nastaveni.duch ? 'true' : 'false');
+    elDuch.textContent = nastaveni.duch ? 'Zapnutý' : 'Vypnutý';
+  }
+
+  elDuch.addEventListener('click', function () {
+    nastaveni.duch = !nastaveni.duch;
+    ulozNastaveni();
+    oznacDucha();
+  });
+
+  oznacDucha();
+
+  /* ---------------------------------------------------------------
+     Ovládání.
+     --------------------------------------------------------------- */
+
+  // Klávesy, které by jinak posunuly stránkou.
+  var NESCROLLOVAT = {
+    arrowleft: true, arrowright: true, arrowup: true, arrowdown: true,
+    ' ': true
+  };
+
+  window.addEventListener('keydown', function (e) {
+    var key = e.key.toLowerCase();
+
+    if (NESCROLLOVAT[key]) e.preventDefault();
+
+    /* Opakování z operačního systému zahazujeme: posun do stran si
+       řídí hra sama (DAS/ARR výš) a u rotace ani rychlého pádu se
+       opakovat nemá vůbec. */
+    if (e.repeat) return;
+
+    if (key === 'p' || key === 'escape') {
+      if (hra.stav === 'running') pauza();
+      else if (hra.stav === 'paused') pokracuj();
+      return;
+    }
+
+    if (hra.stav !== 'running') {
+      // Enter i mezerník rozjedou hru ze všech klidových stavů.
+      if (key === 'enter' || key === ' ') hlavniAkce();
+      return;
+    }
+
+    switch (key) {
+      case 'arrowleft':
+      case 'a':
+        drzeni.vlevo = true;
+        posun(-1, 0);
+        break;
+
+      case 'arrowright':
+      case 'd':
+        drzeni.vpravo = true;
+        posun(1, 0);
+        break;
+
+      case 'arrowdown':
+      case 's':
+        /* Měkký pád nezačíná krokem, jen zrychlí gravitaci. Akumulátor
+           se nuluje, aby kus neuskočil o řádek hned při stisku. */
+        drzeni.dolu = true;
+        hra.padCas = 0;
+        break;
+
+      case 'arrowup':
+      case 'x':
+      case 'w':
+        otoc(1);
+        break;
+
+      case 'z':
+      case 'control':
+        otoc(-1);
+        break;
+
+      case ' ':
+        rychlyPad();
+        break;
+
+      case 'c':
+      case 'shift':
+        odloz();
+        break;
+    }
+
+    oznacDrzena();
+  });
+
+  window.addEventListener('keyup', function (e) {
+    var key = e.key.toLowerCase();
+
+    if (key === 'arrowleft'  || key === 'a') drzeni.vlevo = false;
+    if (key === 'arrowright' || key === 'd') drzeni.vpravo = false;
+    if (key === 'arrowdown'  || key === 's') drzeni.dolu = false;
+
+    oznacDrzena();
+  });
+
+  /* Když okno ztratí zaměření, přestanou chodit keyup události
+     a klávesa by zůstala „držená“ napořád. */
+  window.addEventListener('blur', pustKlavesy);
+
+  elBtn.addEventListener('click', hlavniAkce);
+
+  elSmazat.addEventListener('click', function () {
+    smazRekord();
+    rekord = 0;
+    novyRekord = false;
+    ui.stav = '';     // ať překrytí přepíše i hlášku o rekordu
+  });
+
+  /* Dotyková tlačítka. Posun a měkký pád se dají držet — sahají do
+     stejného objektu drzeni jako klávesnice, takže opakování řeší
+     jedno místo pro obojí. Zbytek jsou jednorázové akce. */
+  var padDrzitelne = { vlevo: 'vlevo', vpravo: 'vpravo', dolu: 'dolu' };
+
+  Array.prototype.forEach.call(
+    elPad.querySelectorAll('.pad__btn'),
+    function (btn) {
+      var akce = btn.getAttribute('data-akce');
+
+      btn.addEventListener('pointerdown', function (e) {
+        e.preventDefault();
+        if (hra.stav !== 'running') return;
+
+        if (padDrzitelne[akce]) {
+          drzeni[padDrzitelne[akce]] = true;
+
+          if (akce === 'vlevo')  posun(-1, 0);
+          if (akce === 'vpravo') posun(1, 0);
+          if (akce === 'dolu')   hra.padCas = 0;
+        } else if (akce === 'rot-vlevo') {
+          otoc(-1);
+        } else if (akce === 'rot-vpravo') {
+          otoc(1);
+        } else if (akce === 'pad') {
+          rychlyPad();
+        } else if (akce === 'drzet') {
+          odloz();
+        }
+
+        oznacDrzena();
+      });
+
+      /* pointerup i pointercancel: když prst sjede z tlačítka nebo
+         systém gesto sebere, drženo musí skončit stejně jako při
+         normálním zvednutí. */
+      function pusti(e) {
+        e.preventDefault();
+        if (padDrzitelne[akce]) {
+          drzeni[padDrzitelne[akce]] = false;
+          oznacDrzena();
+        }
+      }
+
+      btn.addEventListener('pointerup', pusti);
+      btn.addEventListener('pointercancel', pusti);
+      btn.addEventListener('pointerleave', pusti);
+    }
+  );
+
+  // Zvýraznění držených tlačítek. Klávesnice je ovládá stejně jako prst.
+  function oznacDrzena() {
+    Array.prototype.forEach.call(
+      elPad.querySelectorAll('.pad__btn'),
+      function (btn) {
+        var klic = padDrzitelne[btn.getAttribute('data-akce')];
+        btn.classList.toggle('je-drzene', !!klic && drzeni[klic]);
+      }
+    );
+  }
+
+  /* ---------------------------------------------------------------
+     Smyčka: rAF s akumulátorem času. Rychlost hry tak nezávisí na
+     obnovovací frekvenci displeje. Skok v čase po uspání karty
+     ořízneme, aby kus neproletěl deset řádků naráz.
+     --------------------------------------------------------------- */
+  function frame(now) {
+    requestAnimationFrame(frame);
+
+    if (!posledni) posledni = now;
+    var dt = now - posledni;
+    posledni = now;
+    if (dt > 250) dt = 250;
+
+    if (hra.stav === 'running') krok(dt);
+
+    draw();
+    drawUI();
+  }
+
+  /* Kontrola křivky zrychlování z konzole: tetrisRychlosti() vypíše
+     čas pádu na řádek po úrovních. Nevolá se samo — do konzole při
+     každém načtení hry nic patřit nemá. */
+  window.tetrisRychlosti = function (do_) {
+    var radky = [];
+    for (var u = 1; u <= (do_ || 20); u++) {
+      radky.push({
+        'úroveň': u,
+        'ms na řádek': Math.round(padIntervalProUroven(u) * 100) / 100,
+        'lock delay [ms]': LOCK_MS
+      });
+    }
+    console.table(radky);
+    return radky;
+  };
+
+  hra.deska = prazdnaDeska();
+  dopnFrontu();
+
+  prizpusob();
+  requestAnimationFrame(frame);
+})();
+</script>
+</body>
+</html>
