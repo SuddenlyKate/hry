@@ -19,46 +19,84 @@
     <main>
       <nav class="grid" aria-label="Seznam her">
 
+        <!-- Popisek je jedna věta a zbytek nesou štítky pod ním:
+             rozcestník má nalákat, vysvětluje až samotná hra. -->
         <a class="card" href="had/">
           <h2 class="card__title">Had</h2>
-          <p class="card__desc">Sbírej jídlo, rosť a nenaraz
-             do sebe ani do zdi.</p>
+          <p class="card__desc">Sbírej jídlo, rosť a nenaraz do sebe ani do zdi.</p>
+          <p class="card__stitky">
+            <span class="card__tag">10 módů</span>
+            <span class="card__tag">rekordy</span>
+          </p>
         </a>
 
         <a class="card" href="miny/">
           <h2 class="card__title">Miny</h2>
-          <p class="card__desc">Odkryj všechna pole, pod kterými
-             mina není.</p>
+          <p class="card__desc">Odkryj všechna pole, pod kterými mina není.</p>
+          <p class="card__stitky">
+            <span class="card__tag">čtverce i šestiúhelníky</span>
+            <span class="card__tag">časovka</span>
+          </p>
         </a>
 
         <a class="card" href="sudoku/">
           <h2 class="card__title">Sudoku</h2>
-          <p class="card__desc">Doplň čísla tak, aby se žádné
-             neopakovalo v řádku, sloupci ani ve čtverci.</p>
+          <p class="card__desc">Doplň čísla tak, aby se v řádku, sloupci
+             ani ve čtverci neopakovala.</p>
+          <p class="card__stitky">
+            <span class="card__tag">4 obtížnosti</span>
+            <span class="card__tag">poznámky</span>
+          </p>
         </a>
 
         <a class="card" href="piskvorky/">
           <h2 class="card__title">Piškvorky</h2>
-          <p class="card__desc">Proti počítači, nebo ve dvou u jednoho
-             zařízení. Srovnej řadu dřív než protihráč.</p>
+          <p class="card__desc">Srovnej řadu dřív než protihráč.</p>
+          <p class="card__stitky">
+            <span class="card__tag">proti AI</span>
+            <span class="card__tag">3×3 až 15×15</span>
+          </p>
         </a>
 
         <a class="card" href="sachy/">
           <h2 class="card__title">Šachy</h2>
-          <p class="card__desc">Partie pro dva u jednoho zařízení,
-             se zápisem tahů a se všemi pravidly včetně rošády,
-             braní mimochodem a proměny pěšce.</p>
+          <p class="card__desc">Kompletní pravidla, zápis partie a rozbor po dohrání.</p>
+          <p class="card__stitky">
+            <span class="card__tag">proti AI</span>
+            <span class="card__tag">otvírací kniha</span>
+            <span class="card__tag">rozbor</span>
+          </p>
         </a>
 
-        <!-- Není to hra, tak to má štítek. Do mřížky patří i tak:
-             je to další věc, která se v prohlížeči otevře a hraje si
-             s ní. -->
+        <a class="card" href="tetris/">
+          <h2 class="card__title">Tetris</h2>
+          <p class="card__desc">Skládej padající kostky do plných řádků.</p>
+          <p class="card__stitky">
+            <span class="card__tag">duch a držení</span>
+            <span class="card__tag">T-spiny</span>
+          </p>
+        </a>
+
+        <a class="card" href="sokoban/">
+          <h2 class="card__title">Sokoban</h2>
+          <p class="card__desc">Rozvez bedny na jejich místa. Tlačit jdou, táhnout ne.</p>
+          <p class="card__stitky">
+            <span class="card__tag">10 úrovní</span>
+            <span class="card__tag">krok zpět</span>
+          </p>
+        </a>
+
+        <!-- Není to hra, tak má první štítek jinou barvu. Do mřížky
+             patří i tak: je to další věc, která se v prohlížeči otevře
+             a hraje si s ní. -->
         <a class="card" href="mat/">
           <h2 class="card__title">Matematika</h2>
-          <p class="card__desc">Dvacet interaktivních vizualizací —
-             od goniometrie a limit po Fourierovy řady, lineární
-             algebru a 3D plochy.</p>
-          <span class="card__tag">nástroj</span>
+          <p class="card__desc">Interaktivní vizualizace od goniometrie
+             po Fourierovy řady.</p>
+          <p class="card__stitky">
+            <span class="card__tag card__tag--nastroj">nástroj</span>
+            <span class="card__tag">17 vizualizací</span>
+          </p>
         </a>
 
       </nav>
